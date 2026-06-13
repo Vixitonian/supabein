@@ -5,11 +5,12 @@ RewriteEngine On
 # Block direct access to sensitive backend directories
 RewriteRule ^(app|config|storage|vendor)(/.*)? - [F,NC,L]
 
-# sites/ is served directly by Apache (has its own hardening .htaccess)
-# No rewrite — paths like /sites/p5/current/index.html resolve straight from disk
+# sites/ is the hosting plane — served directly by Apache (has its own hardening .htaccess)
 RewriteRule ^sites(/.*)?$ - [L]
 
-# Route everything else through public_html/
-# This lets you point the server document root at the repo root
-# instead of the public_html/ subdirectory.
+# Redirect the bare root to the dashboard SPA
+RewriteRule ^$ /dashboard/ [R=302,L]
+
+# Internally rewrite everything else through public_html/
+# Subdomain doc root = repo root; this makes public_html/ act as the real web root.
 RewriteRule ^(.*)$ public_html/$1 [L,QSA]
