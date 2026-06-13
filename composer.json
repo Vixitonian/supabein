@@ -1,0 +1,15 @@
+{
+    "name": "supabein/supabein",
+    "description": "Self-hosted BaaS + static frontend host on PHP/MySQL",
+    "type": "project",
+    "require": {
+        "php": ">=8.0",
+        "firebase/php-jwt": "^6.9"
+    },
+    "autoload": {
+        "classmap": ["app/"]
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}

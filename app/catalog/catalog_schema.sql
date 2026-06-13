@@ -1,0 +1,90 @@
+-- SupaBein Control Plane Schema
+-- Run this once against your MySQL/MariaDB database.
+
+SET NAMES utf8mb4;
+SET foreign_key_checks = 0;
+
+CREATE TABLE IF NOT EXISTS `users` (
+    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `email`         VARCHAR(255) NOT NULL,
+    `password_hash` VARCHAR(255) NOT NULL,
+    `role`          ENUM('owner','member') NOT NULL DEFAULT 'owner',
+    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY `uq_email` (`email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `projects` (
+    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `owner_user_id` INT UNSIGNED NOT NULL,
+    `name`          VARCHAR(128) NOT NULL,
+    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_owner_name` (`owner_user_id`, `name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `project_tables` (
+    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`    INT UNSIGNED NOT NULL,
+    `table_name`    VARCHAR(64) NOT NULL,
+    `physical_name` VARCHAR(64) NOT NULL,
+    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_proj_logical` (`project_id`, `table_name`),
+    UNIQUE KEY `uq_physical` (`physical_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `project_columns` (
+    `id`               INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_table_id` INT UNSIGNED NOT NULL,
+    `col_name`         VARCHAR(64) NOT NULL,
+    `data_type`        VARCHAR(32) NOT NULL,
+    `nullable`         TINYINT(1) NOT NULL DEFAULT 1,
+    `default_val`      VARCHAR(255) DEFAULT NULL,
+    `col_order`        SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    FOREIGN KEY (`project_table_id`) REFERENCES `project_tables`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_col` (`project_table_id`, `col_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `project_policies` (
+    `id`               INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_table_id` INT UNSIGNED NOT NULL,
+    `api_role`         VARCHAR(64) NOT NULL,
+    `operation`        ENUM('SELECT','INSERT','UPDATE','DELETE') NOT NULL,
+    `allowed`          TINYINT(1) NOT NULL DEFAULT 0,
+    `constraint_sql`   TEXT DEFAULT NULL,
+    FOREIGN KEY (`project_table_id`) REFERENCES `project_tables`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_policy` (`project_table_id`, `api_role`, `operation`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `migrations` (
+    `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id` INT UNSIGNED NOT NULL,
+    `statement`  TEXT NOT NULL,
+    `applied_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `sites` (
+    `id`                INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`        INT UNSIGNED NOT NULL,
+    `subdomain`         VARCHAR(63) NOT NULL,
+    `custom_domain`     VARCHAR(255) DEFAULT NULL,
+    `current_deploy_id` INT UNSIGNED DEFAULT NULL,
+    `spa_mode`          TINYINT(1) NOT NULL DEFAULT 0,
+    `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_subdomain` (`subdomain`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `deploys` (
+    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `site_id`       INT UNSIGNED NOT NULL,
+    `version_label` VARCHAR(128) NOT NULL,
+    `path`          VARCHAR(512) NOT NULL DEFAULT '',
+    `status`        ENUM('pending','processing','ready','failed') NOT NULL DEFAULT 'pending',
+    `size_bytes`    BIGINT UNSIGNED DEFAULT 0,
+    `uploaded_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+SET foreign_key_checks = 1;
