@@ -9,8 +9,9 @@ A self-hosted Backend-as-a-Service + static frontend host built on PHP and MySQL
 - cPanel shared hosting (or any Apache + PHP 8.0+ + MySQL/MariaDB server)
 - PHP 8.0 or higher with extensions: `pdo_mysql`, `zip`, `fileinfo`
 - MySQL 5.7+ or MariaDB 10.3+
-- Composer (for installing PHP dependencies)
 - Apache with `mod_rewrite` enabled and `AllowOverride All`
+
+> **No Composer needed.** The `vendor/` directory is included in the repository.
 
 ---
 
@@ -25,13 +26,9 @@ git clone https://github.com/Vixitonian/supabein.git /home/youruser/supabein
 cd /home/youruser/supabein
 ```
 
-### 2. Install PHP dependencies
+All PHP dependencies are bundled in `vendor/` — no Composer step needed.
 
-```bash
-composer install --no-dev --optimize-autoloader
-```
-
-### 3. Create the database
+### 2. Create the database
 
 In cPanel → MySQL Databases (or via the MySQL CLI):
 
