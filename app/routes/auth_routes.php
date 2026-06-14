@@ -13,26 +13,40 @@ function register_auth_routes(\SupaBein\Router $router): void
         $email    = trim($req['body']['email'] ?? '');
         $password = $req['body']['password'] ?? '';
 
+        sb_log('signup', 'Attempt', ['email' => $email ?: '(empty)']);
+
         if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            sb_log('signup', 'FAIL invalid email', ['email' => $email]);
             abort(422, 'Invalid email address');
         }
         if (strlen($password) < 8) {
+            sb_log('signup', 'FAIL password too short', ['email' => $email, 'len' => strlen($password)]);
             abort(422, 'Password must be at least 8 characters');
         }
 
-        $pdo = App::get('db');
-        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ?');
-        $stmt->execute([$email]);
-        if ($stmt->fetch()) {
-            abort(409, 'Email already registered');
+        sb_log('signup', 'Validation passed, checking DB', ['email' => $email]);
+
+        try {
+            $pdo = App::get('db');
+            $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ?');
+            $stmt->execute([$email]);
+            if ($stmt->fetch()) {
+                sb_log('signup', 'FAIL email already registered', ['email' => $email]);
+                abort(409, 'Email already registered');
+            }
+
+            $hash = password_hash($password, PASSWORD_BCRYPT);
+            $stmt = $pdo->prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)');
+            $stmt->execute([$email, $hash]);
+            $userId = (int)$pdo->lastInsertId();
+
+            sb_log('signup', 'OK user created', ['email' => $email, 'user_id' => $userId]);
+            json_out(['token' => issue_jwt($userId, $email, 'owner')], 201);
+
+        } catch (\PDOException $e) {
+            sb_log('signup', 'DB ERROR ' . $e->getMessage(), ['email' => $email, 'code' => $e->getCode()]);
+            abort(500, 'Database error during signup');
         }
-
-        $hash = password_hash($password, PASSWORD_BCRYPT);
-        $stmt = $pdo->prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)');
-        $stmt->execute([$email, $hash]);
-        $userId = (int)$pdo->lastInsertId();
-
-        json_out(['token' => issue_jwt($userId, $email, 'owner')], 201);
     });
 
     // POST /v1/auth/login
@@ -40,20 +54,35 @@ function register_auth_routes(\SupaBein\Router $router): void
         $email    = trim($req['body']['email'] ?? '');
         $password = $req['body']['password'] ?? '';
 
+        sb_log('login', 'Attempt', ['email' => $email ?: '(empty)']);
+
         if (!$email || !$password) {
+            sb_log('login', 'FAIL missing email or password');
             abort(422, 'Email and password are required');
         }
 
-        $pdo = App::get('db');
-        $stmt = $pdo->prepare('SELECT id, password_hash, role FROM users WHERE email = ?');
-        $stmt->execute([$email]);
-        $user = $stmt->fetch();
+        try {
+            $pdo = App::get('db');
+            $stmt = $pdo->prepare('SELECT id, password_hash, role FROM users WHERE email = ?');
+            $stmt->execute([$email]);
+            $user = $stmt->fetch();
 
-        if (!$user || !password_verify($password, $user['password_hash'])) {
-            abort(401, 'Invalid credentials');
+            if (!$user) {
+                sb_log('login', 'FAIL user not found', ['email' => $email]);
+                abort(401, 'Invalid credentials');
+            }
+            if (!password_verify($password, $user['password_hash'])) {
+                sb_log('login', 'FAIL wrong password', ['email' => $email]);
+                abort(401, 'Invalid credentials');
+            }
+
+            sb_log('login', 'OK', ['email' => $email, 'user_id' => $user['id'], 'role' => $user['role']]);
+            json_out(['token' => issue_jwt((int)$user['id'], $email, $user['role'])]);
+
+        } catch (\PDOException $e) {
+            sb_log('login', 'DB ERROR ' . $e->getMessage(), ['email' => $email, 'code' => $e->getCode()]);
+            abort(500, 'Database error during login');
         }
-
-        json_out(['token' => issue_jwt((int)$user['id'], $email, $user['role'])]);
     });
 
     // GET /v1/auth/me

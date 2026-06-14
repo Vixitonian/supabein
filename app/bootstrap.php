@@ -21,6 +21,7 @@ try {
         ]
     );
 } catch (PDOException $e) {
+    error_log('[SUPABEIN] [bootstrap] DB CONNECTION FAILED: ' . $e->getMessage());
     http_response_code(503);
     header('Content-Type: application/json');
     echo json_encode(['error' => 'Database unavailable']);
@@ -69,4 +70,14 @@ function json_out(mixed $data, int $status = 200): never
     http_response_code($status);
     echo json_encode($data);
     exit;
+}
+
+/**
+ * Write a structured log line to PHP's error log.
+ * Format: [SUPABEIN] [context] message {key:val, ...}
+ */
+function sb_log(string $context, string $message, array $data = []): void
+{
+    $extra = $data ? ' ' . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '';
+    error_log('[SUPABEIN] [' . $context . '] ' . $message . $extra);
 }
