@@ -5,13 +5,14 @@ RewriteEngine On
 # Block direct access to sensitive backend directories
 RewriteRule ^(app|config|storage|vendor)(/.*)? - [F,NC,L]
 
-# sites/ is the hosting plane — served directly by Apache (has its own hardening .htaccess)
+# sites/ is the hosting plane — served directly by Apache
 RewriteRule ^sites(/.*)?$ - [L]
 
 # Redirect the bare root to the dashboard SPA
 RewriteRule ^$ /dashboard/ [R=302,L]
 
-# Internally rewrite everything else through public_html/
-# The condition prevents re-rewriting on Apache's second pass (avoids public_html/public_html/... loop).
-RewriteCond %{REQUEST_URI} !^/public_html/ [NC]
-RewriteRule ^(.*)$ public_html/$1 [L,QSA]
+# Rewrite everything through public_html/.
+# On Apache's second pass after an internal rewrite, REWRITING becomes
+# REDIRECT_REWRITING — that condition breaks the loop.
+RewriteCond %{ENV:REDIRECT_REWRITING} !1
+RewriteRule ^(.*)$ public_html/$1 [L,QSA,E=REWRITING:1]
