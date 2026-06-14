@@ -296,9 +296,9 @@ function showNewProjectModal() {
   `);
 
   const modalEl = overlay.firstElementChild;
-  overlay.querySelector('#cancel').addEventListener('click', () => modalEl.remove());
-  overlay.querySelector('#create').addEventListener('click', async () => {
-    const name = overlay.querySelector('#proj-name').value.trim();
+  modalEl.querySelector('#cancel').addEventListener('click', () => modalEl.remove());
+  modalEl.querySelector('#create').addEventListener('click', async () => {
+    const name = modalEl.querySelector('#proj-name').value.trim();
     if (!name) return;
     try {
       await Api.post('/v1/projects', { name });
@@ -403,9 +403,9 @@ function showNewTableModal(projectId) {
     </div>
   `);
   const modalElT = overlay.firstElementChild;
-  overlay.querySelector('#cancel').addEventListener('click', () => modalElT.remove());
-  overlay.querySelector('#create').addEventListener('click', async () => {
-    const name = overlay.querySelector('#tname').value.trim();
+  modalElT.querySelector('#cancel').addEventListener('click', () => modalElT.remove());
+  modalElT.querySelector('#create').addEventListener('click', async () => {
+    const name = modalElT.querySelector('#tname').value.trim();
     if (!name) return;
     try {
       await Api.post(`/v1/projects/${projectId}/tables`, { name });
@@ -690,10 +690,10 @@ function showNewSiteModal(projectId) {
     </div>
   `);
   const modalElS = overlay.firstElementChild;
-  overlay.querySelector('#cancel').addEventListener('click', () => modalElS.remove());
-  overlay.querySelector('#create').addEventListener('click', async () => {
-    const subdomain = overlay.querySelector('#subdomain').value.trim();
-    const spa_mode  = overlay.querySelector('#spa-mode').checked;
+  modalElS.querySelector('#cancel').addEventListener('click', () => modalElS.remove());
+  modalElS.querySelector('#create').addEventListener('click', async () => {
+    const subdomain = modalElS.querySelector('#subdomain').value.trim();
+    const spa_mode  = modalElS.querySelector('#spa-mode').checked;
     if (!subdomain) return;
     try {
       await Api.post(`/v1/projects/${projectId}/sites`, { subdomain, spa_mode });
