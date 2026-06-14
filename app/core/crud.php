@@ -13,7 +13,7 @@ class Crud
     private static function resolve(int $projectId, string $logicalName, ?array $auth, string $operation): array
     {
         $catalog = Catalog::getInstance();
-        $pdo     = App::get('db');
+        $pdo     = \App::get('db');
 
         $table = $catalog->getTable($projectId, $logicalName);
         if (!$table) {
@@ -60,7 +60,7 @@ class Crud
             $offset
         );
 
-        $pdo  = App::get('db');
+        $pdo  = \App::get('db');
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         $rows = $stmt->fetchAll();
@@ -85,7 +85,7 @@ class Crud
             $policy->constraint
         );
 
-        $pdo  = App::get('db');
+        $pdo  = \App::get('db');
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         $row  = $stmt->fetch();
@@ -116,7 +116,7 @@ class Crud
             abort(422, $e->getMessage());
         }
 
-        $pdo = App::get('db');
+        $pdo = \App::get('db');
         $pdo->prepare($sql)->execute($params);
         $newId = (int)$pdo->lastInsertId();
 
@@ -147,7 +147,7 @@ class Crud
             abort(422, $e->getMessage());
         }
 
-        $pdo  = App::get('db');
+        $pdo  = \App::get('db');
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
 
@@ -176,7 +176,7 @@ class Crud
             $policy->constraint
         );
 
-        $pdo  = App::get('db');
+        $pdo  = \App::get('db');
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
 

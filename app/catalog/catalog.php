@@ -17,7 +17,7 @@ class Catalog
     public static function getInstance(): self
     {
         if (self::$instance === null) {
-            self::$instance = new self(App::get('db'));
+            self::$instance = new self(\App::get('db'));
         }
         return self::$instance;
     }

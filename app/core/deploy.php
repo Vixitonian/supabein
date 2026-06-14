@@ -33,9 +33,9 @@ class Deploy
 
     public static function upload(array $req): void
     {
-        $config    = App::get('config');
+        $config    = \App::get('config');
         $catalog   = Catalog::getInstance();
-        $pdo       = App::get('db');
+        $pdo       = \App::get('db');
         $projectId = (int)$req['params']['project_id'];
         $siteId    = (int)$req['params']['site_id'];
 
@@ -175,7 +175,7 @@ class Deploy
 
     public static function rollback(array $req): void
     {
-        $config    = App::get('config');
+        $config    = \App::get('config');
         $catalog   = Catalog::getInstance();
         $projectId = (int)$req['params']['project_id'];
         $siteId    = (int)$req['params']['site_id'];
