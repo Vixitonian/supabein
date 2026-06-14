@@ -8,11 +8,5 @@ RewriteRule ^(app|config|storage|vendor)(/.*)? - [F,NC,L]
 # sites/ is the hosting plane — served directly by Apache
 RewriteRule ^sites(/.*)?$ - [L]
 
-# Redirect the bare root to the dashboard SPA
+# Redirect bare root to the dashboard SPA
 RewriteRule ^$ /dashboard/ [R=302,L]
-
-# Rewrite everything through public_html/.
-# On Apache's second pass after an internal rewrite, REWRITING becomes
-# REDIRECT_REWRITING — that condition breaks the loop.
-RewriteCond %{ENV:REDIRECT_REWRITING} !1
-RewriteRule ^(.*)$ public_html/$1 [L,QSA,E=REWRITING:1]

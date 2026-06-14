@@ -1,5 +1,0 @@
-Options -Indexes
-
-# Block direct web access to backend directories
-RewriteEngine On
-RewriteRule ^(app|config|storage|vendor)(/|$) - [F,L]
