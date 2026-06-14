@@ -11,6 +11,7 @@ function register_deploy_routes(\SupaBein\Router $router): void
         if (!$project) {
             abort(404, 'Project not found');
         }
+        $project['id'] = (int)$project['id'];
         return $project;
     };
 

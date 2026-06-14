@@ -12,6 +12,7 @@ function register_table_routes(\SupaBein\Router $router): void
         if (!$project) {
             abort(404, 'Project not found');
         }
+        $project['id'] = (int)$project['id'];
         return $project;
     };
 
@@ -21,6 +22,8 @@ function register_table_routes(\SupaBein\Router $router): void
         if (!$table) {
             abort(404, 'Table not found');
         }
+        $table['id']         = (int)$table['id'];
+        $table['project_id'] = (int)$table['project_id'];
         return $table;
     };
 
@@ -77,12 +80,12 @@ function register_table_routes(\SupaBein\Router $router): void
             $pdo = \App::get('db');
             $ddl = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
             sb_log('table_create', 'Applying DDL', ['ddl' => $ddl]);
-            \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
+            \SupaBein\Schema::applyDDL($pdo, (int)$project['id'], $ddl);
             sb_log('table_create', 'OK', ['physical' => $table['physical_name']]);
         } catch (\Throwable $e) {
             sb_log('table_create', 'FAIL DDL: ' . $e->getMessage(), ['physical' => $table['physical_name']]);
             // Roll back the catalog entry since DDL failed
-            $catalog->deleteTable($project['id'], $tableName);
+            $catalog->deleteTable((int)$project['id'], $tableName);
             abort(500, 'Failed to create table in database: ' . $e->getMessage());
         }
 
@@ -97,9 +100,9 @@ function register_table_routes(\SupaBein\Router $router): void
     // DELETE /v1/projects/:id/tables/:name
     $router->delete('/v1/projects/:id/tables/:name', function (array $req) use ($catalog, $ownProject, $ownTable): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $table   = $ownTable($project['id'], $req['params']['name']);
+        $table   = $ownTable((int)$project['id'], $req['params']['name']);
 
-        $pdo = App::get('db');
+        $pdo = \App::get('db');
         $ddl = \SupaBein\Schema::dropTableDDL($table['physical_name']);
         \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
 
@@ -110,14 +113,14 @@ function register_table_routes(\SupaBein\Router $router): void
     // GET /v1/projects/:id/tables/:name/columns
     $router->get('/v1/projects/:id/tables/:name/columns', function (array $req) use ($catalog, $ownProject, $ownTable): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $table   = $ownTable($project['id'], $req['params']['name']);
+        $table   = $ownTable((int)$project['id'], $req['params']['name']);
         json_out($catalog->listColumns($table['id']));
     }, ['auth_middleware']);
 
     // POST /v1/projects/:id/tables/:name/columns
     $router->post('/v1/projects/:id/tables/:name/columns', function (array $req) use ($catalog, $ownProject, $ownTable): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $table   = $ownTable($project['id'], $req['params']['name']);
+        $table   = $ownTable((int)$project['id'], $req['params']['name']);
 
         $colName  = $req['body']['name'] ?? '';
         $dataType = $req['body']['type'] ?? '';
@@ -131,7 +134,7 @@ function register_table_routes(\SupaBein\Router $router): void
             abort(422, $e->getMessage());
         }
 
-        $pdo = App::get('db');
+        $pdo = \App::get('db');
         $ddl = \SupaBein\Schema::addColumnDDL($table['physical_name'], [
             'name' => $colName, 'type' => $dataType, 'nullable' => $nullable, 'default' => $default,
         ]);
@@ -152,7 +155,7 @@ function register_table_routes(\SupaBein\Router $router): void
     // DELETE /v1/projects/:id/tables/:name/columns/:col
     $router->delete('/v1/projects/:id/tables/:name/columns/:col', function (array $req) use ($catalog, $ownProject, $ownTable): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $table   = $ownTable($project['id'], $req['params']['name']);
+        $table   = $ownTable((int)$project['id'], $req['params']['name']);
         $colName = $req['params']['col'];
 
         try {
@@ -165,7 +168,7 @@ function register_table_routes(\SupaBein\Router $router): void
             abort(404, 'Column not found');
         }
 
-        $pdo = App::get('db');
+        $pdo = \App::get('db');
         $ddl = \SupaBein\Schema::dropColumnDDL($table['physical_name'], $colName);
         \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
         $catalog->deleteColumn($table['id'], $colName);
@@ -176,7 +179,7 @@ function register_table_routes(\SupaBein\Router $router): void
     // GET /v1/projects/:id/tables/:name/policies
     $router->get('/v1/projects/:id/tables/:name/policies', function (array $req) use ($catalog, $ownProject, $ownTable): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $table   = $ownTable($project['id'], $req['params']['name']);
+        $table   = $ownTable((int)$project['id'], $req['params']['name']);
         json_out($catalog->listPolicies($table['id']));
     }, ['auth_middleware']);
 
