@@ -25,6 +25,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 $method = $_SERVER['REQUEST_METHOD'];
 $uri    = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
+// Strip the /api prefix — REQUEST_URI is /api/v1/... but routes are registered as /v1/...
+$scriptDir = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/'); // e.g. '/api'
+if ($scriptDir && str_starts_with($uri, $scriptDir)) {
+    $uri = substr($uri, strlen($scriptDir)) ?: '/';
+}
+
 $rawHeaders = [];
 foreach ($_SERVER as $k => $v) {
     if (str_starts_with($k, 'HTTP_')) {
