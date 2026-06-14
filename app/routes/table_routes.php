@@ -36,9 +36,12 @@ function register_table_routes(\SupaBein\Router $router): void
         $project   = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
         $tableName = trim($req['body']['name'] ?? '');
 
+        sb_log('table_create', 'Attempt', ['project_id' => $project['id'], 'name' => $tableName ?: '(empty)']);
+
         try {
             \SupaBein\Schema::validateIdentifier($tableName);
         } catch (\InvalidArgumentException $e) {
+            sb_log('table_create', 'FAIL validation', ['name' => $tableName, 'error' => $e->getMessage()]);
             abort(422, $e->getMessage());
         }
 
@@ -61,15 +64,27 @@ function register_table_routes(\SupaBein\Router $router): void
         try {
             $table = $catalog->createTable($project['id'], $tableName);
         } catch (\PDOException $e) {
+            sb_log('table_create', 'FAIL catalog insert: ' . $e->getMessage(), ['project_id' => $project['id'], 'name' => $tableName]);
             if (str_contains($e->getMessage(), 'Duplicate')) {
                 abort(409, 'A table with this name already exists in the project');
             }
-            throw $e;
+            abort(500, 'Failed to register table: ' . $e->getMessage());
         }
 
-        $pdo = App::get('db');
-        $ddl = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
-        \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
+        sb_log('table_create', 'Catalog entry created', ['table_id' => $table['id'], 'physical' => $table['physical_name']]);
+
+        try {
+            $pdo = \App::get('db');
+            $ddl = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
+            sb_log('table_create', 'Applying DDL', ['ddl' => $ddl]);
+            \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
+            sb_log('table_create', 'OK', ['physical' => $table['physical_name']]);
+        } catch (\Throwable $e) {
+            sb_log('table_create', 'FAIL DDL: ' . $e->getMessage(), ['physical' => $table['physical_name']]);
+            // Roll back the catalog entry since DDL failed
+            $catalog->deleteTable($project['id'], $tableName);
+            abort(500, 'Failed to create table in database: ' . $e->getMessage());
+        }
 
         // Record user-defined columns in catalog
         foreach ($columns as $col) {
