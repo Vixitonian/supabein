@@ -84,5 +84,5 @@ try {
     $router->dispatch($request);
 } catch (Throwable $e) {
     error_log('[SupaBein] ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
-    abort(500);
+    abort(500, $e->getMessage() . ' in ' . basename($e->getFile()) . ':' . $e->getLine());
 }
