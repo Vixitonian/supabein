@@ -59,7 +59,9 @@ const Api = (() => {
     const json = await res.json().catch(() => ({}));
 
     if (!res.ok) {
-      throw new ApiError(json.error || 'Request failed', res.status);
+      const err = new ApiError(json.error || 'Request failed', res.status);
+      console.error('[SupaBein] API error', { method, path, status: res.status, message: err.message });
+      throw err;
     }
 
     return json;
@@ -305,6 +307,7 @@ function showNewProjectModal() {
       modalEl.remove();
       renderProjects();
     } catch (e) {
+      console.error('[SupaBein] Create project failed', e);
       alert(e.message);
     }
   });
@@ -411,7 +414,7 @@ function showNewTableModal(projectId) {
       await Api.post(`/v1/projects/${projectId}/tables`, { name });
       modalElT.remove();
       renderTables({ id: projectId });
-    } catch (e) { alert(e.message); }
+    } catch (e) { console.error('[SupaBein] Create table failed', e); alert(e.message); }
   });
   document.body.appendChild(modalElT);
 }
@@ -699,7 +702,7 @@ function showNewSiteModal(projectId) {
       await Api.post(`/v1/projects/${projectId}/sites`, { subdomain, spa_mode });
       modalElS.remove();
       renderSites({ id: projectId });
-    } catch (e) { alert(e.message); }
+    } catch (e) { console.error('[SupaBein] Create site failed', e); alert(e.message); }
   });
   document.body.appendChild(modalElS);
 }
