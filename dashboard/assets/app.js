@@ -295,20 +295,21 @@ function showNewProjectModal() {
     </div>
   `);
 
-  overlay.querySelector('#cancel').addEventListener('click', () => overlay.firstChild.remove());
+  const modalEl = overlay.firstChild;
+  overlay.querySelector('#cancel').addEventListener('click', () => modalEl.remove());
   overlay.querySelector('#create').addEventListener('click', async () => {
     const name = overlay.querySelector('#proj-name').value.trim();
     if (!name) return;
     try {
       await Api.post('/v1/projects', { name });
-      document.getElementById('new-project-modal').remove();
+      modalEl.remove();
       renderProjects();
     } catch (e) {
       alert(e.message);
     }
   });
 
-  document.body.appendChild(overlay.firstChild);
+  document.body.appendChild(modalEl);
 }
 
 // Project overview
@@ -401,17 +402,18 @@ function showNewTableModal(projectId) {
       </div>
     </div>
   `);
-  overlay.querySelector('#cancel').addEventListener('click', () => overlay.firstChild.remove());
+  const modalElT = overlay.firstChild;
+  overlay.querySelector('#cancel').addEventListener('click', () => modalElT.remove());
   overlay.querySelector('#create').addEventListener('click', async () => {
     const name = overlay.querySelector('#tname').value.trim();
     if (!name) return;
     try {
       await Api.post(`/v1/projects/${projectId}/tables`, { name });
-      overlay.firstChild.remove();
+      modalElT.remove();
       renderTables({ id: projectId });
     } catch (e) { alert(e.message); }
   });
-  document.body.appendChild(overlay.firstChild);
+  document.body.appendChild(modalElT);
 }
 
 // Table editor: columns + rows + policies
@@ -687,18 +689,19 @@ function showNewSiteModal(projectId) {
       </div>
     </div>
   `);
-  overlay.querySelector('#cancel').addEventListener('click', () => overlay.firstChild.remove());
+  const modalElS = overlay.firstChild;
+  overlay.querySelector('#cancel').addEventListener('click', () => modalElS.remove());
   overlay.querySelector('#create').addEventListener('click', async () => {
     const subdomain = overlay.querySelector('#subdomain').value.trim();
     const spa_mode  = overlay.querySelector('#spa-mode').checked;
     if (!subdomain) return;
     try {
       await Api.post(`/v1/projects/${projectId}/sites`, { subdomain, spa_mode });
-      overlay.firstChild.remove();
+      modalElS.remove();
       renderSites({ id: projectId });
     } catch (e) { alert(e.message); }
   });
-  document.body.appendChild(overlay.firstChild);
+  document.body.appendChild(modalElS);
 }
 
 // Site manager — deploy history + upload
