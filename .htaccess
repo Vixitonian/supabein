@@ -12,5 +12,6 @@ RewriteRule ^sites(/.*)?$ - [L]
 RewriteRule ^$ /dashboard/ [R=302,L]
 
 # Internally rewrite everything else through public_html/
-# Subdomain doc root = repo root; this makes public_html/ act as the real web root.
+# The condition prevents re-rewriting on Apache's second pass (avoids public_html/public_html/... loop).
+RewriteCond %{REQUEST_URI} !^/public_html/ [NC]
 RewriteRule ^(.*)$ public_html/$1 [L,QSA]
