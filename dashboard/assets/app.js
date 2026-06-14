@@ -73,6 +73,7 @@ const Api = (() => {
   }
 
   return {
+    BASE,
     get:    (path)       => request('GET',    path),
     post:   (path, data) => request('POST',   path, data),
     patch:  (path, data) => request('PATCH',  path, data),
@@ -212,11 +213,18 @@ function renderSignup() {
   form.querySelector('#submit').addEventListener('click', async () => {
     const email    = form.querySelector('#email').value;
     const password = form.querySelector('#password').value;
+
+    console.log('[SupaBein] Signup button clicked', { email, passwordLen: password.length });
+    console.log('[SupaBein] POST URL:', Api.BASE + '/v1/auth/signup');
+
     try {
+      console.log('[SupaBein] Sending signup request...');
       const res = await Api.post('/v1/auth/signup', { email, password });
+      console.log('[SupaBein] Signup success', res);
       Auth.setToken(res.token);
       Router.navigate('/projects');
     } catch (e) {
+      console.error('[SupaBein] Signup failed', { status: e.status, message: e.message });
       showAlert(form.querySelector('.auth-box'), e.message);
     }
   });
