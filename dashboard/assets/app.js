@@ -102,7 +102,7 @@ function el(tag, attrs = {}, ...children) {
 
 function h(html) {
   const d = document.createElement('div');
-  d.innerHTML = html;
+  d.innerHTML = html.trim();
   return d;
 }
 
@@ -295,7 +295,7 @@ function showNewProjectModal() {
     </div>
   `);
 
-  const modalEl = overlay.firstChild;
+  const modalEl = overlay.firstElementChild;
   overlay.querySelector('#cancel').addEventListener('click', () => modalEl.remove());
   overlay.querySelector('#create').addEventListener('click', async () => {
     const name = overlay.querySelector('#proj-name').value.trim();
@@ -402,7 +402,7 @@ function showNewTableModal(projectId) {
       </div>
     </div>
   `);
-  const modalElT = overlay.firstChild;
+  const modalElT = overlay.firstElementChild;
   overlay.querySelector('#cancel').addEventListener('click', () => modalElT.remove());
   overlay.querySelector('#create').addEventListener('click', async () => {
     const name = overlay.querySelector('#tname').value.trim();
@@ -689,7 +689,7 @@ function showNewSiteModal(projectId) {
       </div>
     </div>
   `);
-  const modalElS = overlay.firstChild;
+  const modalElS = overlay.firstElementChild;
   overlay.querySelector('#cancel').addEventListener('click', () => modalElS.remove());
   overlay.querySelector('#create').addEventListener('click', async () => {
     const subdomain = overlay.querySelector('#subdomain').value.trim();
