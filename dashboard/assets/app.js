@@ -472,9 +472,47 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
     )
   );
 
+  // Mobile: hamburger button that toggles the drawer
+  const burger = el('button', { class: 'sb-hamburger', 'aria-label': 'Toggle menu' },
+    el('span'), el('span'), el('span')
+  );
+  const topbar = el('div', { class: 'sb-topbar' },
+    el('div', { class: 'sb-topbar-brand' },
+      el('span', { class: 'sb-logo-mark' }, 'SB'),
+      el('span', { class: 'sb-logo-text' }, 'SupaBein')
+    ),
+    burger
+  );
+
+  // Dark overlay behind the open drawer
+  const overlay = el('div', { class: 'sb-overlay' });
+
+  function openDrawer() {
+    sidebar.classList.add('open');
+    overlay.classList.add('open');
+    burger.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeDrawer() {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('open');
+    burger.classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  burger.addEventListener('click', () =>
+    sidebar.classList.contains('open') ? closeDrawer() : openDrawer()
+  );
+  overlay.addEventListener('click', closeDrawer);
+
+  // Any nav link tap closes the drawer (navigation happened)
+  sidebar.querySelectorAll('.sb-link').forEach(a => a.addEventListener('click', closeDrawer));
+
   const wrap = el('div', { class: 'layout' }, sidebar, el('main', { class: 'main', id: 'content' }, ...content));
   const app = document.getElementById('app');
   app.innerHTML = '';
+  app.appendChild(topbar);
+  app.appendChild(overlay);
   app.appendChild(wrap);
 }
 
