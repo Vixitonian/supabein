@@ -1,0 +1,247 @@
+# CLAUDE.md — SupaBein Project
+
+This project uses **SupaBein** as its backend (database, REST API, and site hosting).
+Read this file before writing any backend code — all data and hosting goes through SupaBein.
+
+---
+
+## Configuration
+
+```
+SUPABEIN_URL=https://your-supabein-domain.com
+SUPABEIN_TOKEN=sb_pat_xxxx          # Personal Access Token — use for all control-plane calls
+SUPABEIN_PROJECT_ID=                 # Fill in after creating the project (see Setup below)
+SUPABEIN_ANON_KEY=                   # Fill in after creating the project (from API tab)
+```
+
+> The PAT authenticates as the project owner and can create tables, set policies, and deploy.
+> The anon key is safe to use in frontend code — it respects table policies.
+
+---
+
+## First-time Setup (run once)
+
+### 1. Create the project
+```bash
+PROJECT=$(curl -s -X POST "$SUPABEIN_URL/api/v1/projects" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"my-app"}')
+
+PROJECT_ID=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+ANON_KEY=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['anon_key'])")
+
+echo "Project ID: $PROJECT_ID"
+echo "Anon key:   $ANON_KEY"
+```
+Copy the values above into the Configuration section.
+
+### 2. Create a site (for frontend hosting)
+```bash
+curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/sites" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"subdomain":"my-app","spa_mode":true}'
+```
+Save the returned `id` as `SUPABEIN_SITE_ID`.
+
+---
+
+## Tables
+
+### Create a table with columns
+```bash
+curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/tables" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "posts",
+    "columns": [
+      { "name": "title",   "type": "VARCHAR(255)", "nullable": false },
+      { "name": "body",    "type": "TEXT",         "nullable": true  },
+      { "name": "user_id", "type": "INT",          "nullable": false }
+    ]
+  }'
+```
+
+### Allowed column types
+`INT` `BIGINT` `VARCHAR(255)` `TEXT` `BOOLEAN` `DATETIME` `DECIMAL(10,2)` `FLOAT`
+
+### List tables
+```bash
+curl -s "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/tables" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+```
+
+### Delete a table
+```bash
+curl -s -X DELETE "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/tables/posts" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+```
+
+---
+
+## Row-Level Policies
+
+Every table defaults to **deny all**. Set policies before querying as anon.
+
+```bash
+curl -s -X PUT "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/tables/posts/policies" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[
+    { "api_role": "anon",          "operation": "SELECT", "allowed": true  },
+    { "api_role": "anon",          "operation": "INSERT", "allowed": false },
+    { "api_role": "authenticated", "operation": "SELECT", "allowed": true  },
+    { "api_role": "authenticated", "operation": "INSERT", "allowed": true  },
+    { "api_role": "authenticated", "operation": "UPDATE", "allowed": true  },
+    { "api_role": "authenticated", "operation": "DELETE", "allowed": true  }
+  ]'
+```
+
+Roles: `anon` (no token), `authenticated` (valid user JWT), `service_role` (service key, bypasses all policies).
+Operations: `SELECT` `INSERT` `UPDATE` `DELETE`
+
+---
+
+## Data API
+
+Use the **anon key** for frontend calls. Use the **PAT or service key** for trusted server calls.
+
+### List rows
+```bash
+curl -s "$SUPABEIN_URL/api/v1/data/$PROJECT_ID/posts?limit=50&offset=0" \
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+```
+
+### Insert a row
+```bash
+curl -s -X POST "$SUPABEIN_URL/api/v1/data/$PROJECT_ID/posts" \
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Hello","body":"World","user_id":1}'
+```
+
+### Get a single row
+```bash
+curl -s "$SUPABEIN_URL/api/v1/data/$PROJECT_ID/posts/1" \
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+```
+
+### Update a row
+```bash
+curl -s -X PATCH "$SUPABEIN_URL/api/v1/data/$PROJECT_ID/posts/1" \
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Updated title"}'
+```
+
+### Delete a row
+```bash
+curl -s -X DELETE "$SUPABEIN_URL/api/v1/data/$PROJECT_ID/posts/1" \
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+```
+
+---
+
+## User Auth (from the frontend)
+
+### Sign up
+```bash
+curl -s -X POST "$SUPABEIN_URL/api/v1/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"secret123"}'
+# returns { token: "eyJ..." }
+```
+
+### Log in
+```bash
+curl -s -X POST "$SUPABEIN_URL/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com","password":"secret123"}'
+# returns { token: "eyJ..." }
+```
+
+Use the returned JWT as `Authorization: Bearer <token>` for authenticated data API calls.
+
+---
+
+## Deploying the Frontend
+
+### Option A — Zip upload
+```bash
+cd dist && zip -r ../deploy.zip . && cd ..
+curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -F "zipfile=@./deploy.zip" \
+  -F "label=v1.0.0"
+```
+
+### Option B — File by file (CI/CD friendly)
+```bash
+# 1. Open a deploy
+DID=$(curl -sX POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/open" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"v1.0.0"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+# 2. Upload each file
+find dist -type f | while read f; do
+  REL="${f#dist/}"
+  curl -sX PUT "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/files?path=$REL" \
+    -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+    --data-binary "@$f"
+done
+
+# 3. Go live
+curl -sX POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/finalize" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+```
+
+The live site is then at: `$SUPABEIN_URL/sites/s$SUPABEIN_SITE_ID/current/`
+
+### Rollback
+```bash
+curl -sX POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DEPLOY_ID/rollback" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+```
+
+---
+
+## Using the anon key in frontend JS
+
+```js
+const SUPABEIN = 'https://your-supabein-domain.com/api/v1';
+const ANON_KEY = 'eyJ...'; // from project API tab — safe to embed in frontend
+
+async function query(table, params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const res = await fetch(`${SUPABEIN}/data/PROJECT_ID/${table}?${qs}`, {
+    headers: { Authorization: `Bearer ${ANON_KEY}` }
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function insert(table, data) {
+  const res = await fetch(`${SUPABEIN}/data/PROJECT_ID/${table}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ANON_KEY}` },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+```
+
+---
+
+## Rules for Claude
+
+- Never use a separate database — all data goes through the SupaBein data API.
+- Never hardcode project ID or tokens in source files — read from environment variables.
+- Always create tables before inserting data.
+- Always set policies on new tables — the default is deny all.
+- Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
+- The anon key is safe for frontend bundles. The PAT and service key must never be in frontend code.
+- Do not invent API endpoints — the full reference is at `$SUPABEIN_URL/docs`.
