@@ -438,6 +438,10 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
       el('a', { href: `#/projects/${projectId}/api`, class: 'sb-link' + isOn('api') },
         el('span', { class: 'sb-icon' }, '⟨⟩'),
         'API'
+      ),
+      el('a', { href: `#/projects/${projectId}/users`, class: 'sb-link' + isOn('users') },
+        el('span', { class: 'sb-icon' }, '◎'),
+        'Users'
       )
     )
   ] : [];
@@ -875,48 +879,129 @@ async function renderRowsTab(projectId, tableName) {
   const content = document.getElementById('tab-content');
   content.innerHTML = 'Loading...';
 
-  try {
-    const [cols, res] = await Promise.all([
-      Api.get(`/v1/projects/${projectId}/tables/${tableName}/columns`),
-      Api.get(`/v1/data/${projectId}/${tableName}?limit=50`)
-    ]);
+  let offset    = 0;
+  const limit   = 25;
+  let cols      = [];
+  let filterVal = '';
+  let orderVal  = '';
 
-    const allCols = [{ col_name: 'id' }, { col_name: 'created_at' }, ...cols];
-    const rows    = res.data || [];
-
-    const insertForm = h(`
-      <div class="card">
-        <div class="card-title">Insert Row</div>
-        ${cols.map(c => `<div class="form-group"><label>${c.col_name} <span class="text-muted">(${c.data_type})</span></label><input type="text" data-col="${c.col_name}"></div>`).join('')}
-        <button class="btn btn-primary btn-sm" id="insert-row">Insert</button>
-      </div>
-    `);
-
-    const insertFormEl = insertForm.firstElementChild;
-    insertFormEl.querySelector('#insert-row').addEventListener('click', async () => {
-      const data = {};
-      insertFormEl.querySelectorAll('[data-col]').forEach(inp => { data[inp.dataset.col] = inp.value; });
-      try {
-        await Api.post(`/v1/data/${projectId}/${tableName}`, data);
-        renderRowsTab(projectId, tableName);
-      } catch (e) { console.error('[SupaBein] Insert row failed', e); alert(e.message); }
+  function openRowModal(title, row, onSave) {
+    const overlay = el('div', { class: 'modal-overlay' });
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    const inputs = {};
+    const fields = cols.map(c => {
+      const inp = el('input', { type: 'text', placeholder: c.data_type });
+      if (row) inp.value = String(row[c.col_name] ?? '');
+      inputs[c.col_name] = inp;
+      return el('div', { class: 'form-group' },
+        el('label', {}, c.col_name + ' (' + c.data_type + ')'),
+        inp
+      );
     });
+    const modal = el('div', { class: 'modal' },
+      el('div', { class: 'modal-title' }, title),
+      ...fields,
+      el('div', { class: 'modal-footer' },
+        el('button', { class: 'btn btn-secondary', onClick: () => overlay.remove() }, 'Cancel'),
+        el('button', { class: 'btn btn-primary', onClick: async () => {
+          const data = {};
+          for (const [k, inp] of Object.entries(inputs)) data[k] = inp.value;
+          try { await onSave(data); overlay.remove(); await refresh(); }
+          catch (e) { alert(e.message); }
+        }}, 'Save')
+      )
+    );
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    modal.querySelector('input')?.focus();
+  }
 
-    const rowTable = rows.length
-      ? el('table', { class: 'data-table' },
-          el('thead', {}, el('tr', {}, ...allCols.map(c => el('th', {}, c.col_name)))),
-          el('tbody', {}, ...rows.map(r =>
-            el('tr', {}, ...allCols.map(c => el('td', {}, String(r[c.col_name] ?? ''))))
-          ))
-        )
-      : el('div', { class: 'text-muted' }, 'No rows yet.');
+  async function refresh() {
+    const area = document.getElementById('rows-area');
+    if (!area) return;
+    area.innerHTML = '<span class="text-muted">Loading…</span>';
+    try {
+      let qs = `limit=${limit}&offset=${offset}`;
+      if (orderVal)  qs += '&order='  + encodeURIComponent(orderVal);
+      if (filterVal) qs += '&' + filterVal.replace(/^\?/, '');
+      const res  = await Api.get(`/v1/data/${projectId}/${tableName}?${qs}`);
+      const rows = res.data || [];
+      const displayCols = [{ col_name: 'id' }, { col_name: 'created_at' }, ...cols];
+
+      area.innerHTML = '';
+
+      if (!rows.length) {
+        area.appendChild(el('p', { class: 'text-muted mt-2' }, 'No rows match the current filter.'));
+      } else {
+        area.appendChild(el('div', { style: 'overflow-x:auto' },
+          el('table', { class: 'data-table' },
+            el('thead', {}, el('tr', {},
+              ...displayCols.map(c => el('th', {}, c.col_name)),
+              el('th', {}, 'Actions')
+            )),
+            el('tbody', {}, ...rows.map(r =>
+              el('tr', {},
+                ...displayCols.map(c =>
+                  el('td', { style: 'max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap', title: String(r[c.col_name] ?? '') },
+                    String(r[c.col_name] ?? ''))
+                ),
+                el('td', { style: 'white-space:nowrap;display:flex;gap:4px' },
+                  el('button', { class: 'btn btn-sm btn-secondary',
+                    onClick: () => openRowModal('Edit Row #' + r.id, r, data =>
+                      Api.patch(`/v1/data/${projectId}/${tableName}/${r.id}`, data)
+                    )
+                  }, 'Edit'),
+                  el('button', { class: 'btn btn-sm btn-danger',
+                    onClick: async () => {
+                      if (!confirm('Delete row #' + r.id + '?')) return;
+                      try { await Api.delete(`/v1/data/${projectId}/${tableName}/${r.id}`); await refresh(); }
+                      catch (e) { alert(e.message); }
+                    }
+                  }, 'Del')
+                )
+              )
+            ))
+          )
+        ));
+      }
+
+      area.appendChild(el('div', { style: 'display:flex;align-items:center;gap:12px;margin-top:14px;font-size:13px' },
+        el('button', { class: 'btn btn-secondary btn-sm', disabled: offset === 0,
+          onClick: () => { offset = Math.max(0, offset - limit); refresh(); }
+        }, '← Prev'),
+        el('span', { class: 'text-muted' }, `${offset + 1}–${offset + rows.length} · total returned: ${res.count}`),
+        el('button', { class: 'btn btn-secondary btn-sm', disabled: rows.length < limit,
+          onClick: () => { offset += limit; refresh(); }
+        }, 'Next →')
+      ));
+    } catch (e) {
+      area.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    }
+  }
+
+  try {
+    cols = await Api.get(`/v1/projects/${projectId}/tables/${tableName}/columns`);
+
+    const filterInp = el('input', { type: 'text', placeholder: 'Filter  e.g. status=active  or  age=gte.18', style: 'flex:1;min-width:180px' });
+    const orderInp  = el('input', { type: 'text', placeholder: 'Order  e.g. created_at.desc', style: 'width:170px' });
 
     content.innerHTML = '';
-    content.appendChild(insertFormEl);
-    content.appendChild(el('div', { class: 'card mt-3' },
-      el('div', { class: 'card-title' }, `Rows (showing up to 50 of ${res.count})`),
-      rowTable
+    content.appendChild(el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px' },
+      filterInp, orderInp,
+      el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        filterVal = filterInp.value.trim(); orderVal = orderInp.value.trim(); offset = 0; refresh();
+      }}, 'Apply'),
+      el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        filterInp.value = ''; orderInp.value = ''; filterVal = ''; orderVal = ''; offset = 0; refresh();
+      }}, 'Clear'),
+      el('button', { class: 'btn btn-primary btn-sm', style: 'margin-left:auto',
+        onClick: () => openRowModal('Insert Row', null, data =>
+          Api.post(`/v1/data/${projectId}/${tableName}`, data)
+        )
+      }, '+ Insert Row')
     ));
+    content.appendChild(el('div', { id: 'rows-area' }));
+    await refresh();
   } catch (e) {
     content.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
@@ -1371,6 +1456,79 @@ function render404() {
   setApp('<div style="padding:48px;text-align:center"><h1 style="font-size:48px;color:var(--muted)">404</h1><p class="text-muted">Page not found</p><a href="#/projects">Go home</a></div>');
 }
 
+// ─── Project Users ───────────────────────────────────────────────────────────
+
+async function renderProjectUsers({ id }) {
+  if (!requireAuth()) return;
+  renderLayout(id, 'users', [el('p', { class: 'text-muted' }, 'Loading users…')]);
+
+  let users = [];
+  try {
+    const result = await Api.get(`/v1/projects/${id}/users`);
+    users = result.users || [];
+  } catch (e) {
+    renderLayout(id, 'users', [el('div', { class: 'alert alert-danger' }, e.message)]);
+    return;
+  }
+
+  async function deleteUser(uid) {
+    if (!confirm('Delete this user? This cannot be undone.')) return;
+    try {
+      await Api.delete(`/v1/projects/${id}/users/${uid}`);
+      renderProjectUsers({ id });
+    } catch (e) {
+      alert('Failed to delete user: ' + e.message);
+    }
+  }
+
+  const rows = users.length === 0
+    ? [el('tr', {}, el('td', { colspan: '3', style: 'text-align:center;color:var(--text-muted);padding:32px' }, 'No end-users yet. Users appear here after they sign up via your app.'))]
+    : users.map(u =>
+        el('tr', {},
+          el('td', {}, u.email),
+          el('td', {}, u.id),
+          el('td', {}, u.created_at),
+          el('td', {},
+            el('button', { class: 'btn btn-sm btn-danger', onclick: () => deleteUser(u.id) }, 'Delete')
+          )
+        )
+      );
+
+  const content = [
+    el('div', { class: 'page-header' },
+      el('div', {},
+        el('h2', {}, 'Project Users'),
+        el('p', { class: 'text-muted' }, `${users.length} end-user${users.length !== 1 ? 's' : ''} registered in this project`)
+      )
+    ),
+    el('div', { class: 'card' },
+      el('div', { class: 'table-responsive' },
+        el('table', { class: 'table' },
+          el('thead', {},
+            el('tr', {},
+              el('th', {}, 'Email'),
+              el('th', {}, 'ID'),
+              el('th', {}, 'Joined'),
+              el('th', {}, '')
+            )
+          ),
+          el('tbody', {}, ...rows)
+        )
+      )
+    ),
+    el('div', { class: 'card' },
+      el('h3', { style: 'margin-top:0;font-size:0.95rem' }, 'Project User Auth API'),
+      el('p', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:0' },
+        'Your app\'s end-users sign up and log in via the project auth endpoints. See the ',
+        el('a', { href: '#/projects/' + id + '/api' }, 'API tab'),
+        ' for curl examples.'
+      )
+    )
+  ];
+
+  renderLayout(id, 'users', content);
+}
+
 // ─── API Reference ────────────────────────────────────────────────────────────
 
 async function renderApi({ id }) {
@@ -1814,6 +1972,7 @@ Router.add('projects/:id/tables',                   renderTables);
 Router.add('projects/:id/tables/:name',             renderTableEditor);
 Router.add('projects/:id/sites',                    renderSites);
 Router.add('projects/:id/sites/:site_id',           renderSiteManager);
+Router.add('projects/:id/users',                     renderProjectUsers);
 Router.add('projects/:id/api',                      renderApi);
 Router.add('account',                               renderAccount);
 

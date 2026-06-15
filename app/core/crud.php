@@ -31,6 +31,9 @@ class Crud
             abort(403, 'Token is not valid for this project');
         }
 
+        // Per-project rate limiting on the data plane
+        RateLimit::checkProject($projectId);
+
         $colRows     = $catalog->listColumns((int)$table['id']);
         $allowedCols = array_column($colRows, 'col_name');
 
@@ -54,8 +57,9 @@ class Crud
         $limit  = min((int)($req['query']['limit'] ?? 20), 1000);
         $offset = max((int)($req['query']['offset'] ?? 0), 0);
 
-        // Extract filter params (exclude pagination keys)
-        $filters = array_diff_key($req['query'], array_flip(['limit', 'offset']));
+        // Extract filter params (exclude pagination and ordering keys)
+        $order   = $req['query']['order'] ?? null;
+        $filters = array_diff_key($req['query'], array_flip(['limit', 'offset', 'order']));
 
         [$sql, $params] = QueryBuilder::select(
             $table['physical_name'],
@@ -63,7 +67,8 @@ class Crud
             $filters,
             $policy->constraint,
             $limit,
-            $offset
+            $offset,
+            is_string($order) ? $order : null
         );
 
         $pdo  = \App::get('db');

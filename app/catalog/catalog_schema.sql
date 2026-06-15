@@ -110,6 +110,24 @@ CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
     UNIQUE KEY `uq_token_hash` (`token_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `password_reset_tokens` (
+    `id`              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_user_id` INT UNSIGNED NOT NULL,
+    `token_hash`      VARCHAR(64) NOT NULL,
+    `expires_at`      DATETIME NOT NULL,
+    `used_at`         DATETIME NULL DEFAULT NULL,
+    `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_user_id`) REFERENCES `project_users`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_token_hash` (`token_hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `rate_limits` (
+    `project_id`   INT UNSIGNED NOT NULL,
+    `window_start` INT UNSIGNED NOT NULL,
+    `count`        INT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (`project_id`, `window_start`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
 
 -- ─── Migration SQL for existing installs ────────────────────────────────────
@@ -118,6 +136,24 @@ SET foreign_key_checks = 1;
 -- ALTER TABLE `projects`
 --   ADD COLUMN `anon_key`    TEXT DEFAULT NULL AFTER `name`,
 --   ADD COLUMN `service_key` TEXT DEFAULT NULL AFTER `anon_key`;
+--
+-- CREATE TABLE IF NOT EXISTS `password_reset_tokens` (
+--     `id`              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `project_user_id` INT UNSIGNED NOT NULL,
+--     `token_hash`      VARCHAR(64) NOT NULL,
+--     `expires_at`      DATETIME NOT NULL,
+--     `used_at`         DATETIME NULL DEFAULT NULL,
+--     `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     FOREIGN KEY (`project_user_id`) REFERENCES `project_users`(`id`) ON DELETE CASCADE,
+--     UNIQUE KEY `uq_token_hash` (`token_hash`)
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+--
+-- CREATE TABLE IF NOT EXISTS `rate_limits` (
+--     `project_id`   INT UNSIGNED NOT NULL,
+--     `window_start` INT UNSIGNED NOT NULL,
+--     `count`        INT UNSIGNED NOT NULL DEFAULT 0,
+--     PRIMARY KEY (`project_id`, `window_start`)
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 --
 -- CREATE TABLE IF NOT EXISTS `project_users` (
 --     `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

@@ -5,6 +5,7 @@ declare(strict_types=1);
 function register_data_routes(\SupaBein\Router $router): void
 {
     // All data routes use optional auth — policy engine decides access.
+    // Rate limiting is applied per project before the handler runs.
 
     $router->get(
         '/v1/data/:project_id/:table_name',

@@ -18,15 +18,32 @@ class QueryBuilder
         return '`' . $ident . '`';
     }
 
+    /** Operator map for filter values prefixed with "op." */
+    private const FILTER_OPS = [
+        'eq'   => '=',
+        'neq'  => '!=',
+        'gt'   => '>',
+        'gte'  => '>=',
+        'lt'   => '<',
+        'lte'  => '<=',
+        'like' => 'LIKE',
+    ];
+
     /**
      * Build a SELECT query.
      *
+     * Filters: pass [col => value] for exact match, or [col => "op.value"] for
+     * operators (eq, neq, gt, gte, lt, lte, like). E.g. ['age' => 'gte.18'].
+     *
+     * Order: "col.asc" or "col.desc", comma-separated for multiple.
+     *
      * @param string   $physTable      Physical table name (catalog-sourced)
      * @param string[] $allowedCols    Column names (catalog-sourced)
-     * @param array    $filters        [col => value] from ?query params (keys checked against allowedCols)
+     * @param array    $filters        [col => value|"op.value"] from query params
      * @param ?string  $constraint     Policy constraint fragment (already interpolated)
      * @param int      $limit
      * @param int      $offset
+     * @param ?string  $order          e.g. "created_at.desc" or "name.asc,age.desc"
      * @return array{0: string, 1: array}  [sql, params]
      */
     public static function select(
@@ -35,7 +52,8 @@ class QueryBuilder
         array $filters,
         ?string $constraint,
         int $limit = 20,
-        int $offset = 0
+        int $offset = 0,
+        ?string $order = null
     ): array {
         $allCols = array_merge(['id', 'created_at'], $allowedCols);
         $colList = implode(', ', array_map(self::q(...), $allCols));
@@ -47,7 +65,14 @@ class QueryBuilder
             if (!in_array($col, $allowedCols, true)) {
                 continue; // silently ignore unknown columns
             }
-            $where[]  = self::q($col) . ' = ?';
+
+            $op = '=';
+            if (is_string($val) && preg_match('/^(eq|neq|gt|gte|lt|lte|like)\.(.*)$/s', $val, $m)) {
+                $op  = self::FILTER_OPS[$m[1]];
+                $val = $m[2];
+            }
+
+            $where[]  = self::q($col) . ' ' . $op . ' ?';
             $params[] = $val;
         }
 
@@ -55,11 +80,26 @@ class QueryBuilder
             $where[] = '(' . $constraint . ')';
         }
 
+        // Build ORDER BY
+        $orderClauses = [];
+        if ($order !== null && $order !== '') {
+            foreach (explode(',', $order) as $part) {
+                if (preg_match('/^([a-zA-Z_][a-zA-Z0-9_]*)\.(asc|desc)$/i', trim($part), $m)) {
+                    $col = $m[1];
+                    $dir = strtoupper($m[2]);
+                    if (in_array($col, $allCols, true)) {
+                        $orderClauses[] = self::q($col) . ' ' . $dir;
+                    }
+                }
+            }
+        }
+        $orderSql = $orderClauses ? implode(', ', $orderClauses) : 'id DESC';
+
         $sql = "SELECT $colList FROM " . self::q($physTable);
         if ($where) {
             $sql .= ' WHERE ' . implode(' AND ', $where);
         }
-        $sql .= ' ORDER BY id DESC';
+        $sql .= ' ORDER BY ' . $orderSql;
 
         $limit  = max(1, min($limit, 1000));
         $offset = max(0, $offset);
