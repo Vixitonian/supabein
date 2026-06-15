@@ -146,8 +146,23 @@ class Deploy
         $zip->close();
         @unlink($zipPath);
 
-        // ── Phase 3b: Strip single top-level wrapper folder ──────────────────
-        // If the zip was built as dist/ → index.html, move contents up one level.
+        // ── Phase 3b: Clean macOS artifacts + strip single wrapper folder ────
+        // Mac zips include __MACOSX/ and .DS_Store entries alongside the real folder.
+        // Delete those first, then check if a single wrapper folder remains.
+
+        $junk = ['__MACOSX', '.DS_Store', '.AppleDouble', '.Spotlight-V100', '.Trashes'];
+        foreach ($junk as $j) {
+            $jp = $deployDir . '/' . $j;
+            if (is_dir($jp)) self::rrmdir($jp);
+            elseif (file_exists($jp)) unlink($jp);
+        }
+        // Also remove any dot-files left at the root
+        foreach (scandir($deployDir) as $e) {
+            if (str_starts_with($e, '.') && $e !== '.' && $e !== '..') {
+                $ep = $deployDir . '/' . $e;
+                if (is_file($ep)) unlink($ep);
+            }
+        }
 
         $topEntries = array_values(array_filter(
             scandir($deployDir),
