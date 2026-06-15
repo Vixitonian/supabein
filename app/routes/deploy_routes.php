@@ -88,6 +88,37 @@ function register_deploy_routes(\SupaBein\Router $router): void
         ['auth_middleware']
     );
 
+    // GET /v1/projects/:project_id/sites/:site_id/debug  — filesystem diagnostics
+    $router->get('/v1/projects/:project_id/sites/:site_id/debug', function (array $req) use ($catalog, $ownProject): void {
+        $ownProject((int)$req['params']['project_id'], $req['auth']['user_id']);
+        $site = $catalog->getSiteByProjectId((int)$req['params']['project_id'], (int)$req['params']['site_id']);
+        if (!$site) abort(404, 'Site not found');
+
+        $config    = \App::get('config');
+        $sitesPath = $config['SITES_PATH'];
+        $siteId    = (int)$req['params']['site_id'];
+        $currentDir = $sitesPath . '/s' . $siteId . '/current';
+
+        $files = [];
+        if (is_dir($currentDir)) {
+            foreach (scandir($currentDir) as $f) {
+                if ($f === '.' || $f === '..') continue;
+                $files[] = $f . (is_dir($currentDir . '/' . $f) ? '/' : '');
+            }
+        }
+
+        json_out([
+            'document_root'      => $_SERVER['DOCUMENT_ROOT'] ?? 'unknown',
+            'script_filename'    => $_SERVER['SCRIPT_FILENAME'] ?? 'unknown',
+            'sites_path_config'  => $sitesPath,
+            'current_dir'        => $currentDir,
+            'current_dir_exists' => is_dir($currentDir),
+            'files_in_current'   => $files,
+            'expected_url_path'  => '/sites/s' . $siteId . '/current/',
+            'sites_dir_exists'   => is_dir($sitesPath),
+        ]);
+    }, ['auth_middleware']);
+
     // GET /v1/projects/:project_id/sites/:site_id/browse?path=
     $router->get('/v1/projects/:project_id/sites/:site_id/browse', function (array $req) use ($catalog, $ownProject): void {
         $ownProject((int)$req['params']['project_id'], $req['auth']['user_id']);
