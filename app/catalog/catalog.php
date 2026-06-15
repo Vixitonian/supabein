@@ -22,6 +22,23 @@ class Catalog
         return self::$instance;
     }
 
+    // Cast integer fields in a single row fetched via PDO FETCH_ASSOC
+    private static function castRow(?array $row, array $intFields): ?array
+    {
+        if ($row === null || $row === false) return null;
+        foreach ($intFields as $f) {
+            if (array_key_exists($f, $row) && $row[$f] !== null) {
+                $row[$f] = (int)$row[$f];
+            }
+        }
+        return $row;
+    }
+
+    private static function castRows(array $rows, array $intFields): array
+    {
+        return array_map(fn($r) => self::castRow($r, $intFields), $rows);
+    }
+
     // ─── Projects ────────────────────────────────────────────────────────────
 
     public function createProject(int $userId, string $name): array
@@ -39,7 +56,7 @@ class Catalog
             'SELECT id, owner_user_id, name, created_at FROM projects WHERE owner_user_id = ? ORDER BY created_at DESC'
         );
         $stmt->execute([$userId]);
-        return $stmt->fetchAll();
+        return self::castRows($stmt->fetchAll(), ['id', 'owner_user_id']);
     }
 
     public function getProjectById(int $id, int $userId): ?array
@@ -48,17 +65,16 @@ class Catalog
             'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
         );
         $stmt->execute([$id, $userId]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'owner_user_id']);
     }
 
-    /** Returns project without ownership check — for internal use only. */
     public function getProjectByIdInternal(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
             'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ?'
         );
         $stmt->execute([$id]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'owner_user_id']);
     }
 
     public function deleteProject(int $id, int $userId): bool
@@ -89,7 +105,7 @@ class Catalog
             'SELECT id, project_id, table_name, physical_name, created_at FROM project_tables WHERE project_id = ? ORDER BY created_at ASC'
         );
         $stmt->execute([$projectId]);
-        return $stmt->fetchAll();
+        return self::castRows($stmt->fetchAll(), ['id', 'project_id']);
     }
 
     public function getTable(int $projectId, string $logicalName): ?array
@@ -98,7 +114,7 @@ class Catalog
             'SELECT id, project_id, table_name, physical_name FROM project_tables WHERE project_id = ? AND table_name = ?'
         );
         $stmt->execute([$projectId, $logicalName]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
     }
 
     public function getTableById(int $tableId): ?array
@@ -107,7 +123,7 @@ class Catalog
             'SELECT id, project_id, table_name, physical_name FROM project_tables WHERE id = ?'
         );
         $stmt->execute([$tableId]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
     }
 
     public function deleteTable(int $projectId, string $logicalName): bool
@@ -152,7 +168,7 @@ class Catalog
              FROM project_columns WHERE project_table_id = ? ORDER BY col_order ASC'
         );
         $stmt->execute([$tableId]);
-        return $stmt->fetchAll();
+        return self::castRows($stmt->fetchAll(), ['id', 'nullable', 'col_order']);
     }
 
     public function getColumn(int $tableId, string $colName): ?array
@@ -161,7 +177,7 @@ class Catalog
             'SELECT id, col_name, data_type, nullable, default_val FROM project_columns WHERE project_table_id = ? AND col_name = ?'
         );
         $stmt->execute([$tableId, $colName]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'nullable']);
     }
 
     public function deleteColumn(int $tableId, string $colName): bool
@@ -192,7 +208,7 @@ class Catalog
             'SELECT id, api_role, operation, allowed, constraint_sql FROM project_policies WHERE project_table_id = ?'
         );
         $stmt->execute([$tableId]);
-        return $stmt->fetchAll();
+        return self::castRows($stmt->fetchAll(), ['id', 'allowed']);
     }
 
     public function getPolicy(int $tableId, string $apiRole, string $operation): ?array
@@ -202,7 +218,7 @@ class Catalog
              FROM project_policies WHERE project_table_id = ? AND api_role = ? AND operation = ?'
         );
         $stmt->execute([$tableId, $apiRole, $operation]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'allowed']);
     }
 
     // ─── Migrations ──────────────────────────────────────────────────────────
@@ -237,7 +253,7 @@ class Catalog
              ORDER BY s.created_at DESC'
         );
         $stmt->execute([$projectId]);
-        return $stmt->fetchAll();
+        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
     }
 
     public function getSiteById(int $siteId): ?array
@@ -246,7 +262,7 @@ class Catalog
             'SELECT * FROM sites WHERE id = ?'
         );
         $stmt->execute([$siteId]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
     }
 
     public function getSiteByProjectId(int $projectId, int $siteId): ?array
@@ -255,7 +271,7 @@ class Catalog
             'SELECT * FROM sites WHERE id = ? AND project_id = ?'
         );
         $stmt->execute([$siteId, $projectId]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
     }
 
     public function updateSiteCurrentDeploy(int $siteId, int $deployId): void
@@ -290,7 +306,7 @@ class Catalog
     {
         $stmt = $this->pdo->prepare('SELECT * FROM deploys WHERE id = ?');
         $stmt->execute([$deployId]);
-        return $stmt->fetch() ?: null;
+        return self::castRow($stmt->fetch() ?: null, ['id', 'site_id', 'size_bytes']);
     }
 
     public function listDeploys(int $siteId): array
@@ -299,6 +315,6 @@ class Catalog
             'SELECT * FROM deploys WHERE site_id = ? ORDER BY uploaded_at DESC'
         );
         $stmt->execute([$siteId]);
-        return $stmt->fetchAll();
+        return self::castRows($stmt->fetchAll(), ['id', 'site_id', 'size_bytes']);
     }
 }
