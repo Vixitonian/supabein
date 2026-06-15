@@ -149,7 +149,7 @@ function renderLayout(projectId, activeTab, content) {
     ...(projectId ? [
       el('a', { href: `#/projects/${projectId}` }, '← Project'),
       el('a', { href: `#/projects/${projectId}/tables`, class: activeTab === 'tables' ? 'active' : '' }, 'Tables'),
-      el('a', { href: `#/projects/${projectId}/sites`, class: activeTab === 'sites' ? 'active' : '' }, 'Sites'),
+      el('a', { href: `#/projects/${projectId}/sites`, class: activeTab === 'sites' ? 'active' : '' }, 'Deploy'),
     ] : []),
     el('div', { style: 'flex:1' }),
     el('a', { href: '#/logout', style: 'margin-top:auto' }, user?.email || 'Logout')
@@ -327,7 +327,7 @@ async function renderProject({ id }) {
       ),
       el('div', { class: 'flex gap-2' },
         el('a', { class: 'btn btn-primary', href: `#/projects/${id}/tables` }, 'Tables'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/sites` }, 'Sites')
+        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/sites` }, 'Deploy')
       ),
       el('div', { class: 'card mt-3' },
         el('div', { class: 'card-title' }, 'Project Info'),
