@@ -84,7 +84,8 @@ class Deploy
         }
 
         // Create pending deploy record
-        $deploy = $catalog->createDeploy($siteId, date('Y-m-d H:i:s'), $file['size']);
+        $label  = trim($req['body']['label'] ?? '') ?: date('Y-m-d H:i:s');
+        $deploy = $catalog->createDeploy($siteId, $label, $file['size']);
         $deploy['id'] = (int)$deploy['id'];
         $catalog->updateDeploy($deploy['id'], 'processing');
 
@@ -210,6 +211,357 @@ class Deploy
         json_out($result, 201);
 
     }
+
+    // ─── File-by-file deploy API ─────────────────────────────────────────────
+
+    /**
+     * Open a new pending deploy — returns deploy record + staging directory.
+     * POST /v1/projects/:project_id/sites/:site_id/deploys/open
+     */
+    public static function open(array $req): void
+    {
+        $config    = \App::get('config');
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        $label     = trim($req['body']['label'] ?? '') ?: date('Y-m-d H:i:s');
+        $deploy    = $catalog->createDeploy($siteId, $label, 0);
+        $deployId  = (int)$deploy['id'];
+
+        $sitesPath = $config['SITES_PATH'];
+        $stagingDir = $sitesPath . '/s' . $siteId . '/deploys/'
+                    . date('Ymd_His') . '_' . $deployId;
+
+        if (!is_dir($stagingDir)) {
+            mkdir($stagingDir, 0755, true);
+        }
+
+        // Write hardening .htaccess up front so any early file access is safe
+        $spaMode = (bool)$site['spa_mode'];
+        file_put_contents($stagingDir . '/.htaccess', self::buildHardeningHtaccess($spaMode));
+
+        // Store path immediately (status stays 'pending')
+        $catalog->updateDeploy($deployId, 'pending', $stagingDir);
+
+        $result = $catalog->getDeployById($deployId);
+        $result['staging_dir'] = $stagingDir;
+        json_out($result, 201);
+    }
+
+    /**
+     * Upload a single file into a pending deploy staging directory.
+     * PUT /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files?path=sub/dir/file.html
+     */
+    public static function putFile(array $req): void
+    {
+        $config    = \App::get('config');
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+        $deployId  = (int)$req['params']['deploy_id'];
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        $deploy = $catalog->getDeployById($deployId);
+        if (!$deploy || (int)$deploy['site_id'] !== $siteId) abort(404, 'Deploy not found');
+        if ($deploy['status'] !== 'pending') abort(409, 'Deploy is already finalized');
+
+        $relPath = ltrim($req['query']['path'] ?? '', '/');
+        if ($relPath === '') abort(422, 'Query parameter ?path= is required');
+
+        // Security checks
+        if (strpos($relPath, "\0") !== false) abort(400, 'Null byte in path');
+
+        $stagingDir = rtrim($deploy['path'], '/');
+        $fullPath   = self::normalizePath($stagingDir . '/' . $relPath);
+        if (!str_starts_with($fullPath, $stagingDir . '/')) {
+            abort(400, 'Path traversal attempt detected');
+        }
+
+        // Blocked extension check — never allow server-side executable types
+        $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+        if (in_array($ext, self::BLOCKED_EXTENSIONS, true)) {
+            abort(403, "File type '.$ext' is not allowed in deployments");
+        }
+
+        // Refuse overwriting the hardening .htaccess
+        if (basename($fullPath) === '.htaccess' && dirname($fullPath) === $stagingDir) {
+            abort(403, 'The root .htaccess is managed by SupaBein and cannot be overwritten');
+        }
+
+        $parentDir = dirname($fullPath);
+        if (!is_dir($parentDir)) {
+            mkdir($parentDir, 0755, true);
+        }
+
+        $body = file_get_contents('php://input');
+        if ($body === false) abort(500, 'Failed to read request body');
+
+        if (file_put_contents($fullPath, $body) === false) {
+            abort(500, 'Failed to write file');
+        }
+
+        json_out(['path' => $relPath, 'size' => strlen($body)]);
+    }
+
+    /**
+     * Remove a staged file from a pending deploy.
+     * DELETE /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files?path=file.html
+     */
+    public static function deleteFile(array $req): void
+    {
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+        $deployId  = (int)$req['params']['deploy_id'];
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        $deploy = $catalog->getDeployById($deployId);
+        if (!$deploy || (int)$deploy['site_id'] !== $siteId) abort(404, 'Deploy not found');
+        if ($deploy['status'] !== 'pending') abort(409, 'Deploy is already finalized');
+
+        $relPath = ltrim($req['query']['path'] ?? '', '/');
+        if ($relPath === '') abort(422, 'Query parameter ?path= is required');
+
+        $stagingDir = rtrim($deploy['path'], '/');
+        $fullPath   = self::normalizePath($stagingDir . '/' . $relPath);
+        if (!str_starts_with($fullPath, $stagingDir . '/')) {
+            abort(400, 'Path traversal attempt detected');
+        }
+
+        if (!file_exists($fullPath)) abort(404, 'File not found in staging');
+        if (is_dir($fullPath)) abort(400, 'Path is a directory; delete files individually');
+
+        unlink($fullPath);
+        json_out(['deleted' => true, 'path' => $relPath]);
+    }
+
+    /**
+     * List all files currently staged in a pending deploy.
+     * GET /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files
+     */
+    public static function listFiles(array $req): void
+    {
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+        $deployId  = (int)$req['params']['deploy_id'];
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        $deploy = $catalog->getDeployById($deployId);
+        if (!$deploy || (int)$deploy['site_id'] !== $siteId) abort(404, 'Deploy not found');
+
+        $stagingDir = rtrim($deploy['path'], '/');
+        if (!is_dir($stagingDir)) {
+            json_out(['files' => []]);
+            return;
+        }
+
+        $files = [];
+        $base  = $stagingDir . '/';
+        $it    = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($stagingDir, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($it as $item) {
+            if ($item->isFile()) {
+                $relPath = substr($item->getPathname(), strlen($base));
+                $files[] = ['path' => $relPath, 'size' => $item->getSize()];
+            }
+        }
+        usort($files, fn($a, $b) => strcmp($a['path'], $b['path']));
+        json_out(['deploy_id' => $deployId, 'status' => $deploy['status'], 'files' => $files]);
+    }
+
+    /**
+     * Finalize a pending deploy: harden, copy to current/, mark ready.
+     * POST /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/finalize
+     */
+    public static function finalize(array $req): void
+    {
+        $config    = \App::get('config');
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+        $deployId  = (int)$req['params']['deploy_id'];
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        $deploy = $catalog->getDeployById($deployId);
+        if (!$deploy || (int)$deploy['site_id'] !== $siteId) abort(404, 'Deploy not found');
+        if ($deploy['status'] !== 'pending') abort(409, 'Deploy is already finalized');
+
+        $deployDir = rtrim($deploy['path'], '/');
+        if (!is_dir($deployDir)) abort(400, 'Staging directory no longer exists');
+
+        // Re-write hardening .htaccess last, ensuring it overwrites anything the caller uploaded
+        $spaMode  = (bool)$site['spa_mode'];
+        file_put_contents($deployDir . '/.htaccess', self::buildHardeningHtaccess($spaMode));
+
+        // Calculate total size
+        $totalSize = 0;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($deployDir, \RecursiveDirectoryIterator::SKIP_DOTS)
+        );
+        foreach ($it as $f) {
+            if ($f->isFile()) $totalSize += $f->getSize();
+        }
+
+        $sitesPath  = $config['SITES_PATH'];
+        $currentDir = $sitesPath . '/s' . $siteId . '/current';
+
+        if (is_dir($currentDir) && !is_link($currentDir)) {
+            self::rrmdir($currentDir);
+        } elseif (is_link($currentDir)) {
+            unlink($currentDir);
+        }
+
+        self::rcopy($deployDir, $currentDir);
+
+        if (!is_dir($currentDir)) {
+            $catalog->updateDeploy($deployId, 'failed', $deployDir);
+            abort(500, 'Finalize copy failed — current/ directory was not created');
+        }
+
+        // Update size in DB via a direct query since updateDeploy doesn't expose size
+        $pdo = \App::get('db');
+        $pdo->prepare('UPDATE deploys SET size_bytes = ? WHERE id = ?')->execute([$totalSize, $deployId]);
+
+        $catalog->updateDeploy($deployId, 'ready', $deployDir);
+        $catalog->updateSiteCurrentDeploy($siteId, $deployId);
+
+        json_out($catalog->getDeployById($deployId));
+    }
+
+    /**
+     * Compare two deploy snapshots.
+     * GET /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/diff?vs=:other_id
+     */
+    public static function diff(array $req): void
+    {
+        $config    = \App::get('config');
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+        $deployId  = (int)$req['params']['deploy_id'];
+        $otherId   = (int)($req['query']['vs'] ?? 0);
+
+        if (!$otherId) abort(422, 'Query parameter ?vs= (other deploy id) is required');
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        $deployA = $catalog->getDeployById($deployId);
+        if (!$deployA || (int)$deployA['site_id'] !== $siteId || $deployA['status'] !== 'ready') {
+            abort(404, 'Deploy not found or not ready');
+        }
+
+        $deployB = $catalog->getDeployById($otherId);
+        if (!$deployB || (int)$deployB['site_id'] !== $siteId || $deployB['status'] !== 'ready') {
+            abort(404, 'Comparison deploy (vs) not found or not ready');
+        }
+
+        $sitesPath = $config['SITES_PATH'];
+
+        // Safety: both paths must stay within SITES_PATH
+        $pathA = self::normalizePath($deployA['path']);
+        $pathB = self::normalizePath($deployB['path']);
+        $prefix = rtrim($sitesPath, '/') . '/';
+        if (!str_starts_with($pathA, $prefix) || !str_starts_with($pathB, $prefix)) {
+            abort(400, 'Invalid deploy paths');
+        }
+
+        if (!is_dir($pathA)) abort(400, 'Deploy directory for ' . $deployId . ' no longer exists');
+        if (!is_dir($pathB)) abort(400, 'Deploy directory for ' . $otherId . ' no longer exists');
+
+        $filesA = self::hashTree($pathA);
+        $filesB = self::hashTree($pathB);
+
+        $added     = [];
+        $removed   = [];
+        $modified  = [];
+        $unchanged = 0;
+
+        foreach ($filesA as $path => $hash) {
+            if (!isset($filesB[$path])) {
+                // In A but not B → this file was added relative to B
+                $added[] = $path;
+            } elseif ($filesB[$path] !== $hash) {
+                $modified[] = $path;
+            } else {
+                $unchanged++;
+            }
+        }
+
+        foreach ($filesB as $path => $hash) {
+            if (!isset($filesA[$path])) {
+                $removed[] = $path;
+            }
+        }
+
+        sort($added);
+        sort($removed);
+        sort($modified);
+
+        json_out([
+            'deploy_id'   => $deployId,
+            'vs'          => $otherId,
+            'added'       => $added,
+            'removed'     => $removed,
+            'modified'    => $modified,
+            'unchanged'   => $unchanged,
+        ]);
+    }
+
+    /**
+     * Walk a deploy directory and return [relativePath => sha256].
+     */
+    private static function hashTree(string $dir): array
+    {
+        $dir    = rtrim($dir, '/');
+        $base   = $dir . '/';
+        $result = [];
+        $it     = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \RecursiveDirectoryIterator::SKIP_DOTS)
+        );
+        foreach ($it as $f) {
+            if ($f->isFile()) {
+                $rel          = substr($f->getPathname(), strlen($base));
+                $result[$rel] = hash_file('sha256', $f->getPathname());
+            }
+        }
+        return $result;
+    }
+
+    // ─── End file-by-file deploy API ─────────────────────────────────────────
 
     public static function rollback(array $req): void
     {

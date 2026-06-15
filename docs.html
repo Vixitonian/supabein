@@ -189,6 +189,12 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#deploys-list">List deploys</a>
     <a class="sb-link" href="#deploys">Deploy zip</a>
     <a class="sb-link" href="#rollback">Rollback</a>
+    <a class="sb-link" href="#deploy-open">Open deploy</a>
+    <a class="sb-link" href="#deploy-put-file">Upload file</a>
+    <a class="sb-link" href="#deploy-list-files">List staged files</a>
+    <a class="sb-link" href="#deploy-delete-file">Delete staged file</a>
+    <a class="sb-link" href="#deploy-finalize">Finalize deploy</a>
+    <a class="sb-link" href="#deploy-diff">Diff deploys</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Access Tokens</span>
@@ -603,6 +609,133 @@ curl "https://your-domain/api/v1/data/1/users" \
     <div class="code-wrap"><pre class="code" id="c-rb">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/3/rollback" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-rb',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── File-by-file deploy API ── -->
+<h3 style="margin:40px 0 8px;font-size:1rem;font-weight:700">File-by-File Deploy API</h3>
+<p style="color:var(--text-muted);margin-bottom:20px">An alternative to zip uploads. Open a staging deploy, push individual files over HTTP, then finalize. Ideal for CI/CD pipelines and build tools.</p>
+
+<div class="code-wrap" style="margin-bottom:32px"><pre class="code" id="c-cicd"># 1. Open a deploy (returns deploy_id)
+DID=$(curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/open" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"v2.1.0"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+# 2. Upload changed files
+for f in dist/**/*; do
+  [[ -f "$f" ]] || continue
+  REL="${f#dist/}"
+  curl -sX PUT "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/files?path=$REL" \
+    -H "Authorization: Bearer YOUR_TOKEN" \
+    --data-binary "@$f"
+done
+
+# 3. Finalize (go live)
+curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finalize" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+<button class="copy-btn" onclick="copyEl('c-cicd',this)">Copy</button></div>
+
+<div class="endpoint" id="deploy-open">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/open</span>
+    <span class="desc">Open a new pending deploy</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Creates an empty staging directory and returns a deploy record with <code>status: "pending"</code>. Optionally accepts a <code>label</code> for version tracking. Use the returned <code>id</code> in subsequent file upload calls.</p>
+    <div class="param-table">
+      <div class="param-row"><span class="param-name">label</span><span class="param-desc">Optional version label (e.g. <code>"v2.1.0"</code>). Defaults to current timestamp.</span></div>
+    </div>
+    <div class="code-wrap"><pre class="code" id="c-open">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/open" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"v2.1.0"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-open',this)">Copy</button></div>
+    <p>Returns: <code>{ id, site_id, version_label, status: "pending", staged_dir, uploaded_at }</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-put-file">
+  <div class="endpoint-head">
+    <span class="method put">PUT</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
+    <span class="desc">Upload a single file into the staging deploy</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Send the raw file bytes as the request body. The <code>?path=</code> query parameter specifies where the file goes relative to the site root. Subdirectories are created automatically. Blocked extensions (<code>.php</code>, <code>.sh</code>, etc.) return <code>403</code>.</p>
+    <div class="code-wrap"><pre class="code" id="c-putfile">curl -X PUT "https://your-domain/api/v1/projects/1/sites/1/deploys/7/files?path=assets/app.js" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  --data-binary "@./dist/assets/app.js"</pre>
+    <button class="copy-btn" onclick="copyEl('c-putfile',this)">Copy</button></div>
+    <p>Returns: <code>{ path, size }</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-list-files">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files</span>
+    <span class="desc">List all staged files in a deploy</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-listfiles">curl "https://your-domain/api/v1/projects/1/sites/1/deploys/7/files" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-listfiles',this)">Copy</button></div>
+    <p>Returns: <code>{ deploy_id, status, files: [{ path, size }, ...] }</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-delete-file">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
+    <span class="desc">Remove a staged file from a pending deploy</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Only works while the deploy is still in <code>pending</code> status.</p>
+    <div class="code-wrap"><pre class="code" id="c-delfile">curl -X DELETE "https://your-domain/api/v1/projects/1/sites/1/deploys/7/files?path=old-page.html" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-delfile',this)">Copy</button></div>
+    <p>Returns: <code>{ deleted: true, path }</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-finalize">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/finalize</span>
+    <span class="desc">Finalize a pending deploy and go live</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Writes the hardening <code>.htaccess</code>, copies the staging directory to <code>current/</code>, and marks the deploy <code>ready</code>. The site is immediately live after this call.</p>
+    <div class="code-wrap"><pre class="code" id="c-finalize">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/7/finalize" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-finalize',this)">Copy</button></div>
+    <p>Returns the updated deploy record with <code>status: "ready"</code>.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-diff">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/diff?vs=:other_id</span>
+    <span class="desc">Compare two deploy snapshots</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Compares the file tree of <code>:deploy_id</code> against <code>?vs=:other_id</code> using SHA-256 hashes. Both deploys must be in <code>ready</code> status. Files in <code>added</code> are present in <code>:deploy_id</code> but not in <code>vs</code>; <code>removed</code> is the inverse.</p>
+    <div class="code-wrap"><pre class="code" id="c-diff">curl "https://your-domain/api/v1/projects/1/sites/1/deploys/7/diff?vs=5" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-diff',this)">Copy</button></div>
+    <div class="code-wrap"><pre class="code" id="c-diff-resp">{
+  "deploy_id": 7,
+  "vs": 5,
+  "added":    ["assets/new-logo.svg"],
+  "removed":  ["old-page.html"],
+  "modified": ["index.html", "assets/app.js"],
+  "unchanged": 12
+}</pre>
+    <button class="copy-btn" onclick="copyEl('c-diff-resp',this)">Copy</button></div>
   </div>
 </div>
 

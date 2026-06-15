@@ -68,7 +68,51 @@ function register_deploy_routes(\SupaBein\Router $router): void
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
 
-    // POST /v1/projects/:project_id/sites/:site_id/deploys  (file upload)
+    // ── File-by-file deploy API ──────────────────────────────────────────────
+
+    // POST /v1/projects/:project_id/sites/:site_id/deploys/open
+    $router->post(
+        '/v1/projects/:project_id/sites/:site_id/deploys/open',
+        [\SupaBein\Deploy::class, 'open'],
+        ['auth_middleware']
+    );
+
+    // GET /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files
+    $router->get(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files',
+        [\SupaBein\Deploy::class, 'listFiles'],
+        ['auth_middleware']
+    );
+
+    // PUT /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files?path=
+    $router->put(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files',
+        [\SupaBein\Deploy::class, 'putFile'],
+        ['auth_middleware']
+    );
+
+    // DELETE /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files?path=
+    $router->delete(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files',
+        [\SupaBein\Deploy::class, 'deleteFile'],
+        ['auth_middleware']
+    );
+
+    // POST /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/finalize
+    $router->post(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/finalize',
+        [\SupaBein\Deploy::class, 'finalize'],
+        ['auth_middleware']
+    );
+
+    // GET /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/diff?vs=
+    $router->get(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/diff',
+        [\SupaBein\Deploy::class, 'diff'],
+        ['auth_middleware']
+    );
+
+    // POST /v1/projects/:project_id/sites/:site_id/deploys  (zip file upload)
     $router->post('/v1/projects/:project_id/sites/:site_id/deploys', [\SupaBein\Deploy::class, 'upload'], ['auth_middleware']);
 
     // GET /v1/projects/:project_id/sites/:site_id/deploys

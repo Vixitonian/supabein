@@ -774,6 +774,11 @@ async function loadDeployContent(projectId, siteId) {
       <div class="card">
         <div class="card-title">Upload Deploy (zip)</div>
         <div class="form-group">
+          <label class="label">Version label (optional)</label>
+          <input type="text" id="deploy-label" class="input" placeholder="e.g. v1.0.0 or hotfix-login">
+        </div>
+        <div class="form-group">
+          <label class="label">Zip file</label>
           <input type="file" id="zip-file" accept=".zip">
         </div>
         <button class="btn btn-primary" id="deploy-btn">Deploy</button>
@@ -789,8 +794,10 @@ async function loadDeployContent(projectId, siteId) {
       const file = uploadFormEl.querySelector('#zip-file').files[0];
       if (!file) { alert('Select a zip file first'); return; }
 
+      const labelVal = uploadFormEl.querySelector('#deploy-label').value.trim();
       const fd = new FormData();
       fd.append('zipfile', file);
+      if (labelVal) fd.append('label', labelVal);
 
       const progressWrap = uploadFormEl.querySelector('#progress-wrap');
       const progressBar  = uploadFormEl.querySelector('#progress-bar');
@@ -840,27 +847,56 @@ async function loadDeployContent(projectId, siteId) {
           el('thead', {}, el('tr', {},
             el('th', {}, 'Version'), el('th', {}, 'Status'), el('th', {}, 'Size'), el('th', {}, 'Uploaded'), el('th', {}, '')
           )),
-          el('tbody', {}, ...deploys.map(d => {
+          el('tbody', {}, ...deploys.map((d, idx) => {
             const isCurrent = d.id === site.current_deploy_id;
+            const nextReady = deploys.slice(idx + 1).find(x => x.status === 'ready');
+            const labelEl = el('span', {}, d.version_label || '—');
+            if (isCurrent) {
+              const chip = el('span', { class: 'badge badge-green', style: 'margin-left:6px;font-size:0.7rem' }, 'live');
+              labelEl.appendChild(chip);
+            } else if (d.status === 'pending') {
+              const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'pending');
+              labelEl.appendChild(chip);
+            }
+            const actions = el('td', { style: 'white-space:nowrap' });
+            if (!isCurrent && d.status === 'ready') {
+              actions.appendChild(el('button', {
+                class: 'btn btn-sm btn-secondary',
+                style: 'margin-right:6px',
+                onClick: async () => {
+                  if (!confirm('Roll back to this deploy?')) return;
+                  try {
+                    await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/rollback`);
+                    loadDeployContent(projectId, siteId);
+                  } catch (e) { alert(e.message); }
+                }
+              }, 'Rollback'));
+            }
+            if (nextReady && d.status === 'ready') {
+              actions.appendChild(el('button', {
+                class: 'btn btn-sm btn-ghost',
+                onClick: async () => {
+                  try {
+                    const diff = await Api.get(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/diff?vs=${nextReady.id}`);
+                    const lines = [
+                      `Diff: deploy ${d.id} vs ${nextReady.id}`,
+                      '',
+                      `Added (${diff.added.length}):    ${diff.added.join(', ') || 'none'}`,
+                      `Removed (${diff.removed.length}): ${diff.removed.join(', ') || 'none'}`,
+                      `Modified (${diff.modified.length}): ${diff.modified.join(', ') || 'none'}`,
+                      `Unchanged: ${diff.unchanged}`,
+                    ];
+                    alert(lines.join('\n'));
+                  } catch (e) { alert(e.message); }
+                }
+              }, 'Diff'));
+            }
             return el('tr', {},
-              el('td', {}, d.version_label + (isCurrent ? ' ✓' : '')),
+              el('td', {}, labelEl),
               el('td', {}, ...h(`<span>${statusBadge(d)}</span>`).children),
               el('td', { class: 'text-muted text-sm' }, d.size_bytes ? Math.round(d.size_bytes / 1024) + ' KB' : '—'),
               el('td', { class: 'text-muted text-sm' }, fmtDate(d.uploaded_at)),
-              el('td', {},
-                !isCurrent && d.status === 'ready'
-                  ? el('button', {
-                      class: 'btn btn-sm btn-secondary',
-                      onClick: async () => {
-                        if (!confirm('Roll back to this deploy?')) return;
-                        try {
-                          await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/rollback`);
-                          loadDeployContent(projectId, siteId);
-                        } catch (e) { alert(e.message); }
-                      }
-                    }, 'Rollback')
-                  : ''
-              )
+              actions
             );
           }))
         )
