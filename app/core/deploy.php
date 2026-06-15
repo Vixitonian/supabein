@@ -152,21 +152,17 @@ class Deploy
         $htaccess  = self::buildHardeningHtaccess($spaMode);
         file_put_contents($deployDir . '/.htaccess', $htaccess);
 
-        // ── Phase 5: Atomic symlink swap ─────────────────────────────────────
+        // ── Phase 5: Install to current/ directory ───────────────────────────
 
-        $projectSiteDir = $sitesPath . '/p' . $projectId;
-        $currentLink    = $projectSiteDir . '/current';
-        $tmpLink        = $currentLink . '_tmp_' . getmypid();
+        $currentDir = $sitesPath . '/p' . $projectId . '/current';
 
-        if (symlink($deployDir, $tmpLink)) {
-            rename($tmpLink, $currentLink);
-        } else {
-            // Fallback: direct symlink creation (may not be atomic)
-            if (is_link($currentLink)) {
-                unlink($currentLink);
-            }
-            symlink($deployDir, $currentLink);
+        if (is_dir($currentDir) && !is_link($currentDir)) {
+            self::rrmdir($currentDir);
+        } elseif (is_link($currentDir)) {
+            unlink($currentDir);
         }
+
+        self::rcopy($deployDir, $currentDir);
 
         $catalog->updateDeploy($deploy['id'], 'ready', $deployDir);
         $catalog->updateSiteCurrentDeploy($siteId, $deploy['id']);
@@ -209,17 +205,15 @@ class Deploy
             abort(400, 'Deploy directory no longer exists');
         }
 
-        $currentLink = $sitesPath . '/p' . $projectId . '/current';
-        $tmpLink     = $currentLink . '_tmp_' . getmypid();
+        $currentDir = $sitesPath . '/p' . $projectId . '/current';
 
-        if (symlink($deployDir, $tmpLink)) {
-            rename($tmpLink, $currentLink);
-        } else {
-            if (is_link($currentLink)) {
-                unlink($currentLink);
-            }
-            symlink($deployDir, $currentLink);
+        if (is_dir($currentDir) && !is_link($currentDir)) {
+            self::rrmdir($currentDir);
+        } elseif (is_link($currentDir)) {
+            unlink($currentDir);
         }
+
+        self::rcopy($deployDir, $currentDir);
 
         $catalog->updateSiteCurrentDeploy($siteId, $deployId);
 
@@ -284,6 +278,40 @@ SPA;
         }
 
         return $htaccess;
+    }
+
+    private static function rrmdir(string $dir): void
+    {
+        if (!is_dir($dir)) return;
+        $it = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($dir, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::CHILD_FIRST
+        );
+        foreach ($it as $item) {
+            $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname());
+        }
+        rmdir($dir);
+    }
+
+    private static function rcopy(string $src, string $dst): void
+    {
+        if (!is_dir($dst)) {
+            mkdir($dst, 0755, true);
+        }
+        $src    = rtrim($src, '/');
+        $srcLen = strlen($src) + 1;
+        $it     = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($src, \RecursiveDirectoryIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::SELF_FIRST
+        );
+        foreach ($it as $item) {
+            $target = $dst . '/' . substr($item->getPathname(), $srcLen);
+            if ($item->isDir()) {
+                if (!is_dir($target)) mkdir($target, 0755, true);
+            } else {
+                copy($item->getPathname(), $target);
+            }
+        }
     }
 
     private static function uploadErrorMessage(int $code): string
