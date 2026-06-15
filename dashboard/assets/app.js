@@ -523,74 +523,184 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
 // ─── Pages ───────────────────────────────────────────────────────────────────
 
 // Login
-function renderLogin() {
-  const form = h(`
-    <div class="auth-wrap">
-      <div class="auth-box card">
-        <div class="auth-logo">SupaBein</div>
-        <div class="auth-sub">Sign in to your account</div>
-        <div class="form-group"><label>Email</label><input type="email" id="email" placeholder="you@example.com"></div>
-        <div class="form-group"><label>Password</label><input type="password" id="password"></div>
-        <button class="btn btn-primary w-full" id="submit">Sign In</button>
-        <div class="mt-3 text-sm text-muted" style="text-align:center">
-          No account? <a href="#/signup">Sign up</a>
-        </div>
-      </div>
-    </div>
-  `);
+function authBrand() {
+  const homeHref = Auth.isLoggedIn() ? '#/projects' : '/';
+  return h(`<a class="auth-brand" href="${homeHref}">
+    <div class="auth-mark">SB</div>
+    <span class="auth-brand-name">SupaBein</span>
+  </a>`);
+}
 
-  form.querySelector('#submit').addEventListener('click', async () => {
-    const email    = form.querySelector('#email').value;
-    const password = form.querySelector('#password').value;
+function renderLogin() {
+  const wrap = el('div', { class: 'auth-wrap' },
+    el('div', { class: 'auth-box card' },
+      authBrand(),
+      el('div', { class: 'auth-sub' }, 'Sign in to your account'),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Email'),
+        el('input', { type: 'email', id: 'email', placeholder: 'you@example.com', autocomplete: 'email' })
+      ),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Password'),
+        el('input', { type: 'password', id: 'password', autocomplete: 'current-password' }),
+        el('a', { class: 'auth-forgot', href: '#/forgot' }, 'Forgot password?')
+      ),
+      el('button', { class: 'btn btn-primary w-full', id: 'submit' }, 'Sign In'),
+      el('div', { class: 'auth-switch' },
+        'No account? ', el('a', { href: '#/signup' }, 'Sign up')
+      )
+    )
+  );
+
+  wrap.querySelector('#submit').addEventListener('click', async () => {
+    const email    = wrap.querySelector('#email').value;
+    const password = wrap.querySelector('#password').value;
+    const btn = wrap.querySelector('#submit');
+    btn.disabled = true; btn.textContent = 'Signing in…';
     try {
       const res = await Api.post('/v1/auth/login', { email, password });
       Auth.setToken(res.token);
       Router.navigate('/projects');
     } catch (e) {
-      showAlert(form.querySelector('.auth-box'), e.message);
+      showAlert(wrap.querySelector('.auth-box'), e.message);
+      btn.disabled = false; btn.textContent = 'Sign In';
     }
   });
 
-  setApp(form);
+  wrap.querySelector('#password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') wrap.querySelector('#submit').click();
+  });
+
+  setApp(wrap);
 }
 
-// Signup
 function renderSignup() {
-  const form = h(`
-    <div class="auth-wrap">
-      <div class="auth-box card">
-        <div class="auth-logo">SupaBein</div>
-        <div class="auth-sub">Create your account</div>
-        <div class="form-group"><label>Email</label><input type="email" id="email" placeholder="you@example.com"></div>
-        <div class="form-group"><label>Password</label><input type="password" id="password" placeholder="At least 8 characters"></div>
-        <button class="btn btn-primary w-full" id="submit">Create Account</button>
-        <div class="mt-3 text-sm text-muted" style="text-align:center">
-          Have an account? <a href="#/login">Sign in</a>
-        </div>
-      </div>
-    </div>
-  `);
+  const wrap = el('div', { class: 'auth-wrap' },
+    el('div', { class: 'auth-box card' },
+      authBrand(),
+      el('div', { class: 'auth-sub' }, 'Create your SupaBein account'),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Email'),
+        el('input', { type: 'email', id: 'email', placeholder: 'you@example.com', autocomplete: 'email' })
+      ),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Password'),
+        el('input', { type: 'password', id: 'password', placeholder: 'At least 8 characters', autocomplete: 'new-password' })
+      ),
+      el('button', { class: 'btn btn-primary w-full', id: 'submit' }, 'Create Account'),
+      el('div', { class: 'auth-switch' },
+        'Already have an account? ', el('a', { href: '#/login' }, 'Sign in')
+      )
+    )
+  );
 
-  form.querySelector('#submit').addEventListener('click', async () => {
-    const email    = form.querySelector('#email').value;
-    const password = form.querySelector('#password').value;
-
-    console.log('[SupaBein] Signup button clicked', { email, passwordLen: password.length });
-    console.log('[SupaBein] POST URL:', Api.BASE + '/v1/auth/signup');
-
+  wrap.querySelector('#submit').addEventListener('click', async () => {
+    const email    = wrap.querySelector('#email').value;
+    const password = wrap.querySelector('#password').value;
+    const btn = wrap.querySelector('#submit');
+    btn.disabled = true; btn.textContent = 'Creating account…';
     try {
-      console.log('[SupaBein] Sending signup request...');
       const res = await Api.post('/v1/auth/signup', { email, password });
-      console.log('[SupaBein] Signup success', res);
       Auth.setToken(res.token);
       Router.navigate('/projects');
     } catch (e) {
-      console.error('[SupaBein] Signup failed', { status: e.status, message: e.message });
-      showAlert(form.querySelector('.auth-box'), e.message);
+      showAlert(wrap.querySelector('.auth-box'), e.message);
+      btn.disabled = false; btn.textContent = 'Create Account';
     }
   });
 
-  setApp(form);
+  wrap.querySelector('#password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') wrap.querySelector('#submit').click();
+  });
+
+  setApp(wrap);
+}
+
+function renderForgot() {
+  const wrap = el('div', { class: 'auth-wrap' },
+    el('div', { class: 'auth-box card' },
+      authBrand(),
+      el('div', { class: 'auth-sub' }, 'Reset your password'),
+      el('p', { style: 'font-size:13px;color:var(--text-muted);margin-bottom:20px;text-align:center' },
+        'Enter your email and we\'ll generate a reset token.'
+      ),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Email'),
+        el('input', { type: 'email', id: 'email', placeholder: 'you@example.com', autocomplete: 'email' })
+      ),
+      el('button', { class: 'btn btn-primary w-full', id: 'submit' }, 'Generate Reset Token'),
+      el('div', { class: 'auth-switch' }, el('a', { href: '#/login' }, '← Back to sign in'))
+    )
+  );
+
+  wrap.querySelector('#submit').addEventListener('click', async () => {
+    const email = wrap.querySelector('#email').value;
+    const btn = wrap.querySelector('#submit');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    try {
+      const res = await Api.post('/v1/auth/forgot', { email });
+      const box = wrap.querySelector('.auth-box');
+      box.innerHTML = '';
+      box.appendChild(authBrand());
+      box.appendChild(h(`<div class="auth-sub">Check your email</div>`));
+      if (res.token) {
+        box.appendChild(h(`<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;text-align:center">Your reset token (copy and keep it safe):</p>`));
+        const codeBlock = h(`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-family:monospace;font-size:12px;word-break:break-all;margin-bottom:16px">${res.token}</div>`);
+        box.appendChild(codeBlock);
+        const copyBtn = el('button', { class: 'btn btn-sm w-full', style: 'margin-bottom:16px' }, 'Copy Token');
+        copyBtn.addEventListener('click', () => {
+          navigator.clipboard.writeText(res.token);
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => { copyBtn.textContent = 'Copy Token'; }, 1500);
+        });
+        box.appendChild(copyBtn);
+      } else {
+        box.appendChild(h(`<p style="font-size:13px;color:var(--text-muted);text-align:center;margin-bottom:16px">${res.message}</p>`));
+      }
+      box.appendChild(el('a', { class: 'btn btn-primary w-full', href: '#/reset' }, 'Enter Reset Token →'));
+    } catch (e) {
+      showAlert(wrap.querySelector('.auth-box'), e.message);
+      btn.disabled = false; btn.textContent = 'Generate Reset Token';
+    }
+  });
+
+  setApp(wrap);
+}
+
+function renderReset() {
+  const wrap = el('div', { class: 'auth-wrap' },
+    el('div', { class: 'auth-box card' },
+      authBrand(),
+      el('div', { class: 'auth-sub' }, 'Set a new password'),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Reset Token'),
+        el('input', { type: 'text', id: 'token', placeholder: 'Paste your reset token' })
+      ),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'New Password'),
+        el('input', { type: 'password', id: 'password', placeholder: 'At least 8 characters', autocomplete: 'new-password' })
+      ),
+      el('button', { class: 'btn btn-primary w-full', id: 'submit' }, 'Reset Password'),
+      el('div', { class: 'auth-switch' }, el('a', { href: '#/login' }, '← Back to sign in'))
+    )
+  );
+
+  wrap.querySelector('#submit').addEventListener('click', async () => {
+    const token    = wrap.querySelector('#token').value.trim();
+    const password = wrap.querySelector('#password').value;
+    const btn = wrap.querySelector('#submit');
+    btn.disabled = true; btn.textContent = 'Resetting…';
+    try {
+      const res = await Api.post('/v1/auth/reset', { token, password });
+      Auth.setToken(res.token);
+      Router.navigate('/projects');
+    } catch (e) {
+      showAlert(wrap.querySelector('.auth-box'), e.message);
+      btn.disabled = false; btn.textContent = 'Reset Password';
+    }
+  });
+
+  setApp(wrap);
 }
 
 // Projects list
@@ -677,25 +787,92 @@ function showNewProjectModal() {
 // Project overview
 async function renderProject({ id }) {
   if (!requireAuth()) return;
+  renderLayout(id, '', [el('p', { class: 'text-muted' }, 'Loading…')]);
 
   try {
-    const project = await Api.get(`/v1/projects/${id}`);
-    renderLayout(id, '', [
+    const [project, tables, usersRes, sites] = await Promise.all([
+      Api.get(`/v1/projects/${id}`),
+      Api.get(`/v1/projects/${id}/tables`).catch(() => []),
+      Api.get(`/v1/projects/${id}/users`).catch(() => ({ users: [], count: 0 })),
+      Api.get(`/v1/projects/${id}/sites`).catch(() => []),
+    ]);
+
+    const tableCount = tables.length;
+    const userCount  = usersRes.count ?? 0;
+    const site       = sites[0] ?? null;
+    const deployed   = site && site.current_deploy_id;
+
+    const statCard = (icon, value, label) =>
+      el('div', { class: 'stat-card' },
+        el('div', { class: 'stat-card-icon' }, icon),
+        el('div', { class: 'stat-card-value' }, String(value)),
+        el('div', { class: 'stat-card-label' }, label)
+      );
+
+    const actionCard = (icon, title, desc, href) =>
+      el('a', { class: 'action-card', href },
+        el('div', { class: 'action-card-icon' }, icon),
+        el('div', { class: 'action-card-title' }, title),
+        el('div', { class: 'action-card-desc' }, desc)
+      );
+
+    const anonKeySection = project.anon_key
+      ? el('div', { class: 'card' },
+          el('div', { class: 'card-title' }, 'Anon Key'),
+          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
+            'Use this in your frontend to call table endpoints. Requests are subject to your table policies.'
+          ),
+          el('div', { style: 'display:flex;gap:8px;align-items:center' },
+            el('code', { id: 'anon-key-display', style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
+              project.anon_key.slice(0, 40) + '…'
+            ),
+            el('button', { class: 'btn btn-sm', id: 'copy-anon' }, 'Copy')
+          )
+        )
+      : null;
+
+    if (anonKeySection) {
+      anonKeySection.querySelector('#copy-anon').addEventListener('click', () => {
+        navigator.clipboard.writeText(project.anon_key);
+        const btn = anonKeySection.querySelector('#copy-anon');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+      });
+    }
+
+    const content = [
       el('div', { class: 'page-header' },
-        el('h1', { class: 'page-title' }, project.name)
+        el('div', {},
+          el('h1', { class: 'page-title' }, project.name),
+          el('div', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' },
+            `Project ID: ${project.id}  ·  Created ${fmtDate(project.created_at)}`
+          )
+        )
       ),
-      el('div', { class: 'flex gap-2' },
-        el('a', { class: 'btn btn-primary', href: `#/projects/${id}/tables` }, 'Tables'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/sites` }, 'Deploy')
+
+      el('div', { class: 'stat-grid' },
+        statCard('⬡', tableCount, tableCount === 1 ? 'Table' : 'Tables'),
+        statCard('◎', userCount, userCount === 1 ? 'App User' : 'App Users'),
+        statCard('⚑', deployed ? 'Live' : site ? 'No deploy' : 'No site', 'Site Status'),
+        statCard('🔑', project.anon_key ? 'Ready' : '—', 'API Keys')
       ),
-      el('div', { class: 'card mt-3' },
-        el('div', { class: 'card-title' }, 'Project Info'),
-        el('div', { class: 'text-sm text-muted' }, `ID: ${project.id}`),
-        el('div', { class: 'text-sm text-muted mt-1' }, `Created: ${fmtDate(project.created_at)}`)
-      )
-    ], { projectName: project.name });
+
+      el('div', { style: 'margin-bottom:24px' },
+        el('h3', { style: 'font-size:0.85rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px' }, 'Quick Actions'),
+        el('div', { class: 'action-grid' },
+          actionCard('⬡', 'Tables', `${tableCount} table${tableCount !== 1 ? 's' : ''}`, `#/projects/${id}/tables`),
+          actionCard('◎', 'Users', `${userCount} app user${userCount !== 1 ? 's' : ''}`, `#/projects/${id}/users`),
+          actionCard('⚡', 'API Reference', 'Endpoints & examples', `#/projects/${id}/api`),
+          actionCard('🚀', 'Deploy', deployed ? 'Site is live' : 'No deploys yet', `#/projects/${id}/sites`),
+        )
+      ),
+
+      ...(anonKeySection ? [anonKeySection] : []),
+    ];
+
+    renderLayout(id, '', content, { projectName: project.name });
   } catch (e) {
-    setApp(`<div class="alert alert-error">${e.message}</div>`);
+    setApp(`<div class="alert alert-danger">${e.message}</div>`);
   }
 }
 
@@ -1940,12 +2117,48 @@ async function renderAccount() {
     el('div', { style: 'display:flex;gap:8px;margin-top:10px' }, copyMdBtn, dlBtn)
   );
 
+  // ── Change password card ──
+  const pwFields = {
+    current: el('input', { type: 'password', class: 'form-control', placeholder: 'Current password' }),
+    next:    el('input', { type: 'password', class: 'form-control', placeholder: 'New password (min 8 chars)' }),
+    msg:     el('div', { style: 'font-size:0.82rem;min-height:18px' }),
+  };
+  const pwBtn = el('button', { class: 'btn btn-sm btn-primary' }, 'Change Password');
+  pwBtn.addEventListener('click', async () => {
+    pwFields.msg.textContent = '';
+    pwFields.msg.style.color = '';
+    pwBtn.disabled = true; pwBtn.textContent = 'Saving…';
+    try {
+      await Api.patch('/v1/auth/password', {
+        current_password: pwFields.current.value,
+        new_password: pwFields.next.value,
+      });
+      pwFields.current.value = ''; pwFields.next.value = '';
+      pwFields.msg.textContent = 'Password changed successfully.';
+      pwFields.msg.style.color = 'var(--success, #16a34a)';
+    } catch (e) {
+      pwFields.msg.textContent = e.message;
+      pwFields.msg.style.color = 'var(--danger, #dc2626)';
+    }
+    pwBtn.disabled = false; pwBtn.textContent = 'Change Password';
+  });
+
+  const pwCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'Change Password'),
+    el('div', { style: 'display:flex;flex-direction:column;gap:10px;margin-top:12px' },
+      el('div', { class: 'form-group', style: 'margin:0' }, pwFields.current),
+      el('div', { class: 'form-group', style: 'margin:0' }, pwFields.next),
+      el('div', { style: 'display:flex;align-items:center;gap:12px' }, pwBtn, pwFields.msg)
+    )
+  );
+
   renderLayout(null, 'account', [
     el('div', { class: 'page-header' },
       el('h1', { class: 'page-title' }, 'Account'),
       el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'API Docs ↗')
     ),
     infoCard,
+    pwCard,
     patCard,
     builderCard,
   ]);
@@ -1960,6 +2173,8 @@ Router.add('', () => {
 
 Router.add('login',  renderLogin);
 Router.add('signup', renderSignup);
+Router.add('forgot', renderForgot);
+Router.add('reset',  renderReset);
 
 Router.add('logout', () => {
   Auth.clear();

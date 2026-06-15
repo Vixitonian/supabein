@@ -125,6 +125,98 @@ function register_auth_routes(\SupaBein\Router $router): void
         }
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
+
+    // PATCH /v1/auth/password — change password while logged in
+    $router->patch('/v1/auth/password', function (array $req): void {
+        $current = $req['body']['current_password'] ?? '';
+        $new     = $req['body']['new_password']     ?? '';
+
+        if (!$current || !$new) {
+            abort(422, 'current_password and new_password are required');
+        }
+        if (strlen($new) < 8) {
+            abort(422, 'New password must be at least 8 characters');
+        }
+
+        $pdo  = App::get('db');
+        $stmt = $pdo->prepare('SELECT id, password_hash FROM users WHERE id = ?');
+        $stmt->execute([$req['auth']['user_id']]);
+        $user = $stmt->fetch();
+
+        if (!$user || !password_verify($current, $user['password_hash'])) {
+            abort(401, 'Current password is incorrect');
+        }
+
+        $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+            ->execute([password_hash($new, PASSWORD_BCRYPT), $user['id']]);
+
+        json_out(['message' => 'Password changed successfully']);
+    }, ['auth_middleware']);
+
+    // POST /v1/auth/forgot — generate password-reset token for a platform operator
+    $router->post('/v1/auth/forgot', function (array $req): void {
+        $email = trim($req['body']['email'] ?? '');
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            abort(422, 'Invalid email address');
+        }
+
+        $pdo  = App::get('db');
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ?');
+        $stmt->execute([$email]);
+        $user = $stmt->fetch();
+
+        // Always return the same shape to prevent enumeration
+        if (!$user) {
+            json_out(['message' => 'If that email is registered, a reset token has been generated.', 'token' => null, 'expires_in' => 3600]);
+            return;
+        }
+
+        $raw     = bin2hex(random_bytes(32));
+        $hash    = hash('sha256', $raw);
+        $expires = date('Y-m-d H:i:s', time() + 3600);
+
+        $pdo->prepare('DELETE FROM user_reset_tokens WHERE user_id = ?')->execute([$user['id']]);
+        $pdo->prepare('INSERT INTO user_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)')->execute([$user['id'], $hash, $expires]);
+
+        json_out(['message' => 'Reset token generated.', 'token' => $raw, 'expires_in' => 3600]);
+    });
+
+    // POST /v1/auth/reset — exchange token for new password
+    $router->post('/v1/auth/reset', function (array $req): void {
+        $token    = $req['body']['token']    ?? '';
+        $password = $req['body']['password'] ?? '';
+
+        if (!$token || !$password) {
+            abort(422, 'token and password are required');
+        }
+        if (strlen($password) < 8) {
+            abort(422, 'Password must be at least 8 characters');
+        }
+
+        $hash = hash('sha256', $token);
+        $pdo  = App::get('db');
+
+        $stmt = $pdo->prepare(
+            'SELECT t.id, t.user_id, u.email
+             FROM user_reset_tokens t
+             JOIN users u ON u.id = t.user_id
+             WHERE t.token_hash = ? AND t.used_at IS NULL AND t.expires_at > NOW()
+             LIMIT 1'
+        );
+        $stmt->execute([$hash]);
+        $row = $stmt->fetch();
+
+        if (!$row) {
+            abort(401, 'Invalid or expired reset token');
+        }
+
+        $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+            ->execute([password_hash($password, PASSWORD_BCRYPT), $row['user_id']]);
+        $pdo->prepare('UPDATE user_reset_tokens SET used_at = NOW() WHERE id = ?')
+            ->execute([$row['id']]);
+
+        json_out(['message' => 'Password updated successfully.', 'token' => issue_jwt((int)$row['user_id'], $row['email'], 'owner')]);
+    });
 }
 
 function issue_jwt(int $userId, string $email, string $role): string
