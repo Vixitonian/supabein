@@ -17,28 +17,68 @@ a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
 
 /* ── Nav ── */
-nav{
-  position:sticky;top:0;z-index:100;
-  background:rgba(15,17,23,.85);
-  backdrop-filter:blur(12px);
-  border-bottom:1px solid var(--border);
-  display:flex;align-items:center;justify-content:space-between;
-  padding:0 5%;height:60px;
+nav {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(15,17,23,.88);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 5%; height: 64px;
 }
-.nav-logo{font-size:1.15rem;font-weight:700;color:var(--accent);letter-spacing:-.02em}
-.nav-links{display:flex;align-items:center;gap:8px}
-.nav-links a{
-  color:var(--muted);font-size:.875rem;padding:7px 14px;
-  border-radius:6px;transition:color .15s,background .15s;
+.nav-brand { display: flex; align-items: center; gap: 9px; text-decoration: none; }
+.nav-mark {
+  width: 28px; height: 28px; background: var(--accent); color: #0a0d14;
+  font-size: 13px; font-weight: 800; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
 }
-.nav-links a:hover{color:var(--text);background:var(--surface);text-decoration:none}
-.nav-links .btn-outline{
-  border:1px solid var(--border);color:var(--text);
+.nav-logo { font-size: 1.05rem; font-weight: 700; color: var(--text); letter-spacing: -.02em; }
+
+.nav-links { display: flex; align-items: center; gap: 4px; }
+.nav-links a {
+  color: var(--muted); font-size: .875rem; padding: 7px 13px;
+  border-radius: 6px; transition: color .15s, background .15s;
 }
-.nav-links .btn-primary-sm{
-  background:var(--accent);color:#0f1117;font-weight:600;
+.nav-links a:hover { color: var(--text); background: rgba(255,255,255,.05); text-decoration: none; }
+.nav-links .btn-outline {
+  border: 1px solid var(--border); color: var(--text);
 }
-.nav-links .btn-primary-sm:hover{background:var(--accent-dim);color:#0f1117}
+.nav-links .btn-primary-sm {
+  background: var(--accent); color: #0f1117; font-weight: 600;
+}
+.nav-links .btn-primary-sm:hover { background: var(--accent-dim); color: #0f1117; opacity:1; }
+
+/* Hamburger — shown only on mobile */
+.nav-burger {
+  display: none; flex-direction: column; gap: 5px;
+  cursor: pointer; padding: 8px; border: none; background: none;
+}
+.nav-burger span {
+  display: block; width: 22px; height: 2px;
+  background: var(--muted); border-radius: 2px;
+  transition: transform .2s, opacity .2s;
+}
+/* Mobile dropdown */
+.nav-mobile {
+  display: none; position: fixed; top: 64px; left: 0; right: 0;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  flex-direction: column; padding: 12px 20px 20px; gap: 4px;
+  z-index: 99;
+}
+.nav-mobile.open { display: flex; }
+.nav-mobile a {
+  padding: 11px 12px; border-radius: 7px; color: var(--muted);
+  font-size: .9rem; transition: background .12s, color .12s;
+}
+.nav-mobile a:hover { background: var(--border); color: var(--text); text-decoration: none; }
+.nav-mobile .btn-green-m {
+  background: var(--accent); color: #0f1117; font-weight: 600; text-align: center; margin-top: 8px;
+}
+
+@media (max-width: 680px) {
+  nav { padding: 0 4%; }
+  .nav-links { display: none; }
+  .nav-burger { display: flex; }
+}
 
 /* ── Hero ── */
 .hero{
@@ -144,7 +184,6 @@ footer p{color:var(--muted);font-size:.8rem}
 .footer-links a:hover{color:var(--text)}
 
 @media(max-width:600px){
-  nav{padding:0 4%}
   .hero{padding:70px 4% 60px}
   section{padding:60px 4%}
   .cta-banner{margin:0 4% 60px;padding:36px 20px}
@@ -155,13 +194,36 @@ footer p{color:var(--muted);font-size:.8rem}
 <body>
 
 <nav>
-  <span class="nav-logo">SupaBein</span>
+  <a href="/" class="nav-brand">
+    <span class="nav-mark">SB</span>
+    <span class="nav-logo">SupaBein</span>
+  </a>
   <div class="nav-links">
+    <a href="#features">Features</a>
     <a href="/docs">Docs</a>
     <a href="/dashboard/#/login" class="btn-outline">Sign In</a>
-    <a href="/dashboard/#/signup" class="btn-primary-sm">Sign Up</a>
+    <a href="/dashboard/#/signup" class="btn-primary-sm">Get Started</a>
   </div>
+  <button class="nav-burger" id="burger" aria-label="Menu">
+    <span></span><span></span><span></span>
+  </button>
 </nav>
+<div class="nav-mobile" id="nav-mobile">
+  <a href="#features">Features</a>
+  <a href="/docs">Docs</a>
+  <a href="/dashboard/#/login">Sign In</a>
+  <a href="/dashboard/#/signup" class="btn-green-m">Get Started →</a>
+</div>
+<script>
+  document.getElementById('burger').addEventListener('click', function() {
+    document.getElementById('nav-mobile').classList.toggle('open');
+  });
+  document.querySelectorAll('#nav-mobile a').forEach(function(a) {
+    a.addEventListener('click', function() {
+      document.getElementById('nav-mobile').classList.remove('open');
+    });
+  });
+</script>
 
 <section class="hero">
   <div class="hero-tag">Self-Hosted · Open Source</div>
@@ -187,7 +249,7 @@ footer p{color:var(--muted);font-size:.8rem}
   </div>
 </section>
 
-<section>
+<section id="features">
   <div class="section-label">Features</div>
   <h2 class="section-title">Everything you need, nothing you don't</h2>
   <p class="section-sub">Built for PHP shared hosting. No Docker, no Node, no DevOps required.</p>

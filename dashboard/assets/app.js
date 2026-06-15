@@ -404,22 +404,72 @@ function requireAuth() {
 
 // ─── Layout ──────────────────────────────────────────────────────────────────
 
-function renderLayout(projectId, activeTab, content) {
+function renderLayout(projectId, activeTab, content, opts = {}) {
   const user = Auth.getUser();
-  const base = projectId ? `/projects/${projectId}` : '';
+  const initials = user?.email ? user.email[0].toUpperCase() : '?';
+
+  let projectName = null;
+  if (projectId) {
+    projectName = opts.projectName
+      || sessionStorage.getItem('sb_proj_' + projectId)
+      || ('Project #' + projectId);
+    if (opts.projectName) {
+      sessionStorage.setItem('sb_proj_' + projectId, opts.projectName);
+    }
+  }
+
+  const isOn = (tab) => activeTab === tab ? ' active' : '';
+
+  const projectNavItems = projectId ? [
+    el('div', { class: 'sb-divider' }),
+    el('div', { class: 'sb-nav' },
+      el('div', { class: 'sb-project-ctx' },
+        el('span', { class: 'sb-project-dot' }),
+        el('span', { class: 'sb-project-name' }, projectName)
+      ),
+      el('a', { href: `#/projects/${projectId}/tables`, class: 'sb-link' + isOn('tables') },
+        el('span', { class: 'sb-icon' }, '▦'),
+        'Tables'
+      ),
+      el('a', { href: `#/projects/${projectId}/sites`, class: 'sb-link' + isOn('sites') },
+        el('span', { class: 'sb-icon' }, '⇧'),
+        'Deploy'
+      ),
+      el('a', { href: `#/projects/${projectId}/api`, class: 'sb-link' + isOn('api') },
+        el('span', { class: 'sb-icon' }, '⟨⟩'),
+        'API'
+      )
+    )
+  ] : [];
 
   const sidebar = el('nav', { class: 'sidebar' },
-    el('div', { class: 'sidebar-logo' }, 'SupaBein'),
-    el('a', { href: '#/projects' }, 'Projects'),
-    ...(projectId ? [
-      el('a', { href: `#/projects/${projectId}` }, '← Project'),
-      el('a', { href: `#/projects/${projectId}/tables`, class: activeTab === 'tables' ? 'active' : '' }, 'Tables'),
-      el('a', { href: `#/projects/${projectId}/sites`, class: activeTab === 'sites' ? 'active' : '' }, 'Deploy'),
-      el('a', { href: `#/projects/${projectId}/api`, class: activeTab === 'api' ? 'active' : '' }, 'API'),
-    ] : []),
-    el('div', { style: 'flex:1' }),
-    el('a', { href: '#/account', class: activeTab === 'account' ? 'active' : '' }, 'Account'),
-    el('a', { href: '#/logout', style: 'margin-top:6px' }, user?.email || 'Logout')
+    el('div', { class: 'sb-brand' },
+      el('span', { class: 'sb-logo-mark' }, 'SB'),
+      el('span', { class: 'sb-logo-text' }, 'SupaBein')
+    ),
+    el('div', { class: 'sb-nav' },
+      el('div', { class: 'sb-section-label' }, 'Workspace'),
+      el('a', { href: '#/projects', class: 'sb-link' + (!projectId && activeTab !== 'account' ? ' active' : '') },
+        el('span', { class: 'sb-icon' }, '⊟'),
+        'Projects'
+      )
+    ),
+    ...projectNavItems,
+    el('div', { class: 'sb-spacer' }),
+    el('div', { class: 'sb-divider' }),
+    el('div', { class: 'sb-bottom' },
+      el('a', { href: '#/account', class: 'sb-link sb-user-link' + isOn('account') },
+        el('span', { class: 'sb-avatar' }, initials),
+        el('div', { class: 'sb-user-details' },
+          el('span', { class: 'sb-user-name' }, user?.email || 'Account'),
+          el('span', { class: 'sb-user-sub' }, 'Account & Settings')
+        )
+      ),
+      el('a', { href: '#/logout', class: 'sb-link sb-logout' },
+        el('span', { class: 'sb-icon' }, '→'),
+        'Sign Out'
+      )
+    )
   );
 
   const wrap = el('div', { class: 'layout' }, sidebar, el('main', { class: 'main', id: 'content' }, ...content));
@@ -601,7 +651,7 @@ async function renderProject({ id }) {
         el('div', { class: 'text-sm text-muted' }, `ID: ${project.id}`),
         el('div', { class: 'text-sm text-muted mt-1' }, `Created: ${fmtDate(project.created_at)}`)
       )
-    ]);
+    ], { projectName: project.name });
   } catch (e) {
     setApp(`<div class="alert alert-error">${e.message}</div>`);
   }

@@ -31,6 +31,8 @@ code{font-family:var(--mono);font-size:.82em;background:var(--border);padding:2p
 .topnav-links .signin{border:1px solid var(--border);color:var(--text)}
 .topnav-links .signup{background:var(--accent);color:#0f1117;font-weight:600}
 .topnav-links .signup:hover{opacity:.88}
+.topnav-links .dashboard-link { color: var(--muted); font-size:.83rem; padding:6px 12px; border-radius:6px; }
+.topnav-links .dashboard-link:hover { color:var(--text); background:var(--surface); text-decoration:none; }
 
 /* ── Layout ── */
 .layout{display:flex;margin-top:56px;min-height:calc(100vh - 56px)}
@@ -137,9 +139,13 @@ tr:last-child td{border-bottom:none}
 <body>
 
 <nav class="topnav">
-  <a href="/" class="nav-logo">SupaBein</a>
+  <a href="/" style="display:flex;align-items:center;gap:9px;text-decoration:none">
+    <span style="width:26px;height:26px;background:var(--accent);color:#0a0d14;font-size:12px;font-weight:800;border-radius:7px;display:flex;align-items:center;justify-content:center">SB</span>
+    <span class="nav-logo">SupaBein</span>
+  </a>
   <div class="topnav-links">
     <a href="/docs">Docs</a>
+    <a href="/dashboard/" class="dashboard-link">Dashboard →</a>
     <a href="/dashboard/#/login" class="signin">Sign In</a>
     <a href="/dashboard/#/signup" class="signup">Sign Up</a>
   </div>
