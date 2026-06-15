@@ -146,6 +146,22 @@ class Deploy
         $zip->close();
         @unlink($zipPath);
 
+        // ── Phase 3b: Strip single top-level wrapper folder ──────────────────
+        // If the zip was built as dist/ → index.html, move contents up one level.
+
+        $topEntries = array_values(array_filter(
+            scandir($deployDir),
+            fn($e) => $e !== '.' && $e !== '..'
+        ));
+        if (count($topEntries) === 1 && is_dir($deployDir . '/' . $topEntries[0])) {
+            $wrapper = $deployDir . '/' . $topEntries[0];
+            foreach (scandir($wrapper) as $item) {
+                if ($item === '.' || $item === '..') continue;
+                rename($wrapper . '/' . $item, $deployDir . '/' . $item);
+            }
+            rmdir($wrapper);
+        }
+
         // ── Phase 4: Hardening .htaccess (written last, overwrites anything from zip) ──
 
         $spaMode   = (bool)$site['spa_mode'];
