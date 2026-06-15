@@ -150,6 +150,7 @@ function renderLayout(projectId, activeTab, content) {
       el('a', { href: `#/projects/${projectId}` }, '← Project'),
       el('a', { href: `#/projects/${projectId}/tables`, class: activeTab === 'tables' ? 'active' : '' }, 'Tables'),
       el('a', { href: `#/projects/${projectId}/sites`, class: activeTab === 'sites' ? 'active' : '' }, 'Deploy'),
+      el('a', { href: `#/projects/${projectId}/api`, class: activeTab === 'api' ? 'active' : '' }, 'API'),
     ] : []),
     el('div', { style: 'flex:1' }),
     el('a', { href: '#/logout', style: 'margin-top:auto' }, user?.email || 'Logout')
@@ -980,6 +981,201 @@ function render404() {
   setApp('<div style="padding:48px;text-align:center"><h1 style="font-size:48px;color:var(--muted)">404</h1><p class="text-muted">Page not found</p><a href="#/projects">Go home</a></div>');
 }
 
+// ─── API Reference ────────────────────────────────────────────────────────────
+
+async function renderApi({ id }) {
+  if (!requireAuth()) return;
+  renderLayout(id, 'api', [el('p', { class: 'text-muted' }, 'Loading API reference…')]);
+
+  const baseUrl = window.location.origin + '/api/v1';
+  const projectId = parseInt(id);
+
+  let tables = [];
+  try {
+    tables = await Api.get(`/v1/projects/${id}/tables`);
+  } catch (e) {
+    renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
+    return;
+  }
+
+  function copyCode(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+  }
+
+  function codeBlock(code) {
+    const pre = el('pre', { class: 'api-code-block' }, code);
+    const btn = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
+    btn.onclick = () => copyCode(btn, code);
+    const wrap = el('div', { style: 'position:relative' }, pre, btn);
+    return wrap;
+  }
+
+  function exampleTabs(curlCode, jsCode) {
+    let active = 'curl';
+    const curlBlock = codeBlock(curlCode);
+    const jsBlock   = codeBlock(jsCode);
+    jsBlock.style.display = 'none';
+
+    const curlBtn = el('button', { class: 'api-tab-btn active' }, 'curl');
+    const jsBtn   = el('button', { class: 'api-tab-btn' }, 'JavaScript');
+
+    curlBtn.onclick = () => {
+      if (active === 'curl') return;
+      active = 'curl';
+      curlBlock.style.display = ''; jsBlock.style.display = 'none';
+      curlBtn.classList.add('active'); jsBtn.classList.remove('active');
+    };
+    jsBtn.onclick = () => {
+      if (active === 'js') return;
+      active = 'js';
+      curlBlock.style.display = 'none'; jsBlock.style.display = '';
+      jsBtn.classList.add('active'); curlBtn.classList.remove('active');
+    };
+
+    return el('div', {},
+      el('div', { class: 'api-tab-row' }, curlBtn, jsBtn),
+      curlBlock, jsBlock
+    );
+  }
+
+  function methodBadge(method) {
+    return el('span', { class: `method-badge method-${method.toLowerCase()}` }, method);
+  }
+
+  function endpointRow(method, path, desc, curlCode, jsCode) {
+    const details = el('div', { class: 'api-endpoint-detail' }, exampleTabs(curlCode, jsCode));
+    details.style.display = 'none';
+    let open = false;
+    const row = el('div', { class: 'endpoint-row' },
+      methodBadge(method),
+      el('span', { class: 'endpoint-path' }, path),
+      el('span', { class: 'endpoint-desc' }, desc),
+      el('button', { class: 'btn btn-sm', style: 'margin-left:auto;flex-shrink:0' }, '▾')
+    );
+    row.querySelector('button').onclick = () => {
+      open = !open;
+      details.style.display = open ? '' : 'none';
+      row.querySelector('button').textContent = open ? '▴' : '▾';
+    };
+    return el('div', {}, row, details);
+  }
+
+  function tableCard(table) {
+    const tname = table.table_name;
+    const pname = table.physical_name;
+    const listPath   = `/v1/data/${projectId}/${tname}`;
+    const singlePath = `/v1/data/${projectId}/${tname}/:id`;
+
+    const curlList = `curl -X GET "${baseUrl}/data/${projectId}/${tname}?limit=50" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`;
+    const jsList = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}?limit=50', {
+  headers: { 'Authorization': 'Bearer YOUR_TOKEN' }
+});
+const rows = await res.json();`;
+
+    const curlCreate = `curl -X POST "${baseUrl}/data/${projectId}/${tname}" \\
+  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"column": "value"}'`;
+    const jsCreate = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({ column: 'value' })
+});
+const row = await res.json();`;
+
+    const curlGet = `curl -X GET "${baseUrl}/data/${projectId}/${tname}/1" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`;
+    const jsGet = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
+  headers: { 'Authorization': 'Bearer YOUR_TOKEN' }
+});
+const row = await res.json();`;
+
+    const curlPatch = `curl -X PATCH "${baseUrl}/data/${projectId}/${tname}/1" \\
+  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"column": "new_value"}'`;
+    const jsPatch = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
+  method: 'PATCH',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({ column: 'new_value' })
+});
+const row = await res.json();`;
+
+    const curlDelete = `curl -X DELETE "${baseUrl}/data/${projectId}/${tname}/1" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`;
+    const jsDelete = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
+  method: 'DELETE',
+  headers: { 'Authorization': 'Bearer YOUR_TOKEN' }
+});`;
+
+    return el('div', { class: 'api-table-card' },
+      el('div', { class: 'api-table-title' }, tname),
+      el('div', { class: 'api-table-physical' }, pname),
+      el('div', { style: 'margin-top:12px' },
+        endpointRow('GET',    listPath,   'List rows',   curlList,   jsList),
+        endpointRow('POST',   listPath,   'Insert row',  curlCreate, jsCreate),
+        endpointRow('GET',    singlePath, 'Get row',     curlGet,    jsGet),
+        endpointRow('PATCH',  singlePath, 'Update row',  curlPatch,  jsPatch),
+        endpointRow('DELETE', singlePath, 'Delete row',  curlDelete, jsDelete),
+      )
+    );
+  }
+
+  // Auth section
+  const loginCurl = `curl -X POST "${baseUrl}/auth/login" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "you@example.com", "password": "yourpassword"}'`;
+  const loginJs = `const res = await fetch('${baseUrl}/auth/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email: 'you@example.com', password: 'yourpassword' })
+});
+const { token } = await res.json();
+// Use token in subsequent requests:
+// Authorization: Bearer <token>`;
+
+  const authCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'Authentication'),
+    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 12px' },
+      'Include an ', el('code', { style: 'background:var(--border);padding:2px 5px;border-radius:3px' }, 'Authorization: Bearer <token>'),
+      ' header on requests to tables with restricted policies.'
+    ),
+    endpointRow('POST', '/v1/auth/login', 'Get a JWT token', loginCurl, loginJs)
+  );
+
+  const emptyState = tables.length === 0
+    ? el('div', { class: 'api-table-card', style: 'text-align:center;padding:40px' },
+        el('p', { class: 'text-muted' }, 'No tables yet — create one to see your auto-generated API endpoints.'),
+        el('a', { href: `#/projects/${id}/tables`, class: 'btn btn-primary', style: 'display:inline-block;margin-top:12px' }, 'Create a Table')
+      )
+    : null;
+
+  const content = [
+    el('div', { class: 'page-header' },
+      el('div', {},
+        el('h1', { class: 'page-title' }, 'API Reference'),
+        el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' }, 'Auto-generated REST API for your project')
+      ),
+      el('span', { class: 'api-base-url' }, baseUrl)
+    ),
+    authCard,
+    ...(emptyState ? [emptyState] : tables.map(tableCard))
+  ];
+
+  renderLayout(id, 'api', content);
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 Router.add('', () => {
@@ -1001,6 +1197,7 @@ Router.add('projects/:id/tables',                   renderTables);
 Router.add('projects/:id/tables/:name',             renderTableEditor);
 Router.add('projects/:id/sites',                    renderSites);
 Router.add('projects/:id/sites/:site_id',           renderSiteManager);
+Router.add('projects/:id/api',                      renderApi);
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 

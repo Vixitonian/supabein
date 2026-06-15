@@ -306,3 +306,99 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   padding: 16px !important;
   overflow-x: auto;
 }
+
+/* ── API Reference ──────────────────────────────────────────────────────────── */
+
+.method-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  min-width: 56px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.method-get    { background: #1e3a5f; color: #7dd3fc; }
+.method-post   { background: #14532d; color: #86efac; }
+.method-patch  { background: #451a03; color: #fcd34d; }
+.method-delete { background: #450a0a; color: #fca5a5; }
+
+.api-base-url {
+  font-family: monospace;
+  font-size: 0.78rem;
+  background: var(--border);
+  color: var(--muted);
+  padding: 5px 12px;
+  border-radius: 6px;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.api-table-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 16px;
+  background: var(--surface);
+}
+.api-table-title    { font-size: 1rem; font-weight: 600; }
+.api-table-physical { font-family: monospace; font-size: 0.73rem; color: var(--muted); margin-top: 2px; }
+
+.endpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: default;
+}
+.endpoint-row:last-of-type { border-bottom: none; }
+.endpoint-path { font-family: monospace; font-size: 0.82rem; }
+.endpoint-desc { color: var(--muted); font-size: 0.8rem; }
+
+.api-endpoint-detail { padding: 10px 0 4px; }
+
+.api-tab-row { display: flex; gap: 4px; margin-bottom: 8px; }
+.api-tab-btn {
+  font-size: 0.72rem;
+  padding: 2px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.api-tab-btn.active {
+  background: var(--border);
+  color: var(--text);
+}
+
+.api-code-block {
+  background: #0a0d14;
+  color: #cbd5e1;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  padding: 14px 16px;
+  border-radius: 7px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0;
+}
+
+.copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 0.68rem;
+  padding: 2px 8px;
+  background: var(--border);
+  color: var(--text);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.8;
+}
+.copy-btn:hover { opacity: 1; }
