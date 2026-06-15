@@ -723,30 +723,39 @@ async function renderProjects() {
       return;
     }
 
-    const table = el('table', { class: 'data-table' },
-      el('thead', {}, el('tr', {},
-        el('th', {}, 'Name'), el('th', {}, 'Created'), el('th', {}, '')
-      )),
-      el('tbody', {}, ...projects.map(p =>
-        el('tr', {},
-          el('td', {}, el('a', { href: `#/projects/${p.id}` }, p.name)),
-          el('td', { class: 'text-muted text-sm' }, fmtDate(p.created_at)),
-          el('td', {},
-            el('button', {
-              class: 'btn btn-sm btn-danger',
-              onClick: async () => {
-                if (!confirm(`Delete project "${p.name}"? This cannot be undone.`)) return;
-                await Api.delete(`/v1/projects/${p.id}`);
-                renderProjects();
-              }
-            }, 'Delete')
-          )
-        )
-      ))
+    const grid = el('div', { class: 'proj-grid' },
+      ...projects.map(p => {
+        const initial = (p.name || '?')[0].toUpperCase();
+        const menuBtn = el('button', { class: 'proj-menu-btn', title: 'More options' }, '⋮');
+        const dropdown = el('div', { class: 'proj-menu-drop hidden' },
+          el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Delete')
+        );
+        menuBtn.addEventListener('click', e => {
+          e.preventDefault(); e.stopPropagation();
+          document.querySelectorAll('.proj-menu-drop').forEach(d => { if (d !== dropdown) d.classList.add('hidden'); });
+          dropdown.classList.toggle('hidden');
+        });
+        dropdown.querySelector('button').addEventListener('click', async e => {
+          e.preventDefault();
+          if (!confirm(`Delete project "${p.name}"? This cannot be undone.`)) return;
+          try { await Api.delete(`/v1/projects/${p.id}`); renderProjects(); }
+          catch (err) { alert(err.message); }
+        });
+
+        const card = el('a', { class: 'proj-card', href: `#/projects/${p.id}` },
+          el('div', { class: 'proj-initial' }, initial),
+          el('div', { class: 'proj-card-body' },
+            el('div', { class: 'proj-card-name' }, p.name),
+            el('div', { class: 'proj-card-meta' }, `ID ${p.id} · ${fmtDate(p.created_at)}`)
+          ),
+          el('div', { class: 'proj-menu-wrap' }, menuBtn, dropdown)
+        );
+        return card;
+      })
     );
 
     list.innerHTML = '';
-    list.appendChild(table);
+    list.appendChild(grid);
   } catch (e) {
     document.getElementById('project-list').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
@@ -842,6 +851,7 @@ async function renderTables({ id }) {
 
   renderLayout(id, 'tables', [
     el('div', { class: 'page-header' },
+      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
       el('h1', { class: 'page-title' }, 'Tables'),
       el('button', { class: 'btn btn-primary', id: 'new-table' }, '+')
     ),
@@ -1303,7 +1313,7 @@ async function renderSiteManager({ id, site_id }) {
 
   renderLayout(id, 'sites', [
     el('div', { class: 'page-header' },
-      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}/sites` }, '← Deploy'),
+      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
       el('h1', { class: 'page-title' }, 'Site'),
       menuWrap
     ),
@@ -1875,6 +1885,7 @@ const row = await res.json();`;
 
   const content = [
     el('div', { class: 'page-header' },
+      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
       el('div', {},
         el('h1', { class: 'page-title' }, 'API Reference'),
         el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' }, 'Project keys and auto-generated endpoints')
@@ -2154,5 +2165,9 @@ Router.add('projects/:id/api',                      renderApi);
 Router.add('account',                               renderAccount);
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
+
+document.addEventListener('click', () => {
+  document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
+});
 
 document.addEventListener('DOMContentLoaded', () => Router.init());
