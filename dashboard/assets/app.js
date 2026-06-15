@@ -709,7 +709,7 @@ async function renderProjects() {
 
   renderLayout(null, '', [el('div', { class: 'page-header' },
     el('h1', { class: 'page-title' }, 'Projects'),
-    el('button', { class: 'btn btn-primary', id: 'new-project' }, '+ New Project')
+    el('button', { class: 'btn btn-primary', id: 'new-project' }, '+')
   ), el('div', { id: 'project-list' }, 'Loading...')]);
 
   document.getElementById('new-project').addEventListener('click', () => showNewProjectModal());
@@ -790,84 +790,44 @@ async function renderProject({ id }) {
   renderLayout(id, '', [el('p', { class: 'text-muted' }, 'Loading…')]);
 
   try {
-    const [project, tables, usersRes, sites] = await Promise.all([
-      Api.get(`/v1/projects/${id}`),
-      Api.get(`/v1/projects/${id}/tables`).catch(() => []),
-      Api.get(`/v1/projects/${id}/users`).catch(() => ({ users: [], count: 0 })),
-      Api.get(`/v1/projects/${id}/sites`).catch(() => []),
-    ]);
+    const project = await Api.get(`/v1/projects/${id}`);
 
-    const tableCount = tables.length;
-    const userCount  = usersRes.count ?? 0;
-    const site       = sites[0] ?? null;
-    const deployed   = site && site.current_deploy_id;
-
-    const statCard = (icon, value, label) =>
-      el('div', { class: 'stat-card' },
-        el('div', { class: 'stat-card-icon' }, icon),
-        el('div', { class: 'stat-card-value' }, String(value)),
-        el('div', { class: 'stat-card-label' }, label)
-      );
-
-    const actionCard = (icon, title, desc, href) =>
-      el('a', { class: 'action-card', href },
-        el('div', { class: 'action-card-icon' }, icon),
-        el('div', { class: 'action-card-title' }, title),
-        el('div', { class: 'action-card-desc' }, desc)
-      );
-
-    const anonKeySection = project.anon_key
-      ? el('div', { class: 'card' },
-          el('div', { class: 'card-title' }, 'Anon Key'),
-          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
-            'Use this in your frontend to call table endpoints. Requests are subject to your table policies.'
-          ),
-          el('div', { style: 'display:flex;gap:8px;align-items:center' },
-            el('code', { id: 'anon-key-display', style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
-              project.anon_key.slice(0, 40) + '…'
-            ),
-            el('button', { class: 'btn btn-sm', id: 'copy-anon' }, 'Copy')
-          )
-        )
-      : null;
-
-    if (anonKeySection) {
-      anonKeySection.querySelector('#copy-anon').addEventListener('click', () => {
-        navigator.clipboard.writeText(project.anon_key);
-        const btn = anonKeySection.querySelector('#copy-anon');
-        btn.textContent = 'Copied!';
-        setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-      });
-    }
+    const copyAnonBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
+    copyAnonBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(project.anon_key);
+      copyAnonBtn.textContent = 'Copied!';
+      setTimeout(() => { copyAnonBtn.textContent = 'Copy'; }, 1500);
+    });
 
     const content = [
       el('div', { class: 'page-header' },
-        el('div', {},
-          el('h1', { class: 'page-title' }, project.name),
-          el('div', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' },
-            `Project ID: ${project.id}  ·  Created ${fmtDate(project.created_at)}`
+        el('h1', { class: 'page-title' }, project.name),
+        el('span', { class: 'text-muted', style: 'font-size:0.8rem' },
+          `ID ${project.id} · ${fmtDate(project.created_at)}`
+        )
+      ),
+
+      el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px' },
+        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/tables` }, 'Tables'),
+        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/users` }, 'Users'),
+        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/api` }, 'API'),
+        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/sites` }, 'Deploy'),
+      ),
+
+      ...(project.anon_key ? [
+        el('div', { class: 'card' },
+          el('div', { class: 'card-title' }, 'Anon Key'),
+          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
+            'Use in your frontend. Subject to table policies (anon role).'
+          ),
+          el('div', { style: 'display:flex;gap:8px;align-items:center' },
+            el('code', { style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
+              project.anon_key.slice(0, 48) + '…'
+            ),
+            copyAnonBtn
           )
         )
-      ),
-
-      el('div', { class: 'stat-grid' },
-        statCard('⬡', tableCount, tableCount === 1 ? 'Table' : 'Tables'),
-        statCard('◎', userCount, userCount === 1 ? 'App User' : 'App Users'),
-        statCard('⚑', deployed ? 'Live' : site ? 'No deploy' : 'No site', 'Site Status'),
-        statCard('🔑', project.anon_key ? 'Ready' : '—', 'API Keys')
-      ),
-
-      el('div', { style: 'margin-bottom:24px' },
-        el('h3', { style: 'font-size:0.85rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px' }, 'Quick Actions'),
-        el('div', { class: 'action-grid' },
-          actionCard('⬡', 'Tables', `${tableCount} table${tableCount !== 1 ? 's' : ''}`, `#/projects/${id}/tables`),
-          actionCard('◎', 'Users', `${userCount} app user${userCount !== 1 ? 's' : ''}`, `#/projects/${id}/users`),
-          actionCard('⚡', 'API Reference', 'Endpoints & examples', `#/projects/${id}/api`),
-          actionCard('🚀', 'Deploy', deployed ? 'Site is live' : 'No deploys yet', `#/projects/${id}/sites`),
-        )
-      ),
-
-      ...(anonKeySection ? [anonKeySection] : []),
+      ] : []),
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
@@ -883,7 +843,7 @@ async function renderTables({ id }) {
   renderLayout(id, 'tables', [
     el('div', { class: 'page-header' },
       el('h1', { class: 'page-title' }, 'Tables'),
-      el('button', { class: 'btn btn-primary', id: 'new-table' }, '+ New Table')
+      el('button', { class: 'btn btn-primary', id: 'new-table' }, '+')
     ),
     el('div', { id: 'table-list' }, 'Loading...')
   ]);
@@ -1175,7 +1135,7 @@ async function renderRowsTab(projectId, tableName) {
         onClick: () => openRowModal('Insert Row', null, data =>
           Api.post(`/v1/data/${projectId}/${tableName}`, data)
         )
-      }, '+ Insert Row')
+      }, '+')
     ));
     content.appendChild(el('div', { id: 'rows-area' }));
     await refresh();
@@ -1343,6 +1303,7 @@ async function renderSiteManager({ id, site_id }) {
 
   renderLayout(id, 'sites', [
     el('div', { class: 'page-header' },
+      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}/sites` }, '← Deploy'),
       el('h1', { class: 'page-title' }, 'Site'),
       menuWrap
     ),
@@ -1673,9 +1634,10 @@ async function renderProjectUsers({ id }) {
 
   const content = [
     el('div', { class: 'page-header' },
+      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
       el('div', {},
-        el('h2', {}, 'Project Users'),
-        el('p', { class: 'text-muted' }, `${users.length} end-user${users.length !== 1 ? 's' : ''} registered in this project`)
+        el('h2', { style: 'margin:0' }, 'Project Users'),
+        el('p', { class: 'text-muted', style: 'margin:2px 0 0' }, `${users.length} end-user${users.length !== 1 ? 's' : ''} registered`)
       )
     ),
     el('div', { class: 'card' },
