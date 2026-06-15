@@ -25,10 +25,10 @@ class Crud
             abort(404, 'Project not found');
         }
 
-        $colRows     = $catalog->listColumns($table['id']);
+        $colRows     = $catalog->listColumns((int)$table['id']);
         $allowedCols = array_column($colRows, 'col_name');
 
-        $policy = Policy::check($pdo, $table['id'], $auth, (int)$project['owner_user_id'], $operation);
+        $policy = Policy::check($pdo, (int)$table['id'], $auth, (int)$project['owner_user_id'], $operation);
         if (!$policy->allowed) {
             abort(403, 'Policy denies this operation');
         }

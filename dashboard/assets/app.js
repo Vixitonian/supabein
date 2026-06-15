@@ -470,15 +470,16 @@ async function renderColumnsTab(projectId, tableName) {
       </div>
     `);
 
-    addForm.querySelector('#add-col').addEventListener('click', async () => {
-      const colName  = addForm.querySelector('#col-name').value.trim();
-      const dataType = addForm.querySelector('#col-type').value;
-      const nullable = addForm.querySelector('#col-nullable').checked;
+    const addFormEl = addForm.firstElementChild;
+    addFormEl.querySelector('#add-col').addEventListener('click', async () => {
+      const colName  = addFormEl.querySelector('#col-name').value.trim();
+      const dataType = addFormEl.querySelector('#col-type').value;
+      const nullable = addFormEl.querySelector('#col-nullable').checked;
       if (!colName) return;
       try {
         await Api.post(`/v1/projects/${projectId}/tables/${tableName}/columns`, { name: colName, type: dataType, nullable });
         renderColumnsTab(projectId, tableName);
-      } catch (e) { alert(e.message); }
+      } catch (e) { console.error('[SupaBein] Add column failed', e); alert(e.message); }
     });
 
     const colsHtml = cols.length
@@ -505,7 +506,7 @@ async function renderColumnsTab(projectId, tableName) {
       : el('div', { class: 'text-muted' }, 'No custom columns. (id and created_at are always present)');
 
     content.innerHTML = '';
-    content.appendChild(addForm.firstChild);
+    content.appendChild(addFormEl);
     content.appendChild(el('div', { class: 'card mt-3' },
       el('div', { class: 'card-title' }, 'Columns'),
       colsHtml
@@ -536,13 +537,14 @@ async function renderRowsTab(projectId, tableName) {
       </div>
     `);
 
-    insertForm.querySelector('#insert-row').addEventListener('click', async () => {
+    const insertFormEl = insertForm.firstElementChild;
+    insertFormEl.querySelector('#insert-row').addEventListener('click', async () => {
       const data = {};
-      insertForm.querySelectorAll('[data-col]').forEach(inp => { data[inp.dataset.col] = inp.value; });
+      insertFormEl.querySelectorAll('[data-col]').forEach(inp => { data[inp.dataset.col] = inp.value; });
       try {
         await Api.post(`/v1/data/${projectId}/${tableName}`, data);
         renderRowsTab(projectId, tableName);
-      } catch (e) { alert(e.message); }
+      } catch (e) { console.error('[SupaBein] Insert row failed', e); alert(e.message); }
     });
 
     const rowTable = rows.length
@@ -555,7 +557,7 @@ async function renderRowsTab(projectId, tableName) {
       : el('div', { class: 'text-muted' }, 'No rows yet.');
 
     content.innerHTML = '';
-    content.appendChild(insertForm.firstChild);
+    content.appendChild(insertFormEl);
     content.appendChild(el('div', { class: 'card mt-3' },
       el('div', { class: 'card-title' }, `Rows (showing up to 50 of ${res.count})`),
       rowTable
@@ -591,17 +593,18 @@ async function renderPoliciesTab(projectId, tableName) {
       </div>
     `);
 
-    policyForm.querySelector('#save-policy').addEventListener('click', async () => {
+    const policyFormEl = policyForm.firstElementChild;
+    policyFormEl.querySelector('#save-policy').addEventListener('click', async () => {
       const body = {
-        api_role: policyForm.querySelector('#p-role').value.trim(),
-        operation: policyForm.querySelector('#p-op').value,
-        allowed: policyForm.querySelector('#p-allowed').checked,
-        constraint_sql: policyForm.querySelector('#p-constraint').value.trim() || null,
+        api_role: policyFormEl.querySelector('#p-role').value.trim(),
+        operation: policyFormEl.querySelector('#p-op').value,
+        allowed: policyFormEl.querySelector('#p-allowed').checked,
+        constraint_sql: policyFormEl.querySelector('#p-constraint').value.trim() || null,
       };
       try {
         await Api.put(`/v1/projects/${projectId}/tables/${tableName}/policies`, body);
         renderPoliciesTab(projectId, tableName);
-      } catch (e) { alert(e.message); }
+      } catch (e) { console.error('[SupaBein] Save policy failed', e); alert(e.message); }
     });
 
     const policyTable = policies.length
@@ -619,7 +622,7 @@ async function renderPoliciesTab(projectId, tableName) {
       : el('div', { class: 'text-muted' }, 'No policies defined. All access is denied by default.');
 
     content.innerHTML = '';
-    content.appendChild(policyForm.firstChild);
+    content.appendChild(policyFormEl);
     content.appendChild(el('div', { class: 'card mt-3' },
       el('div', { class: 'card-title' }, 'Current Policies'),
       policyTable
