@@ -137,9 +137,10 @@ function downloadText(filename, content) {
   URL.revokeObjectURL(url);
 }
 
-function generateClaudeMd(baseUrl, projectId, anonKey) {
+function generateClaudeMd(baseUrl, projectId, anonKey, pat) {
   const pid  = projectId || 'YOUR_PROJECT_ID';
   const anon = anonKey   || 'YOUR_ANON_KEY';
+  const token = pat      || 'sb_pat_xxxx          # create one above in Personal Access Tokens';
   const siteUrl = baseUrl;
 
   return `# CLAUDE.md — SupaBein Project
@@ -153,7 +154,7 @@ Read this file before writing any backend code — all data and hosting goes thr
 
 \`\`\`
 SUPABEIN_URL=${siteUrl}
-SUPABEIN_TOKEN=sb_pat_xxxx          # Personal Access Token — create one at ${siteUrl}/dashboard/#/account
+SUPABEIN_TOKEN=${token}
 SUPABEIN_PROJECT_ID=${pid}
 SUPABEIN_ANON_KEY=${anon}
 SUPABEIN_SITE_ID=YOUR_SITE_ID       # Fill in after creating a site (from Deploy tab)
@@ -1587,17 +1588,36 @@ async function renderAccount() {
     ...projects.map(p => el('option', { value: p.id }, `${p.name} (id: ${p.id})`))
   );
 
+  const patInput = el('input', {
+    type: 'text',
+    class: 'form-control',
+    placeholder: 'Paste your PAT here (sb_pat_…)',
+    style: 'max-width:480px;font-family:monospace;font-size:0.82rem',
+  });
+
+  let currentProjId = null, currentAnonKey = null;
+
+  function refreshPreview() {
+    const pat = patInput.value.trim() || null;
+    previewEl.value = generateClaudeMd(baseUrl, currentProjId, currentAnonKey, pat);
+  }
+
   projSelect.addEventListener('change', async () => {
     const pid = projSelect.value;
     if (!pid) {
-      previewEl.value = generateClaudeMd(baseUrl, null, null);
+      currentProjId = null; currentAnonKey = null;
+      refreshPreview();
       return;
     }
     try {
       const proj = await Api.get(`/v1/projects/${pid}`);
-      previewEl.value = generateClaudeMd(baseUrl, proj.id, proj.anon_key);
+      currentProjId  = proj.id;
+      currentAnonKey = proj.anon_key;
+      refreshPreview();
     } catch (e) { alert(e.message); }
   });
+
+  patInput.addEventListener('input', refreshPreview);
 
   const copyMdBtn = el('button', { class: 'btn btn-secondary btn-sm' }, 'Copy');
   copyMdBtn.onclick = () => {
@@ -1619,6 +1639,10 @@ async function renderAccount() {
     el('div', { style: 'margin-bottom:12px' },
       el('label', { class: 'label', style: 'margin-bottom:4px;display:block' }, 'Project (optional)'),
       projSelect
+    ),
+    el('div', { style: 'margin-bottom:12px' },
+      el('label', { class: 'label', style: 'margin-bottom:4px;display:block' }, 'Personal Access Token — create one above, then paste it here'),
+      patInput
     ),
     previewEl,
     el('div', { style: 'display:flex;gap:8px;margin-top:10px' }, copyMdBtn, dlBtn)
