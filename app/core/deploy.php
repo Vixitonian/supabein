@@ -180,10 +180,19 @@ class Deploy
 
         self::rcopy($deployDir, $currentDir);
 
+        // Verify files actually landed
+        if (!is_dir($currentDir)) {
+            $catalog->updateDeploy($deploy['id'], 'failed');
+            abort(500, 'Deploy copy failed — current/ directory was not created. Check PHP open_basedir or directory permissions for: ' . $currentDir);
+        }
+
         $catalog->updateDeploy($deploy['id'], 'ready', $deployDir);
         $catalog->updateSiteCurrentDeploy($siteId, $deploy['id']);
 
-        json_out($catalog->getDeployById($deploy['id']), 201);
+        $result = $catalog->getDeployById($deploy['id']);
+        $result['current_dir'] = $currentDir;
+        $result['current_dir_exists'] = is_dir($currentDir);
+        json_out($result, 201);
 
     }
 
@@ -285,7 +294,6 @@ HTACCESS;
             $htaccess .= "\n" . <<<'SPA'
 <IfModule mod_rewrite.c>
     RewriteEngine On
-    RewriteBase /
     RewriteCond %{REQUEST_FILENAME} !-f
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteRule ^ index.html [L]
@@ -311,8 +319,8 @@ SPA;
 
     private static function rcopy(string $src, string $dst): void
     {
-        if (!is_dir($dst)) {
-            mkdir($dst, 0755, true);
+        if (!is_dir($dst) && !mkdir($dst, 0755, true)) {
+            throw new \RuntimeException("Failed to create directory: $dst");
         }
         $src    = rtrim($src, '/');
         $srcLen = strlen($src) + 1;
@@ -323,9 +331,13 @@ SPA;
         foreach ($it as $item) {
             $target = $dst . '/' . substr($item->getPathname(), $srcLen);
             if ($item->isDir()) {
-                if (!is_dir($target)) mkdir($target, 0755, true);
+                if (!is_dir($target) && !mkdir($target, 0755, true)) {
+                    throw new \RuntimeException("Failed to create directory: $target");
+                }
             } else {
-                copy($item->getPathname(), $target);
+                if (!copy($item->getPathname(), $target)) {
+                    throw new \RuntimeException("Failed to copy file to: $target");
+                }
             }
         }
     }
