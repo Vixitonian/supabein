@@ -267,9 +267,11 @@ Use the **anon key** for frontend calls. Use the **PAT or service key** for trus
 |-------|--------|
 | \`?limit=N\` | Max rows to return (1–1000, default 20) |
 | \`?offset=N\` | Skip N rows for pagination |
-| \`?colname=value\` | Exact-match filter on any column (e.g. \`?status=active\`) |
+| \`?col=value\` | Exact-match filter (shorthand for eq) |
+| \`?col=op.value\` | Filter with operator: \`eq\` \`neq\` \`gt\` \`gte\` \`lt\` \`lte\` \`like\` |
+| \`?order=col.dir\` | Sort: \`?order=name.asc\` or multiple: \`?order=age.desc,name.asc\` |
 
-Rows are always returned newest-first (\`id DESC\`). Custom ordering is not yet supported.
+Filter examples: \`?age=gte.18\` \`?name=like.Alice%25\` \`?status=neq.archived\`
 
 \`\`\`bash
 # List rows (with filter + pagination)
@@ -313,7 +315,49 @@ curl -s "${siteUrl}/api/v1/projects/${pid}/auth/me" \\
 # Refresh token (returns new token with fresh expiry)
 curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/refresh" \\
   -H "Authorization: Bearer $USER_TOKEN"
+
+# Password reset (you deliver the token to the user)
+curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/forgot" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email":"user@example.com"}'
+# returns { token: "abc123...", expires_in: 3600 }
+
+curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/reset" \\
+  -H "Content-Type: application/json" \\
+  -d '{"token":"abc123...","password":"new-password"}'
+
+# List / delete end-users (owner auth)
+curl -s "${siteUrl}/api/v1/projects/${pid}/users" -H "Authorization: Bearer $SUPABEIN_TOKEN"
+curl -s -X DELETE "${siteUrl}/api/v1/projects/${pid}/users/42" -H "Authorization: Bearer $SUPABEIN_TOKEN"
 \`\`\`
+
+---
+
+## File Storage
+
+\`\`\`bash
+# Upload  (multipart, field name: file)
+curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/storage/avatars" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "file=@photo.jpg"
+# returns { name, bucket, size, url }
+
+# List files in bucket
+curl -s "${siteUrl}/api/v1/projects/${pid}/storage/avatars" -H "Authorization: Bearer $SUPABEIN_TOKEN"
+
+# Delete a file
+curl -s -X DELETE "${siteUrl}/api/v1/projects/${pid}/storage/avatars/photo.jpg" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+\`\`\`
+
+Public URL (use in <img> tags, no auth): \`${siteUrl}/api/v1/storage/${pid}/avatars/photo.jpg\`
+
+> Bucket names: 1–63 chars, lowercase/numbers/hyphens/underscores. Max 50 MB. No .php/.py/.sh uploads.
+
+---
+
+## Rate Limiting
+
+The data API allows **600 requests per minute per project**. Excess requests get \`429\` with \`Retry-After: 60\`.
 
 ---
 

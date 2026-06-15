@@ -164,6 +164,9 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#signup">POST /auth/signup</a>
     <a class="sb-link" href="#login">POST /auth/login</a>
     <a class="sb-link" href="#me">GET /auth/me</a>
+    <a class="sb-link" href="#change-password">PATCH /auth/password</a>
+    <a class="sb-link" href="#forgot">POST /auth/forgot</a>
+    <a class="sb-link" href="#reset">POST /auth/reset</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Project User Auth</span>
@@ -171,6 +174,10 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#proj-login">POST /projects/:id/auth/login</a>
     <a class="sb-link" href="#proj-me">GET /projects/:id/auth/me</a>
     <a class="sb-link" href="#proj-refresh">POST /projects/:id/auth/refresh</a>
+    <a class="sb-link" href="#proj-forgot">POST /projects/:id/auth/forgot</a>
+    <a class="sb-link" href="#proj-reset">POST /projects/:id/auth/reset</a>
+    <a class="sb-link" href="#proj-users-list">GET /projects/:id/users</a>
+    <a class="sb-link" href="#proj-users-delete">DELETE /projects/:id/users/:uid</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Projects</span>
@@ -192,6 +199,13 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#data-get">GET (single row)</a>
     <a class="sb-link" href="#data-update">PATCH (update row)</a>
     <a class="sb-link" href="#data-delete">DELETE (delete row)</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">File Storage</span>
+    <a class="sb-link" href="#storage-upload">POST (upload)</a>
+    <a class="sb-link" href="#storage-list">GET (list files)</a>
+    <a class="sb-link" href="#storage-delete">DELETE (delete file)</a>
+    <a class="sb-link" href="#storage-serve">GET (public serve)</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Sites &amp; Deploys</span>
@@ -313,6 +327,61 @@ curl "https://your-domain/api/v1/data/1/users" \
   </div>
 </div>
 
+<div class="endpoint" id="change-password">
+  <div class="endpoint-head">
+    <span class="method patch">PATCH</span>
+    <span class="path">/v1/auth/password</span>
+    <span class="desc">Change your password (requires auth)</span>
+  </div>
+  <div class="endpoint-body">
+    <table><tr><th>Body field</th><th>Type</th><th>Description</th></tr>
+      <tr><td>current_password</td><td>string</td><td>Your current password</td></tr>
+      <tr><td>new_password</td><td>string</td><td>New password (min 8 characters)</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-chpw">curl -X PATCH "https://your-domain/api/v1/auth/password" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"current_password": "old", "new_password": "new-password"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-chpw',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="forgot">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/auth/forgot</span>
+    <span class="desc">Generate a password-reset token (no auth required)</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Returns a raw token in the response. Deliver it to the user via your own email flow. Token expires in 1 hour. Always returns the same shape to prevent email enumeration.</p>
+    <div class="code-wrap"><pre class="code" id="c-forgot">curl -X POST "https://your-domain/api/v1/auth/forgot" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-forgot',this)">Copy</button></div>
+    <p>Response: <code>{"message": "...", "token": "abc123...", "expires_in": 3600}</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="reset">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/auth/reset</span>
+    <span class="desc">Reset password with a token</span>
+  </div>
+  <div class="endpoint-body">
+    <table><tr><th>Body field</th><th>Type</th><th>Description</th></tr>
+      <tr><td>token</td><td>string</td><td>The raw token from <code>/auth/forgot</code></td></tr>
+      <tr><td>password</td><td>string</td><td>New password (min 8 characters)</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-reset">curl -X POST "https://your-domain/api/v1/auth/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "abc123...", "password": "new-password"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-reset',this)">Copy</button></div>
+    <p>On success returns a fresh JWT: <code>{"message": "Password updated successfully.", "token": "eyJ..."}</code></p>
+    <div class="callout warn">Requires the <code>user_reset_tokens</code> table — see migration SQL below or in <code>catalog_schema.sql</code>.</div>
+  </div>
+</div>
+
 <!-- ── Project User Auth ── -->
 <h2 id="proj-signup">Project User Auth</h2>
 <p>
@@ -380,6 +449,64 @@ curl "https://your-domain/api/v1/data/1/users" \
     <div class="code-wrap"><pre class="code" id="c-proj-refresh">curl -X POST "https://your-domain/api/v1/projects/5/auth/refresh" \
   -H "Authorization: Bearer USER_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-proj-refresh',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-forgot">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/auth/forgot</span>
+    <span class="desc">Generate a password-reset token for a project end-user</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Returns a raw token. You (the developer) are responsible for delivering it to the user — email it, display it, or pass it through your own notification system. Token expires in 1 hour.</p>
+    <div class="code-wrap"><pre class="code" id="c-pforgot">curl -X POST "https://your-domain/api/v1/projects/5/auth/forgot" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-pforgot',this)">Copy</button></div>
+    <p>Response: <code>{"token": "abc123...", "expires_in": 3600}</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-reset">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/auth/reset</span>
+    <span class="desc">Reset a project end-user's password</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-preset">curl -X POST "https://your-domain/api/v1/projects/5/auth/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "abc123...", "password": "new-password"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-preset',this)">Copy</button></div>
+    <p>Returns a fresh project-scoped JWT on success.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-users-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/users</span>
+    <span class="desc">List all end-users registered in a project (owner auth required)</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-pusers">curl "https://your-domain/api/v1/projects/5/users" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-pusers',this)">Copy</button></div>
+    <p>Response: <code>{"users": [{id, project_id, email, created_at}, ...], "count": N}</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-users-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/projects/:id/users/:uid</span>
+    <span class="desc">Delete a project end-user (owner auth required)</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-puserdel">curl -X DELETE "https://your-domain/api/v1/projects/5/users/42" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-puserdel',this)">Copy</button></div>
   </div>
 </div>
 
@@ -536,9 +663,11 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
     <table><tr><th>Query param</th><th>Default</th><th>Description</th></tr>
       <tr><td>limit</td><td>20</td><td>Max rows to return (cap: 1000)</td></tr>
       <tr><td>offset</td><td>0</td><td>Skip N rows (pagination)</td></tr>
-      <tr><td>colname=value</td><td>—</td><td>Exact-match filter on any column, e.g. <code>?status=active</code></td></tr>
+      <tr><td>col=value</td><td>—</td><td>Exact-match filter (shorthand for <code>eq</code>), e.g. <code>?status=active</code></td></tr>
+      <tr><td>col=op.value</td><td>—</td><td>Filter with operator: <code>eq</code> <code>neq</code> <code>gt</code> <code>gte</code> <code>lt</code> <code>lte</code> <code>like</code> — e.g. <code>?age=gte.18</code> or <code>?name=like.Alice%25</code></td></tr>
+      <tr><td>order=col.dir</td><td>id DESC</td><td>Sort by column: <code>?order=name.asc</code> or multiple: <code>?order=age.desc,name.asc</code></td></tr>
     </table>
-    <p>Rows are always returned newest-first (<code>id DESC</code>). Custom ordering is not supported. <strong>IDs in responses are numbers</strong> (integers), not strings.</p>
+    <p><strong>IDs in responses are numbers</strong> (integers), not strings.</p>
     <div class="code-wrap"><pre class="code" id="c-dlist">curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
     <button class="copy-btn" onclick="copyEl('c-dlist',this)">Copy</button></div>
@@ -601,6 +730,71 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
     <button class="copy-btn" onclick="copyEl('c-ddel',this)">Copy</button></div>
   </div>
 </div>
+
+<!-- ── File Storage ── -->
+<h2 id="storage-upload">File Storage</h2>
+<p>Store files (images, documents, assets) per project inside named <strong>buckets</strong>. Files are served publicly via a read-only URL — no auth needed to fetch them. Management endpoints (upload, list, delete) require operator auth.</p>
+<div class="callout">Bucket names: 1–63 characters, lowercase letters/numbers/hyphens/underscores. Max file size: 50 MB. Blocked extensions: <code>.php .py .sh .exe .cgi .rb .pl .bat .cmd .htaccess</code></div>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:project_id/storage/:bucket</span>
+    <span class="desc">Upload a file to a bucket</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Send as <code>multipart/form-data</code> with field name <strong><code>file</code></strong>. The bucket is created automatically if it doesn't exist.</p>
+    <div class="code-wrap"><pre class="code" id="c-sup">curl -X POST "https://your-domain/api/v1/projects/1/storage/avatars" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "file=@photo.jpg"</pre>
+    <button class="copy-btn" onclick="copyEl('c-sup',this)">Copy</button></div>
+    <p>Returns <code>{"name": "photo.jpg", "bucket": "avatars", "size": 24580, "url": "/api/v1/storage/1/avatars/photo.jpg"}</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="storage-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:project_id/storage/:bucket</span>
+    <span class="desc">List files in a bucket</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-slist2">curl "https://your-domain/api/v1/projects/1/storage/avatars" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-slist2',this)">Copy</button></div>
+    <p>Returns <code>{"files": [{name, size, last_modified, url}, ...], "count": N}</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="storage-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/projects/:project_id/storage/:bucket/:filename</span>
+    <span class="desc">Delete a file</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-sdel">curl -X DELETE "https://your-domain/api/v1/projects/1/storage/avatars/photo.jpg" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-sdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="storage-serve">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/storage/:project_id/:bucket/:filename</span>
+    <span class="desc">Serve a file publicly (no auth)</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Use the <code>url</code> value returned by upload or list. This URL is public — link to it directly from your frontend.</p>
+    <div class="code-wrap"><pre class="code" id="c-sserve">curl "https://your-domain/api/v1/storage/1/avatars/photo.jpg"</pre>
+    <button class="copy-btn" onclick="copyEl('c-sserve',this)">Copy</button></div>
+    <p>Returns the file with correct <code>Content-Type</code> and cache headers (<code>Cache-Control: public, max-age=86400</code>).</p>
+  </div>
+</div>
+
+<!-- Rate limit note -->
+<div class="callout warn" style="margin-bottom:32px"><strong>Rate limiting:</strong> The data API enforces a limit of 600 requests per minute per project. Excess requests receive <code>429 Too Many Requests</code> with a <code>Retry-After: 60</code> header. The file storage and auth endpoints are not rate-limited.</div>
 
 <!-- ── Sites ── -->
 <h2 id="sites-list">Sites &amp; Deploys</h2>

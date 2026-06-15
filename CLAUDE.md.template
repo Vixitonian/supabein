@@ -127,9 +127,11 @@ Use the **anon key** for frontend calls. Use the **PAT or service key** for trus
 |-------|--------|
 | `?limit=N` | Max rows to return (1–1000, default 20) |
 | `?offset=N` | Skip N rows for pagination |
-| `?colname=value` | Exact-match filter on any column (e.g. `?status=active`) |
+| `?col=value` | Exact-match filter (shorthand for `eq`) |
+| `?col=op.value` | Filter with operator: `eq` `neq` `gt` `gte` `lt` `lte` `like` |
+| `?order=col.dir` | Sort: `?order=name.asc` or multiple: `?order=age.desc,name.asc` |
 
-Rows are always returned newest-first (`id DESC`). Custom ordering is not yet supported.
+Filter examples: `?age=gte.18` `?name=like.Alice%25` `?status=neq.archived`
 
 ### List rows
 ```bash
@@ -206,6 +208,62 @@ curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$SUPABEIN_PROJECT_ID/auth/refresh
 Use the returned JWT as `Authorization: Bearer <token>` for authenticated data API calls.
 The JWT is scoped to this project and will be rejected by other projects' data endpoints.
 
+### Password reset (project users)
+```bash
+# Step 1 — generate token (you deliver it to the user)
+curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$SUPABEIN_PROJECT_ID/auth/forgot" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com"}'
+# returns { token: "abc123...", expires_in: 3600 }
+
+# Step 2 — user submits token + new password
+curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$SUPABEIN_PROJECT_ID/auth/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"abc123...","password":"new-password"}'
+# returns { token: "eyJ..." } — fresh JWT
+```
+
+### Manage project users (owner only)
+```bash
+# List end-users
+curl -s "$SUPABEIN_URL/api/v1/projects/$SUPABEIN_PROJECT_ID/users" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+
+# Delete an end-user
+curl -s -X DELETE "$SUPABEIN_URL/api/v1/projects/$SUPABEIN_PROJECT_ID/users/42" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+```
+
+---
+
+## File Storage
+
+Store and serve files (images, PDFs, assets) inside named buckets.
+
+> Bucket names: lowercase letters/numbers/hyphens/underscores, 1–63 chars.
+> Max file size: 50 MB. Blocked types: `.php .py .sh .exe` and other executable extensions.
+
+```bash
+# Upload
+curl -s -X POST "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/storage/avatars" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -F "file=@photo.jpg"
+# returns { name, bucket, size, url }
+
+# List files in a bucket
+curl -s "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/storage/avatars" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+
+# Delete a file
+curl -s -X DELETE "$SUPABEIN_URL/api/v1/projects/$PROJECT_ID/storage/avatars/photo.jpg" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+```
+
+Public URL (no auth needed, use in `<img>` tags etc.):
+```
+$SUPABEIN_URL/api/v1/storage/$PROJECT_ID/avatars/photo.jpg
+```
+
 ---
 
 ## Deploying the Frontend
@@ -279,6 +337,92 @@ async function insert(table, data) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
+```
+
+---
+
+## Rate Limiting
+
+The data API enforces **600 requests per minute per project**. If exceeded, the response is `429 Too Many Requests` with `Retry-After: 60`. Implement exponential backoff in client code.
+
+---
+
+## Platform Operator Password Management
+
+(For SupaBein operators — not end-users of apps built on SupaBein.)
+
+```bash
+# Change password while logged in
+curl -s -X PATCH "$SUPABEIN_URL/api/v1/auth/password" \
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"current_password":"old","new_password":"new-password"}'
+
+# Forgot password — generates a reset token
+curl -s -X POST "$SUPABEIN_URL/api/v1/auth/forgot" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com"}'
+# returns { token: "abc123...", expires_in: 3600 }
+
+# Reset with token
+curl -s -X POST "$SUPABEIN_URL/api/v1/auth/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"token":"abc123...","password":"new-password"}'
+```
+
+---
+
+## Database Migration SQL
+
+If you set up SupaBein before these tables were added, run these SQL statements once in phpMyAdmin:
+
+```sql
+-- Project end-user auth
+CREATE TABLE IF NOT EXISTS project_users (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    project_id INT UNSIGNED NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_project_email (project_id, email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    project_user_id INT UNSIGNED NOT NULL,
+    token_hash VARCHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (project_user_id) REFERENCES project_users(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_token_hash (token_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Platform operator password reset
+CREATE TABLE IF NOT EXISTS user_reset_tokens (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    token_hash VARCHAR(64) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    used_at DATETIME NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_user_reset_hash (token_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Rate limiting
+CREATE TABLE IF NOT EXISTS rate_limits (
+    project_id INT UNSIGNED NOT NULL,
+    window_start INT UNSIGNED NOT NULL,
+    count INT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (project_id, window_start)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- API keys on projects table
+ALTER TABLE projects
+    ADD COLUMN IF NOT EXISTS anon_key TEXT DEFAULT NULL AFTER name,
+    ADD COLUMN IF NOT EXISTS service_key TEXT DEFAULT NULL AFTER anon_key;
 ```
 
 ---
