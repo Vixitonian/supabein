@@ -137,6 +137,25 @@ function downloadText(filename, content) {
   URL.revokeObjectURL(url);
 }
 
+function makeCollapsible(card, open = false) {
+  const title = card.querySelector('.api-table-title');
+  if (!title) return;
+  const bodyChildren = Array.from(card.children).filter(c => c !== title);
+  const body = document.createElement('div');
+  body.className = 'collaps-body';
+  body.style.display = open ? '' : 'none';
+  bodyChildren.forEach(c => body.appendChild(c));
+  card.appendChild(body);
+  const chevron = el('span', { class: 'collaps-chevron' }, open ? '▾' : '▸');
+  title.classList.add('collaps-title');
+  title.appendChild(chevron);
+  title.addEventListener('click', () => {
+    const nowOpen = body.style.display !== 'none';
+    body.style.display = nowOpen ? 'none' : '';
+    chevron.textContent = nowOpen ? '▸' : '▾';
+  });
+}
+
 function generateClaudeMd(baseUrl, projectId, anonKey, pat) {
   const pid  = projectId || 'YOUR_PROJECT_ID';
   const anon = anonKey   || 'YOUR_ANON_KEY';
@@ -2168,6 +2187,10 @@ async function renderAccount() {
       el('div', { style: 'display:flex;align-items:center;gap:12px' }, pwBtn, pwFields.msg)
     )
   );
+
+  makeCollapsible(pwCard);
+  makeCollapsible(patCard);
+  makeCollapsible(builderCard);
 
   renderLayout(null, 'account', [
     el('div', { class: 'page-header' },

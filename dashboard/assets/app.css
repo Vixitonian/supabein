@@ -565,6 +565,11 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   background: var(--surface);
 }
 .api-table-title    { font-size: 1rem; font-weight: 600; }
+.collaps-title      { display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; }
+.collaps-title:hover { color: var(--accent); }
+.collaps-chevron    { font-size: 0.85rem; color: var(--muted); transition: color 0.15s; }
+.collaps-title:hover .collaps-chevron { color: var(--accent); }
+.collaps-body       { margin-top: 12px; }
 .api-table-physical { font-family: monospace; font-size: 0.73rem; color: var(--muted); margin-top: 2px; }
 
 .endpoint-row {
