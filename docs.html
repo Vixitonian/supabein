@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SupaBein — API Documentation</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--surface:#1a1d27;--border:#2d3045;
+  --accent:#3ecf8e;--text:#e2e8f0;--muted:#8892a4;--radius:8px;
+  --font:'Inter',system-ui,sans-serif;--mono:'JetBrains Mono','Fira Code',monospace;
+  --sidebar:260px;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.7}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--mono);font-size:.82em;background:var(--border);padding:2px 6px;border-radius:4px}
+
+/* ── Nav ── */
+.topnav{
+  position:fixed;top:0;left:0;right:0;z-index:200;
+  height:56px;background:rgba(15,17,23,.9);backdrop-filter:blur(12px);
+  border-bottom:1px solid var(--border);
+  display:flex;align-items:center;justify-content:space-between;padding:0 24px;
+}
+.nav-logo{font-size:1rem;font-weight:700;color:var(--accent)}
+.topnav-links{display:flex;gap:8px;align-items:center}
+.topnav-links a{font-size:.83rem;color:var(--muted);padding:6px 12px;border-radius:6px}
+.topnav-links a:hover{color:var(--text);background:var(--surface);text-decoration:none}
+.topnav-links .signin{border:1px solid var(--border);color:var(--text)}
+.topnav-links .signup{background:var(--accent);color:#0f1117;font-weight:600}
+.topnav-links .signup:hover{opacity:.88}
+
+/* ── Layout ── */
+.layout{display:flex;margin-top:56px;min-height:calc(100vh - 56px)}
+
+/* ── Sidebar ── */
+aside{
+  width:var(--sidebar);flex-shrink:0;
+  position:fixed;top:56px;left:0;bottom:0;
+  overflow-y:auto;padding:24px 0;
+  border-right:1px solid var(--border);
+  background:var(--surface);
+}
+.sb-group{margin-bottom:4px}
+.sb-label{
+  font-size:.68rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);padding:12px 20px 4px;display:block;
+}
+.sb-link{
+  display:block;padding:6px 20px;font-size:.82rem;color:var(--muted);
+  border-left:2px solid transparent;transition:all .15s;
+}
+.sb-link:hover{color:var(--text);background:rgba(255,255,255,.04);text-decoration:none}
+.sb-link.active{color:var(--accent);border-left-color:var(--accent);background:rgba(62,207,142,.06)}
+
+/* ── Main content ── */
+main{margin-left:var(--sidebar);flex:1;padding:40px 48px;max-width:900px}
+h1{font-size:2rem;font-weight:700;letter-spacing:-.02em;margin-bottom:8px}
+h2{font-size:1.3rem;font-weight:600;margin:52px 0 16px;padding-top:20px;border-top:1px solid var(--border)}
+h2:first-of-type{border-top:none;margin-top:24px}
+h3{font-size:1rem;font-weight:600;margin:28px 0 10px}
+p{color:var(--muted);margin-bottom:14px}
+p strong{color:var(--text)}
+ul{color:var(--muted);padding-left:20px;margin-bottom:14px}
+li{margin-bottom:4px}
+
+/* ── Endpoint block ── */
+.endpoint{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);margin:20px 0;overflow:hidden;
+}
+.endpoint-head{
+  display:flex;align-items:center;gap:10px;
+  padding:12px 16px;border-bottom:1px solid var(--border);
+  background:rgba(0,0,0,.2);
+}
+.method{
+  font-size:.68rem;font-weight:700;padding:3px 9px;border-radius:4px;
+  min-width:60px;text-align:center;letter-spacing:.04em;flex-shrink:0;
+}
+.get   {background:#1e3a5f;color:#7dd3fc}
+.post  {background:#14532d;color:#86efac}
+.patch {background:#451a03;color:#fcd34d}
+.delete{background:#450a0a;color:#fca5a5}
+.put   {background:#3b1f5e;color:#c4b5fd}
+.path{font-family:var(--mono);font-size:.83rem}
+.desc{font-size:.82rem;color:var(--muted);margin-left:auto}
+
+.endpoint-body{padding:16px}
+.endpoint-body p{font-size:.85rem;margin-bottom:12px}
+
+/* ── Code block ── */
+.code-wrap{position:relative;margin:10px 0}
+pre.code{
+  background:#080b12;border:1px solid var(--border);
+  border-radius:var(--radius);padding:16px;
+  font-family:var(--mono);font-size:.75rem;line-height:1.7;
+  color:#cbd5e1;overflow-x:auto;white-space:pre;
+}
+.copy-btn{
+  position:absolute;top:8px;right:8px;
+  background:var(--border);color:var(--text);border:none;
+  font-size:.68rem;padding:3px 10px;border-radius:4px;cursor:pointer;opacity:.8;
+}
+.copy-btn:hover{opacity:1}
+
+/* ── Params table ── */
+table{width:100%;border-collapse:collapse;font-size:.82rem;margin:10px 0 4px}
+th{text-align:left;padding:8px 12px;color:var(--muted);font-weight:600;font-size:.72rem;
+   text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+td{padding:9px 12px;border-bottom:1px solid rgba(45,48,69,.5);vertical-align:top}
+td:first-child{font-family:var(--mono);font-size:.78rem;color:var(--accent)}
+td:nth-child(2){color:var(--muted)}
+tr:last-child td{border-bottom:none}
+
+/* ── Callout ── */
+.callout{
+  background:rgba(62,207,142,.06);border:1px solid rgba(62,207,142,.2);
+  border-radius:var(--radius);padding:14px 16px;margin:16px 0;font-size:.85rem;
+}
+.callout.warn{background:rgba(245,158,11,.06);border-color:rgba(245,158,11,.2)}
+
+/* ── Role pill ── */
+.role{
+  display:inline-block;font-size:.7rem;padding:1px 8px;border-radius:10px;
+  background:var(--border);color:var(--muted);font-family:var(--mono);
+}
+
+@media(max-width:768px){
+  aside{display:none}
+  main{margin-left:0;padding:24px 20px}
+}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <a href="/" class="nav-logo">SupaBein</a>
+  <div class="topnav-links">
+    <a href="/docs">Docs</a>
+    <a href="/dashboard/#/login" class="signin">Sign In</a>
+    <a href="/dashboard/#/signup" class="signup">Sign Up</a>
+  </div>
+</nav>
+
+<div class="layout">
+
+<aside>
+  <div class="sb-group">
+    <span class="sb-label">Getting Started</span>
+    <a class="sb-link" href="#quickstart">Quick Start</a>
+    <a class="sb-link" href="#keys">API Keys</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Auth</span>
+    <a class="sb-link" href="#signup">POST /auth/signup</a>
+    <a class="sb-link" href="#login">POST /auth/login</a>
+    <a class="sb-link" href="#me">GET /auth/me</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Projects</span>
+    <a class="sb-link" href="#projects-list">GET /projects</a>
+    <a class="sb-link" href="#projects-create">POST /projects</a>
+    <a class="sb-link" href="#projects-delete">DELETE /projects/:id</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Tables</span>
+    <a class="sb-link" href="#tables-list">GET /tables</a>
+    <a class="sb-link" href="#tables-create">POST /tables</a>
+    <a class="sb-link" href="#columns">Columns</a>
+    <a class="sb-link" href="#policies">Policies</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Data API</span>
+    <a class="sb-link" href="#data-list">GET (list rows)</a>
+    <a class="sb-link" href="#data-insert">POST (insert row)</a>
+    <a class="sb-link" href="#data-get">GET (single row)</a>
+    <a class="sb-link" href="#data-update">PATCH (update row)</a>
+    <a class="sb-link" href="#data-delete">DELETE (delete row)</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Sites &amp; Deploys</span>
+    <a class="sb-link" href="#sites">Create site</a>
+    <a class="sb-link" href="#deploys">Deploy zip</a>
+    <a class="sb-link" href="#rollback">Rollback</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Access Tokens</span>
+    <a class="sb-link" href="#tokens-list">GET /auth/tokens</a>
+    <a class="sb-link" href="#tokens-create">POST /auth/tokens</a>
+    <a class="sb-link" href="#tokens-delete">DELETE /auth/tokens/:id</a>
+  </div>
+</aside>
+
+<main>
+
+<h1>API Reference</h1>
+<p>All endpoints live under <code>/api/v1</code>. Responses are JSON. Authentication uses the <code>Authorization: Bearer &lt;token&gt;</code> header.</p>
+
+<!-- ── Quick Start ── -->
+<h2 id="quickstart">Quick Start</h2>
+<p>Three steps to your first API call:</p>
+<ol style="color:var(--muted);padding-left:20px;line-height:2">
+  <li>Sign up → get a JWT token</li>
+  <li>Create a project → note the <code>anon_key</code></li>
+  <li>Create a table → call the data API with your anon key</li>
+</ol>
+
+<div class="code-wrap">
+<pre class="code" id="qs-code"># 1. Sign up
+curl -X POST "https://your-domain/api/v1/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'
+# → {"token": "eyJ..."}
+
+# 2. Use the token to create a project
+curl -X POST "https://your-domain/api/v1/projects" \
+  -H "Authorization: Bearer eyJ..." \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My App"}'
+# → {"id": 1, "name": "My App", "anon_key": "eyJ...", "service_key": "eyJ..."}
+
+# 3. Query your table with the anon key
+curl "https://your-domain/api/v1/data/1/users" \
+  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+<button class="copy-btn" onclick="copyEl('qs-code',this)">Copy</button>
+</div>
+
+<!-- ── API Keys ── -->
+<h2 id="keys">API Keys</h2>
+<p>Each project has two pre-generated keys, visible in the dashboard's <strong>API tab</strong>.</p>
+<table>
+  <tr><th>Key</th><th>Use when</th><th>Policies</th></tr>
+  <tr><td>anon_key</td><td>Frontend code, public clients</td><td>Enforced (anon role)</td></tr>
+  <tr><td>service_key</td><td>Trusted server-side code only</td><td>Bypassed entirely</td></tr>
+</table>
+<div class="callout warn">⚠ Never expose the <strong>service_key</strong> in client-side or publicly accessible code.</div>
+<p>A <strong>Personal Access Token</strong> (PAT) acts as your login credential for the control plane (managing projects, tables, etc.) — useful in CI/CD. Create them in <a href="/dashboard/#/account">Account</a>.</p>
+
+<!-- ── Auth ── -->
+<h2 id="signup">Authentication</h2>
+
+<div class="endpoint" id="signup">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/auth/signup</span>
+    <span class="desc">Create an account</span>
+  </div>
+  <div class="endpoint-body">
+    <table><tr><th>Body field</th><th>Type</th><th>Description</th></tr>
+      <tr><td>email</td><td>string</td><td>Valid email address</td></tr>
+      <tr><td>password</td><td>string</td><td>Minimum 8 characters</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-signup">curl -X POST "https://your-domain/api/v1/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-signup',this)">Copy</button></div>
+    <p>Returns <code>{"token": "eyJ..."}</code> — a JWT valid for the duration configured in your secrets.php (<code>JWT_TTL</code>).</p>
+  </div>
+</div>
+
+<div class="endpoint" id="login">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/auth/login</span>
+    <span class="desc">Sign in, get a JWT</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-login">curl -X POST "https://your-domain/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "yourpassword"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-login',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="me">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/auth/me</span>
+    <span class="desc">Get current user profile</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Requires a valid user JWT or PAT. Returns <code>id</code>, <code>email</code>, <code>role</code>, <code>created_at</code>.</p>
+    <div class="code-wrap"><pre class="code" id="c-me">curl "https://your-domain/api/v1/auth/me" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-me',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Projects ── -->
+<h2 id="projects-list">Projects</h2>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects</span>
+    <span class="desc">List your projects</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-plist">curl "https://your-domain/api/v1/projects" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-plist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="projects-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects</span>
+    <span class="desc">Create a project</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-pcreate">curl -X POST "https://your-domain/api/v1/projects" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My App"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-pcreate',this)">Copy</button></div>
+    <p>Response includes <code>anon_key</code> and <code>service_key</code> for the new project.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="projects-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/projects/:id</span>
+    <span class="desc">Delete a project and all its data</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-pdel">curl -X DELETE "https://your-domain/api/v1/projects/1" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-pdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Tables ── -->
+<h2 id="tables-list">Tables</h2>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/tables</span>
+    <span class="desc">List tables in a project</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-tlist">curl "https://your-domain/api/v1/projects/1/tables" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-tlist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="tables-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/tables</span>
+    <span class="desc">Create a table</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-tcreate">curl -X POST "https://your-domain/api/v1/projects/1/tables" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "users"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-tcreate',this)">Copy</button></div>
+    <p>Table names must match <code>^[a-zA-Z_][a-zA-Z0-9_]{0,63}$</code>. The physical MySQL table is named <code>p{project_id}_{name}</code>.</p>
+  </div>
+</div>
+
+<h3 id="columns">Columns</h3>
+<p>Supported data types: <code>INT</code> <code>BIGINT</code> <code>VARCHAR(255)</code> <code>TEXT</code> <code>BOOLEAN</code> <code>DECIMAL(10,2)</code> <code>DATETIME</code> <code>DATE</code> <code>TIMESTAMP</code> <code>JSON</code> <code>FLOAT</code></p>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/tables/:name/columns</span>
+    <span class="desc">Add a column</span>
+  </div>
+  <div class="endpoint-body">
+    <table><tr><th>Field</th><th>Type</th><th>Description</th></tr>
+      <tr><td>name</td><td>string</td><td>Column name</td></tr>
+      <tr><td>type</td><td>string</td><td>One of the supported data types</td></tr>
+      <tr><td>nullable</td><td>bool</td><td>Allow NULL values (default: true)</td></tr>
+      <tr><td>default</td><td>string</td><td>Optional default value</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-col">curl -X POST "https://your-domain/api/v1/projects/1/tables/users/columns" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "email", "type": "VARCHAR(255)", "nullable": false}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-col',this)">Copy</button></div>
+  </div>
+</div>
+
+<h3 id="policies">Policies (Row-Level Security)</h3>
+<p>Policies control which API roles can perform which operations on a table.</p>
+<ul>
+  <li><span class="role">anon</span> — unauthenticated requests (no token, or anon_key)</li>
+  <li><span class="role">authenticated</span> — requests with a valid user JWT or PAT</li>
+  <li>Project owner always bypasses policies regardless</li>
+</ul>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method put">PUT</span>
+    <span class="path">/v1/projects/:id/tables/:name/policies</span>
+    <span class="desc">Create or update a policy</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-policy">curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "api_role": "anon",
+    "operation": "SELECT",
+    "allowed": true,
+    "constraint_sql": null
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-policy',this)">Copy</button></div>
+    <p><code>constraint_sql</code> is an optional WHERE clause appended to queries. Use <code>:current_user_id</code> as a placeholder for the authenticated user's ID (e.g. <code>"user_id = :current_user_id"</code>).</p>
+  </div>
+</div>
+
+<!-- ── Data API ── -->
+<h2 id="data-list">Data API</h2>
+<p>The data API lets you read and write rows in your tables. Use your project's <strong>anon_key</strong> for frontend calls. Operations are subject to the table's policies.</p>
+<div class="callout">The project owner's JWT always bypasses policies. Service key also bypasses all policies.</div>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/data/:project_id/:table</span>
+    <span class="desc">List rows</span>
+  </div>
+  <div class="endpoint-body">
+    <table><tr><th>Query param</th><th>Default</th><th>Description</th></tr>
+      <tr><td>limit</td><td>50</td><td>Max rows to return (cap: 1000)</td></tr>
+      <tr><td>offset</td><td>0</td><td>Skip N rows (pagination)</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-dlist">curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0" \
+  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+    <button class="copy-btn" onclick="copyEl('c-dlist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="data-insert">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/data/:project_id/:table</span>
+    <span class="desc">Insert a row</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-dins">curl -X POST "https://your-domain/api/v1/data/1/users" \
+  -H "Authorization: Bearer &lt;anon_key&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice", "email": "alice@example.com"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-dins',this)">Copy</button></div>
+    <p>Only fields that match defined columns are accepted. Extra fields are silently ignored.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="data-get">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/data/:project_id/:table/:id</span>
+    <span class="desc">Get a single row by primary key</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-dget">curl "https://your-domain/api/v1/data/1/users/42" \
+  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+    <button class="copy-btn" onclick="copyEl('c-dget',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="data-update">
+  <div class="endpoint-head">
+    <span class="method patch">PATCH</span>
+    <span class="path">/v1/data/:project_id/:table/:id</span>
+    <span class="desc">Update a row (partial update)</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-dupd">curl -X PATCH "https://your-domain/api/v1/data/1/users/42" \
+  -H "Authorization: Bearer &lt;anon_key&gt;" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice Smith"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-dupd',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="data-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/data/:project_id/:table/:id</span>
+    <span class="desc">Delete a row</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-ddel">curl -X DELETE "https://your-domain/api/v1/data/1/users/42" \
+  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+    <button class="copy-btn" onclick="copyEl('c-ddel',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Sites ── -->
+<h2 id="sites">Sites &amp; Deploys</h2>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/sites</span>
+    <span class="desc">Create a site (one per project)</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-site">curl -X POST "https://your-domain/api/v1/projects/1/sites" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"subdomain": "myapp", "spa_mode": false}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-site',this)">Copy</button></div>
+    <p>Set <code>spa_mode: true</code> for single-page apps — unknown paths will serve <code>index.html</code> instead of 404.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploys">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys</span>
+    <span class="desc">Deploy a zip file</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Upload a zip archive (multipart/form-data, field name <code>zipfile</code>, max 50 MB). The zip must not contain <code>.php</code>, <code>.sh</code>, or other server-executable files. If the zip has a single wrapper folder, it's automatically unwrapped.</p>
+    <div class="code-wrap"><pre class="code" id="c-deploy">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "zipfile=@./dist.zip"</pre>
+    <button class="copy-btn" onclick="copyEl('c-deploy',this)">Copy</button></div>
+    <p>After a successful deploy, your site is live at:<br>
+    <code>https://your-domain/sites/s{site_id}/current/</code></p>
+  </div>
+</div>
+
+<div class="endpoint" id="rollback">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/rollback</span>
+    <span class="desc">Roll back to a previous deploy</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-rb">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/3/rollback" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-rb',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Tokens ── -->
+<h2 id="tokens-list">Personal Access Tokens</h2>
+<p>PATs authenticate as your user account across all projects. Use them in scripts or CI/CD pipelines instead of storing your password.</p>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/auth/tokens</span>
+    <span class="desc">List your PATs</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-tklist">curl "https://your-domain/api/v1/auth/tokens" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-tklist',this)">Copy</button></div>
+    <p>Token values are never returned after creation. Only <code>id</code>, <code>name</code>, <code>created_at</code>, and <code>last_used_at</code> are shown.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="tokens-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/auth/tokens</span>
+    <span class="desc">Create a PAT</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-tkcreate">curl -X POST "https://your-domain/api/v1/auth/tokens" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "CI deploy"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-tkcreate',this)">Copy</button></div>
+    <p>Returns <code>{"token": "sb_pat_..."}</code>. The raw token value is shown <strong>only once</strong> — store it immediately.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="tokens-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/auth/tokens/:id</span>
+    <span class="desc">Revoke a PAT</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-tkdel">curl -X DELETE "https://your-domain/api/v1/auth/tokens/1" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-tkdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div style="height:80px"></div>
+</main>
+</div>
+
+<script>
+function copyEl(id, btn) {
+  const text = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+// Sidebar active link on scroll
+const links = document.querySelectorAll('.sb-link[href^="#"]');
+const targets = [...links].map(l => document.querySelector(l.getAttribute('href'))).filter(Boolean);
+function updateActive() {
+  let current = targets[0];
+  targets.forEach(t => { if (window.scrollY + 80 >= t.offsetTop) current = t; });
+  links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + current?.id));
+}
+window.addEventListener('scroll', updateActive, {passive:true});
+updateActive();
+</script>
+</body>
+</html>

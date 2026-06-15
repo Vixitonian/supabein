@@ -1180,27 +1180,6 @@ const row = await res.json();`;
   );
 
   // Auth section
-  const loginCurl = `curl -X POST "${baseUrl}/auth/login" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email": "you@example.com", "password": "yourpassword"}'`;
-  const loginJs = `const res = await fetch('${baseUrl}/auth/login', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ email: 'you@example.com', password: 'yourpassword' })
-});
-const { token } = await res.json();
-// Use token in subsequent requests:
-// Authorization: Bearer <token>`;
-
-  const authCard = el('div', { class: 'api-table-card' },
-    el('div', { class: 'api-table-title' }, 'Authentication'),
-    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 12px' },
-      'Include an ', el('code', { style: 'background:var(--border);padding:2px 5px;border-radius:3px' }, 'Authorization: Bearer <token>'),
-      ' header on requests to tables with restricted policies.'
-    ),
-    endpointRow('POST', '/v1/auth/login', 'Get a JWT token', loginCurl, loginJs)
-  );
-
   const emptyState = tables.length === 0
     ? el('div', { class: 'api-table-card', style: 'text-align:center;padding:40px' },
         el('p', { class: 'text-muted' }, 'No tables yet — create one to see your auto-generated API endpoints.'),
@@ -1212,12 +1191,11 @@ const { token } = await res.json();
     el('div', { class: 'page-header' },
       el('div', {},
         el('h1', { class: 'page-title' }, 'API Reference'),
-        el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' }, 'Auto-generated REST API for your project')
+        el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' }, 'Project keys and auto-generated endpoints')
       ),
-      el('span', { class: 'api-base-url' }, baseUrl)
+      el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'Full Docs ↗')
     ),
     keysCard,
-    authCard,
     ...(emptyState ? [emptyState] : tables.map(tableCard)),
   ];
 
@@ -1230,7 +1208,6 @@ async function renderAccount() {
   if (!requireAuth()) return;
   renderLayout(null, 'account', [el('p', { class: 'text-muted' }, 'Loading…')]);
 
-  const baseUrl = window.location.origin + '/api/v1';
   let user = null, pats = [];
   try {
     [user, pats] = await Promise.all([
@@ -1333,105 +1310,20 @@ async function renderAccount() {
   const patCard = el('div', { class: 'api-table-card' },
     el('div', { class: 'api-table-title' }, 'Personal Access Tokens'),
     el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-      'PATs let you authenticate as yourself in scripts, CI/CD pipelines, or any tool that needs API access across all your projects. They work like a login session that never expires.'
+      'PATs authenticate as you across all projects — use them in scripts or CI/CD instead of your password. Token values are shown only once at creation.'
     ),
     listEl,
     el('div', { style: 'display:flex;gap:8px;margin-top:14px' }, nameInput, createBtn),
     tokenDisplay
   );
 
-  // ── User-level API docs card ──
-  function methodBadge(method) {
-    return el('span', { class: `method-badge method-${method.toLowerCase()}` }, method);
-  }
-
-  function docRow(method, path, desc) {
-    const curlMap = {
-      'POST /v1/auth/signup':
-`curl -X POST "${baseUrl}/auth/signup" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email": "you@example.com", "password": "yourpassword"}'`,
-      'POST /v1/auth/login':
-`curl -X POST "${baseUrl}/auth/login" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email": "you@example.com", "password": "yourpassword"}'`,
-      'GET /v1/auth/me':
-`curl -X GET "${baseUrl}/auth/me" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`,
-      'GET /v1/projects':
-`curl -X GET "${baseUrl}/projects" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`,
-      'POST /v1/projects':
-`curl -X POST "${baseUrl}/projects" \\
-  -H "Authorization: Bearer YOUR_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name": "My Project"}'`,
-      'DELETE /v1/projects/:id':
-`curl -X DELETE "${baseUrl}/projects/1" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`,
-      'GET /v1/auth/tokens':
-`curl -X GET "${baseUrl}/auth/tokens" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`,
-      'POST /v1/auth/tokens':
-`curl -X POST "${baseUrl}/auth/tokens" \\
-  -H "Authorization: Bearer YOUR_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name": "CI deploy"}'`,
-      'DELETE /v1/auth/tokens/:id':
-`curl -X DELETE "${baseUrl}/auth/tokens/1" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`,
-    };
-    const key = `${method} ${path}`;
-    const curl = curlMap[key] || `curl -X ${method} "${baseUrl}${path.replace('/v1', '')}"`;
-    const details = el('div', { class: 'api-endpoint-detail' },
-      el('pre', { class: 'api-code-block', style: 'position:relative' }, curl)
-    );
-    details.style.display = 'none';
-    let open = false;
-    const toggleBtn = el('button', { class: 'btn btn-sm', style: 'margin-left:auto;flex-shrink:0' }, '▾');
-    const row = el('div', { class: 'endpoint-row' },
-      methodBadge(method),
-      el('span', { class: 'endpoint-path' }, path),
-      el('span', { class: 'endpoint-desc' }, desc),
-      toggleBtn
-    );
-    toggleBtn.onclick = () => {
-      open = !open;
-      details.style.display = open ? '' : 'none';
-      toggleBtn.textContent = open ? '▴' : '▾';
-    };
-    return el('div', {}, row, details);
-  }
-
-  const docsCard = el('div', { class: 'api-table-card' },
-    el('div', { class: 'api-table-title' }, 'User-Level API'),
-    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-      'Base URL: ', el('span', { class: 'api-base-url', style: 'font-size:0.75rem' }, baseUrl),
-      el('br'), el('span', { style: 'margin-top:4px;display:inline-block' },
-        'Use ', el('strong', {}, 'your login JWT'), ' or a ', el('strong', {}, 'Personal Access Token'), ' in the Authorization header.'
-      )
-    ),
-    el('div', { style: 'margin-bottom:8px;font-size:0.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em' }, 'Authentication'),
-    docRow('POST', '/v1/auth/signup',  'Create an account → returns JWT'),
-    docRow('POST', '/v1/auth/login',   'Sign in → returns JWT'),
-    docRow('GET',  '/v1/auth/me',      'Get your profile (auth required)'),
-    el('div', { style: 'margin:10px 0 8px;font-size:0.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em' }, 'Projects'),
-    docRow('GET',    '/v1/projects',      'List your projects'),
-    docRow('POST',   '/v1/projects',      'Create a project'),
-    docRow('DELETE', '/v1/projects/:id',  'Delete a project'),
-    el('div', { style: 'margin:10px 0 8px;font-size:0.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em' }, 'Personal Access Tokens'),
-    docRow('GET',    '/v1/auth/tokens',      'List your PATs'),
-    docRow('POST',   '/v1/auth/tokens',      'Create a PAT {name}'),
-    docRow('DELETE', '/v1/auth/tokens/:id',  'Revoke a PAT'),
-  );
-
   renderLayout(null, 'account', [
     el('div', { class: 'page-header' },
-      el('h1', { class: 'page-title' }, 'Account')
+      el('h1', { class: 'page-title' }, 'Account'),
+      el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'API Docs ↗')
     ),
     infoCard,
     patCard,
-    docsCard,
   ]);
 }
 

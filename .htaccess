@@ -11,5 +11,5 @@ RewriteRule ^sites/s[0-9]+/current(/.*)?$ /site-serve.php [QSA,L,NC]
 # Block direct access to any other sites/ paths
 RewriteRule ^sites(/.*)?$ - [F,L]
 
-# Redirect bare root to the dashboard SPA
-RewriteRule ^$ /dashboard/ [R=302,L]
+# /docs → docs.html
+RewriteRule ^docs/?$ /docs.html [L]
