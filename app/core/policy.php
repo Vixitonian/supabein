@@ -45,8 +45,11 @@ class Policy
         int $projectOwnerId,
         string $operation
     ): PolicyResult {
-        // Project owner bypasses all policies
+        // Project owner and service_role bypass all policies
         if ($auth !== null && $auth['user_id'] === $projectOwnerId) {
+            return PolicyResult::allow();
+        }
+        if ($auth !== null && ($auth['role'] ?? '') === 'service_role') {
             return PolicyResult::allow();
         }
 

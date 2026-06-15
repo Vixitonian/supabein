@@ -47,7 +47,12 @@ class Catalog
             'INSERT INTO projects (owner_user_id, name) VALUES (?, ?)'
         );
         $stmt->execute([$userId, $name]);
-        return $this->getProjectById((int)$this->pdo->lastInsertId(), $userId);
+        $id = (int)$this->pdo->lastInsertId();
+        $anonKey    = generate_project_key('anon', $id);
+        $serviceKey = generate_project_key('service', $id);
+        $this->pdo->prepare('UPDATE projects SET anon_key=?, service_key=? WHERE id=?')
+                  ->execute([$anonKey, $serviceKey, $id]);
+        return $this->getProjectById($id, $userId);
     }
 
     public function listProjects(int $userId): array
@@ -62,19 +67,35 @@ class Catalog
     public function getProjectById(int $id, int $userId): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
+            'SELECT id, owner_user_id, name, anon_key, service_key, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
         );
         $stmt->execute([$id, $userId]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'owner_user_id']);
+        $row = $stmt->fetch() ?: null;
+        return $row ? $this->ensureProjectKeys($row) : null;
     }
 
     public function getProjectByIdInternal(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ?'
+            'SELECT id, owner_user_id, name, anon_key, service_key, created_at FROM projects WHERE id = ?'
         );
         $stmt->execute([$id]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'owner_user_id']);
+        $row = $stmt->fetch() ?: null;
+        return $row ? $this->ensureProjectKeys($row) : null;
+    }
+
+    private function ensureProjectKeys(array $row): array
+    {
+        $row = self::castRow($row, ['id', 'owner_user_id']);
+        if (empty($row['anon_key'])) {
+            $anon = generate_project_key('anon', $row['id']);
+            $svc  = generate_project_key('service', $row['id']);
+            $this->pdo->prepare('UPDATE projects SET anon_key=?, service_key=? WHERE id=?')
+                      ->execute([$anon, $svc, $row['id']]);
+            $row['anon_key']    = $anon;
+            $row['service_key'] = $svc;
+        }
+        return $row;
     }
 
     public function deleteProject(int $id, int $userId): bool
@@ -325,5 +346,50 @@ class Catalog
         );
         $stmt->execute([$siteId]);
         return self::castRows($stmt->fetchAll(), ['id', 'site_id', 'size_bytes']);
+    }
+
+    // ─── Personal Access Tokens ──────────────────────────────────────────────
+
+    public function listPats(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, name, created_at, last_used_at FROM personal_access_tokens WHERE user_id = ? ORDER BY created_at DESC'
+        );
+        $stmt->execute([$userId]);
+        return self::castRows($stmt->fetchAll(), ['id']);
+    }
+
+    public function createPat(int $userId, string $name): string
+    {
+        $raw  = 'sb_pat_' . bin2hex(random_bytes(32));
+        $hash = hash('sha256', $raw);
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO personal_access_tokens (user_id, name, token_hash) VALUES (?, ?, ?)'
+        );
+        $stmt->execute([$userId, $name, $hash]);
+        return $raw;
+    }
+
+    public function deletePat(int $userId, int $patId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'DELETE FROM personal_access_tokens WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$patId, $userId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    public function findPatByHash(string $hash): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id FROM personal_access_tokens WHERE token_hash = ?'
+        );
+        $stmt->execute([$hash]);
+        $row = $stmt->fetch() ?: null;
+        if ($row) {
+            $this->pdo->prepare('UPDATE personal_access_tokens SET last_used_at = NOW() WHERE id = ?')
+                      ->execute([$row['id']]);
+        }
+        return $row ? self::castRow($row, ['id', 'user_id']) : null;
     }
 }

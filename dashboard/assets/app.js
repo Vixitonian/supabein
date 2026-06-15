@@ -990,13 +990,20 @@ async function renderApi({ id }) {
   const baseUrl = window.location.origin + '/api/v1';
   const projectId = parseInt(id);
 
-  let tables = [];
+  let tables = [], project = null, pats = [];
   try {
-    tables = await Api.get(`/v1/projects/${id}/tables`);
+    [project, tables, pats] = await Promise.all([
+      Api.get(`/v1/projects/${id}`),
+      Api.get(`/v1/projects/${id}/tables`),
+      Api.get('/v1/auth/tokens'),
+    ]);
   } catch (e) {
     renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
     return;
   }
+
+  const anonKey    = project?.anon_key    ?? 'NOT_AVAILABLE';
+  const serviceKey = project?.service_key ?? 'NOT_AVAILABLE';
 
   function copyCode(btn, text) {
     navigator.clipboard.writeText(text).then(() => {
@@ -1071,20 +1078,20 @@ async function renderApi({ id }) {
     const singlePath = `/v1/data/${projectId}/${tname}/:id`;
 
     const curlList = `curl -X GET "${baseUrl}/data/${projectId}/${tname}?limit=50" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`;
+  -H "Authorization: Bearer ${anonKey}"`;
     const jsList = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}?limit=50', {
-  headers: { 'Authorization': 'Bearer YOUR_TOKEN' }
+  headers: { 'Authorization': 'Bearer ${anonKey}' }
 });
 const rows = await res.json();`;
 
     const curlCreate = `curl -X POST "${baseUrl}/data/${projectId}/${tname}" \\
-  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Authorization: Bearer ${anonKey}" \\
   -H "Content-Type: application/json" \\
   -d '{"column": "value"}'`;
     const jsCreate = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}', {
   method: 'POST',
   headers: {
-    'Authorization': 'Bearer YOUR_TOKEN',
+    'Authorization': 'Bearer ${anonKey}',
     'Content-Type': 'application/json'
   },
   body: JSON.stringify({ column: 'value' })
@@ -1092,20 +1099,20 @@ const rows = await res.json();`;
 const row = await res.json();`;
 
     const curlGet = `curl -X GET "${baseUrl}/data/${projectId}/${tname}/1" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`;
+  -H "Authorization: Bearer ${anonKey}"`;
     const jsGet = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
-  headers: { 'Authorization': 'Bearer YOUR_TOKEN' }
+  headers: { 'Authorization': 'Bearer ${anonKey}' }
 });
 const row = await res.json();`;
 
     const curlPatch = `curl -X PATCH "${baseUrl}/data/${projectId}/${tname}/1" \\
-  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Authorization: Bearer ${anonKey}" \\
   -H "Content-Type: application/json" \\
   -d '{"column": "new_value"}'`;
     const jsPatch = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
   method: 'PATCH',
   headers: {
-    'Authorization': 'Bearer YOUR_TOKEN',
+    'Authorization': 'Bearer ${anonKey}',
     'Content-Type': 'application/json'
   },
   body: JSON.stringify({ column: 'new_value' })
@@ -1113,10 +1120,10 @@ const row = await res.json();`;
 const row = await res.json();`;
 
     const curlDelete = `curl -X DELETE "${baseUrl}/data/${projectId}/${tname}/1" \\
-  -H "Authorization: Bearer YOUR_TOKEN"`;
+  -H "Authorization: Bearer ${anonKey}"`;
     const jsDelete = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
   method: 'DELETE',
-  headers: { 'Authorization': 'Bearer YOUR_TOKEN' }
+  headers: { 'Authorization': 'Bearer ${anonKey}' }
 });`;
 
     return el('div', { class: 'api-table-card' },
@@ -1131,6 +1138,46 @@ const row = await res.json();`;
       )
     );
   }
+
+  // Project Keys card
+  function maskedKey(val) {
+    return val.length > 20 ? val.slice(0, 10) + '••••••••••••' + val.slice(-6) : val;
+  }
+
+  function keyRow(label, val, warning) {
+    let shown = false;
+    const display = el('code', { class: 'api-key-value' }, maskedKey(val));
+    const showBtn = el('button', { class: 'btn btn-sm api-tab-btn' }, 'Show');
+    showBtn.onclick = () => {
+      shown = !shown;
+      display.textContent = shown ? val : maskedKey(val);
+      showBtn.textContent = shown ? 'Hide' : 'Show';
+    };
+    const copyBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
+    copyBtn.onclick = () => copyCode(copyBtn, val);
+    const row = el('div', { class: 'api-key-row' },
+      el('span', { class: 'api-key-label' }, label),
+      display,
+      el('div', { class: 'api-key-actions' }, showBtn, copyBtn)
+    );
+    if (warning) {
+      return el('div', {},
+        row,
+        el('p', { class: 'text-muted', style: 'font-size:0.75rem;margin:2px 0 8px 0' }, warning)
+      );
+    }
+    return row;
+  }
+
+  const keysCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'Project Keys'),
+    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
+      'Use the ', el('strong', {}, 'anon key'), ' in your frontend — requests are subject to your table policies. Use the ',
+      el('strong', {}, 'service key'), ' from a trusted server only — it bypasses all policies.'
+    ),
+    keyRow('anon key', anonKey, null),
+    keyRow('service key', serviceKey, '⚠ Never expose this key in client-side code.')
+  );
 
   // Auth section
   const loginCurl = `curl -X POST "${baseUrl}/auth/login" \\
@@ -1161,6 +1208,84 @@ const { token } = await res.json();
       )
     : null;
 
+  // PAT management card
+  function buildPatCard(initialPats) {
+    let patList = [...initialPats];
+
+    const listEl = el('div', { class: 'pat-list' });
+
+    function renderList() {
+      listEl.innerHTML = '';
+      if (patList.length === 0) {
+        listEl.appendChild(el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:8px 0' }, 'No tokens yet.'));
+        return;
+      }
+      patList.forEach(pat => {
+        const revokeBtn = el('button', { class: 'btn btn-sm btn-danger' }, 'Revoke');
+        revokeBtn.onclick = async () => {
+          if (!confirm(`Revoke token "${pat.name}"?`)) return;
+          try {
+            await Api.delete(`/v1/auth/tokens/${pat.id}`);
+            patList = patList.filter(p => p.id !== pat.id);
+            renderList();
+          } catch (e) { alert(e.message); }
+        };
+        const lastUsed = pat.last_used_at ? new Date(pat.last_used_at).toLocaleDateString() : 'Never';
+        listEl.appendChild(
+          el('div', { class: 'pat-row' },
+            el('span', { class: 'pat-name' }, pat.name),
+            el('span', { class: 'text-muted pat-meta' }, `Created ${new Date(pat.created_at).toLocaleDateString()} · Last used: ${lastUsed}`),
+            revokeBtn
+          )
+        );
+      });
+    }
+
+    renderList();
+
+    const nameInput = el('input', { type: 'text', class: 'form-control', placeholder: 'Token name…', style: 'flex:1' });
+    const createBtn = el('button', { class: 'btn btn-primary' }, '+ New Token');
+    const newTokenDisplay = el('div', { style: 'display:none;margin-top:12px' });
+
+    createBtn.onclick = async () => {
+      const name = nameInput.value.trim();
+      if (!name) { nameInput.focus(); return; }
+      try {
+        createBtn.disabled = true;
+        const res = await Api.post('/v1/auth/tokens', { name });
+        nameInput.value = '';
+        const tokenPre = el('pre', { class: 'api-code-block' }, res.token);
+        const copyBtn2 = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
+        copyBtn2.onclick = () => copyCode(copyBtn2, res.token);
+        newTokenDisplay.style.display = '';
+        newTokenDisplay.innerHTML = '';
+        newTokenDisplay.appendChild(
+          el('div', {},
+            el('p', { style: 'font-size:0.8rem;color:#f59e0b;margin-bottom:6px' }, '⚠ Copy this token now — it will not be shown again.'),
+            el('div', { style: 'position:relative' }, tokenPre, copyBtn2)
+          )
+        );
+        // Refresh list from server
+        const freshPats = await Api.get('/v1/auth/tokens');
+        patList = freshPats;
+        renderList();
+      } catch (e) { alert(e.message); }
+      finally { createBtn.disabled = false; }
+    };
+
+    return el('div', { class: 'api-table-card', style: 'margin-top:32px' },
+      el('div', { class: 'api-table-title' }, 'Personal Access Tokens'),
+      el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
+        'PATs authenticate as you across all projects. Use them in scripts or CI/CD pipelines.'
+      ),
+      listEl,
+      el('div', { style: 'display:flex;gap:8px;margin-top:12px' }, nameInput, createBtn),
+      newTokenDisplay
+    );
+  }
+
+  const patCard = buildPatCard(pats);
+
   const content = [
     el('div', { class: 'page-header' },
       el('div', {},
@@ -1169,8 +1294,10 @@ const { token } = await res.json();
       ),
       el('span', { class: 'api-base-url' }, baseUrl)
     ),
+    keysCard,
     authCard,
-    ...(emptyState ? [emptyState] : tables.map(tableCard))
+    ...(emptyState ? [emptyState] : tables.map(tableCard)),
+    patCard,
   ];
 
   renderLayout(id, 'api', content);

@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS `projects` (
     `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `owner_user_id` INT UNSIGNED NOT NULL,
     `name`          VARCHAR(128) NOT NULL,
+    `anon_key`      TEXT DEFAULT NULL,
+    `service_key`   TEXT DEFAULT NULL,
     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_owner_name` (`owner_user_id`, `name`)
@@ -87,4 +89,33 @@ CREATE TABLE IF NOT EXISTS `deploys` (
     FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
+    `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `user_id`      INT UNSIGNED NOT NULL,
+    `name`         VARCHAR(128) NOT NULL,
+    `token_hash`   VARCHAR(64) NOT NULL,
+    `created_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `last_used_at` TIMESTAMP NULL DEFAULT NULL,
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_token_hash` (`token_hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
+
+-- ─── Migration SQL for existing installs ────────────────────────────────────
+-- Run these ALTER statements once if you already have the projects table:
+--
+-- ALTER TABLE `projects`
+--   ADD COLUMN `anon_key`    TEXT DEFAULT NULL AFTER `name`,
+--   ADD COLUMN `service_key` TEXT DEFAULT NULL AFTER `anon_key`;
+--
+-- CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
+--     `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `user_id`      INT UNSIGNED NOT NULL,
+--     `name`         VARCHAR(128) NOT NULL,
+--     `token_hash`   VARCHAR(64) NOT NULL,
+--     `created_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     `last_used_at` TIMESTAMP NULL DEFAULT NULL,
+--     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+--     UNIQUE KEY `uq_token_hash` (`token_hash`)
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

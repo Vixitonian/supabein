@@ -96,6 +96,35 @@ function register_auth_routes(\SupaBein\Router $router): void
         }
         json_out($user);
     }, ['auth_middleware']);
+
+    // ── Personal Access Tokens ───────────────────────────────────────────────
+
+    // GET /v1/auth/tokens — list PATs (no token values returned)
+    $router->get('/v1/auth/tokens', function (array $req): void {
+        $catalog = \SupaBein\Catalog::getInstance();
+        json_out($catalog->listPats($req['auth']['user_id']));
+    }, ['auth_middleware']);
+
+    // POST /v1/auth/tokens — create PAT, returns raw token once
+    $router->post('/v1/auth/tokens', function (array $req): void {
+        $name = trim($req['body']['name'] ?? '');
+        if ($name === '') {
+            abort(422, 'Token name is required');
+        }
+        $catalog = \SupaBein\Catalog::getInstance();
+        $raw     = $catalog->createPat($req['auth']['user_id'], $name);
+        json_out(['token' => $raw, 'name' => $name], 201);
+    }, ['auth_middleware']);
+
+    // DELETE /v1/auth/tokens/:id — revoke PAT
+    $router->delete('/v1/auth/tokens/:id', function (array $req): void {
+        $catalog = \SupaBein\Catalog::getInstance();
+        $deleted = $catalog->deletePat($req['auth']['user_id'], (int)$req['params']['id']);
+        if (!$deleted) {
+            abort(404, 'Token not found');
+        }
+        json_out(['deleted' => true]);
+    }, ['auth_middleware']);
 }
 
 function issue_jwt(int $userId, string $email, string $role): string

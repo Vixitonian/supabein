@@ -81,3 +81,10 @@ function sb_log(string $context, string $message, array $data = []): void
     $extra = $data ? ' ' . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '';
     error_log('[SUPABEIN] [' . $context . '] ' . $message . $extra);
 }
+
+function generate_project_key(string $type, int $projectId): string
+{
+    $config  = App::get('config');
+    $payload = ['iss' => 'supabein', 'type' => $type, 'pid' => $projectId];
+    return \Firebase\JWT\JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
+}
