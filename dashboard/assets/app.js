@@ -459,10 +459,10 @@ async function renderColumnsTab(projectId, tableName) {
     const addForm = h(`
       <div class="card">
         <div class="card-title">Add Column</div>
-        <div class="flex gap-2 items-center">
-          <input type="text" id="col-name" placeholder="column_name" style="width:200px">
-          <select id="col-type">${TYPES.map(t => `<option>${t}</option>`).join('')}</select>
-          <label style="display:flex;align-items:center;gap:4px;color:var(--muted)">
+        <div class="add-col-row">
+          <input type="text" id="col-name" placeholder="column_name" class="add-col-name">
+          <select id="col-type" class="add-col-type">${TYPES.map(t => `<option>${t}</option>`).join('')}</select>
+          <label class="add-col-nullable">
             <input type="checkbox" id="col-nullable" checked> Nullable
           </label>
           <button class="btn btn-primary btn-sm" id="add-col">Add</button>

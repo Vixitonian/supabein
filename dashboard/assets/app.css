@@ -209,6 +209,23 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .w-full { width: 100%; }
 .hidden { display: none !important; }
 
+/* Add Column row */
+.add-col-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.add-col-name  { flex: 1; min-width: 120px; }
+.add-col-type  { flex: 0 0 auto; }
+.add-col-nullable {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 /* Mobile responsive */
 @media (max-width: 767px) {
   .layout { flex-direction: column; }
