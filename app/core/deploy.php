@@ -85,6 +85,7 @@ class Deploy
 
         // Create pending deploy record
         $deploy = $catalog->createDeploy($siteId, date('Y-m-d H:i:s'), $file['size']);
+        $deploy['id'] = (int)$deploy['id'];
         $catalog->updateDeploy($deploy['id'], 'processing');
 
         // ── Phase 2: Validate zip entries ────────────────────────────────────
@@ -171,6 +172,7 @@ class Deploy
         $catalog->updateSiteCurrentDeploy($siteId, $deploy['id']);
 
         json_out($catalog->getDeployById($deploy['id']), 201);
+
     }
 
     public static function rollback(array $req): void
