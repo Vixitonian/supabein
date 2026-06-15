@@ -718,15 +718,28 @@ function showNewSiteModal(projectId) {
 async function renderSiteManager({ id, site_id }) {
   if (!requireAuth()) return;
 
+  const menuBtn = el('button', { class: 'btn btn-secondary btn-sm', id: 'site-menu-btn', style: 'position:relative' }, '•••');
+  const dropdown = el('div', { class: 'dropdown hidden', id: 'site-menu-dropdown' },
+    el('button', { class: 'dropdown-item dropdown-item-danger', id: 'delete-site-btn' }, 'Delete Site')
+  );
+  const menuWrap = el('div', { style: 'position:relative' }, menuBtn, dropdown);
+
   renderLayout(id, 'sites', [
     el('div', { class: 'page-header' },
       el('h1', { class: 'page-title' }, 'Site'),
-      el('button', { class: 'btn btn-danger btn-sm', id: 'delete-site-btn' }, 'Delete Site')
+      menuWrap
     ),
     el('div', { id: 'deploy-content' }, 'Loading...')
   ]);
 
-  document.getElementById('delete-site-btn').addEventListener('click', async () => {
+  menuBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    dropdown.classList.toggle('hidden');
+  });
+  document.addEventListener('click', () => dropdown.classList.add('hidden'), { capture: false });
+
+  dropdown.querySelector('#delete-site-btn').addEventListener('click', async () => {
+    dropdown.classList.add('hidden');
     if (!confirm('Delete this site and all its deploys? This cannot be undone.')) return;
     try {
       await Api.delete(`/v1/projects/${id}/sites/${site_id}`);
