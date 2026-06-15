@@ -87,4 +87,54 @@ function register_deploy_routes(\SupaBein\Router $router): void
         [\SupaBein\Deploy::class, 'rollback'],
         ['auth_middleware']
     );
+
+    // GET /v1/projects/:project_id/sites/:site_id/browse?path=
+    $router->get('/v1/projects/:project_id/sites/:site_id/browse', function (array $req) use ($catalog, $ownProject): void {
+        $ownProject((int)$req['params']['project_id'], $req['auth']['user_id']);
+        $site = $catalog->getSiteByProjectId((int)$req['params']['project_id'], (int)$req['params']['site_id']);
+        if (!$site) {
+            abort(404, 'Site not found');
+        }
+        if (!$site['current_deploy_id']) {
+            abort(404, 'No deploy yet');
+        }
+
+        $config    = \App::get('config');
+        $siteId    = (int)$req['params']['site_id'];
+        $base      = rtrim($config['SITES_PATH'], '/') . '/s' . $siteId . '/current';
+        $reqPath   = ltrim($req['query']['path'] ?? '', '/');
+        $fullPath  = \SupaBein\Deploy::normalizePath($base . '/' . $reqPath);
+
+        // Path traversal guard
+        if ($fullPath !== $base && !str_starts_with($fullPath, $base . '/')) {
+            abort(400, 'Invalid path');
+        }
+        if (!file_exists($fullPath)) {
+            abort(404, 'Path not found');
+        }
+
+        if (is_dir($fullPath)) {
+            $items = [];
+            foreach (scandir($fullPath) as $entry) {
+                if ($entry === '.' || $entry === '..') continue;
+                $ep = $fullPath . '/' . $entry;
+                $items[] = [
+                    'name' => $entry,
+                    'type' => is_dir($ep) ? 'dir' : 'file',
+                    'size' => is_file($ep) ? filesize($ep) : null,
+                ];
+            }
+            usort($items, fn($a, $b) =>
+                $a['type'] !== $b['type'] ? ($a['type'] === 'dir' ? -1 : 1) : strcmp($a['name'], $b['name'])
+            );
+            json_out(['path' => $reqPath, 'type' => 'dir', 'items' => $items]);
+        } else {
+            $size = filesize($fullPath);
+            if ($size > 524288) { // 512 KB cap
+                json_out(['path' => $reqPath, 'type' => 'file', 'size' => $size, 'content' => null, 'truncated' => true]);
+            } else {
+                json_out(['path' => $reqPath, 'type' => 'file', 'size' => $size, 'content' => file_get_contents($fullPath), 'truncated' => false]);
+            }
+        }
+    }, ['auth_middleware']);
 }

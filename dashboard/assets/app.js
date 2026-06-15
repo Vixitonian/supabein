@@ -851,14 +851,97 @@ async function loadDeployContent(projectId, siteId) {
         )
       : el('div', { class: 'text-muted' }, 'No deploys yet. Upload a zip above.');
 
-    content.innerHTML = '';
-    content.appendChild(uploadFormEl);
-    content.appendChild(el('div', { class: 'card mt-3' },
+    const tabDeploy = el('div', { class: 'tab active', id: 'tab-deploy' }, 'Deploy');
+    const tabFiles  = el('div', { class: 'tab', id: 'tab-files' }, 'Files');
+    const paneDeployEl = el('div', { id: 'pane-deploy' });
+    const paneFilesEl  = el('div', { id: 'pane-files', class: 'hidden' });
+
+    paneDeployEl.appendChild(uploadFormEl);
+    paneDeployEl.appendChild(el('div', { class: 'card mt-3' },
       el('div', { class: 'card-title' }, 'Deploy History'),
       deployTable
     ));
+
+    tabDeploy.addEventListener('click', () => {
+      tabDeploy.classList.add('active'); tabFiles.classList.remove('active');
+      paneDeployEl.classList.remove('hidden'); paneFilesEl.classList.add('hidden');
+    });
+    tabFiles.addEventListener('click', () => {
+      tabFiles.classList.add('active'); tabDeploy.classList.remove('active');
+      paneFilesEl.classList.remove('hidden'); paneDeployEl.classList.add('hidden');
+      if (!paneFilesEl.dataset.loaded) {
+        paneFilesEl.dataset.loaded = '1';
+        loadFileBrowser(projectId, siteId, paneFilesEl, '');
+      }
+    });
+
+    content.innerHTML = '';
+    content.appendChild(el('div', { class: 'tabs' }, tabDeploy, tabFiles));
+    content.appendChild(paneDeployEl);
+    content.appendChild(paneFilesEl);
   } catch (e) {
     content.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function loadFileBrowser(projectId, siteId, container, path) {
+  container.innerHTML = '<div class="text-muted" style="padding:12px">Loading...</div>';
+  try {
+    const data = await Api.get(`/v1/projects/${projectId}/sites/${siteId}/browse?path=${encodeURIComponent(path)}`);
+
+    if (data.type === 'dir') {
+      // Breadcrumb
+      const parts = path ? path.split('/').filter(Boolean) : [];
+      const crumbs = [el('span', { class: 'fb-crumb', style: 'cursor:pointer', onClick: () => loadFileBrowser(projectId, siteId, container, '') }, '/')];
+      parts.forEach((p, i) => {
+        crumbs.push(el('span', { class: 'text-muted' }, ' / '));
+        const crumbPath = parts.slice(0, i + 1).join('/');
+        crumbs.push(el('span', { class: 'fb-crumb', style: 'cursor:pointer', onClick: () => loadFileBrowser(projectId, siteId, container, crumbPath) }, p));
+      });
+
+      const rows = data.items.map(item => {
+        const icon = item.type === 'dir' ? '📁' : '📄';
+        const itemPath = path ? path + '/' + item.name : item.name;
+        return el('tr', { class: 'fb-row', style: 'cursor:pointer', onClick: () => loadFileBrowser(projectId, siteId, container, itemPath) },
+          el('td', { style: 'width:24px' }, icon),
+          el('td', {}, item.name),
+          el('td', { class: 'text-muted text-sm', style: 'text-align:right;width:80px' }, item.size != null ? Math.round(item.size / 1024 * 10) / 10 + ' KB' : '')
+        );
+      });
+
+      // Back row
+      if (path) {
+        const parentPath = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+        rows.unshift(el('tr', { class: 'fb-row', style: 'cursor:pointer', onClick: () => loadFileBrowser(projectId, siteId, container, parentPath) },
+          el('td', {}, '⬆'), el('td', {}, '..'), el('td', {})
+        ));
+      }
+
+      container.innerHTML = '';
+      container.appendChild(el('div', { class: 'card' },
+        el('div', { style: 'display:flex;align-items:center;gap:4px;margin-bottom:12px;flex-wrap:wrap' }, ...crumbs),
+        data.items.length
+          ? el('table', { class: 'data-table' }, el('tbody', {}, ...rows))
+          : el('div', { class: 'text-muted' }, 'Empty directory')
+      ));
+    } else {
+      // File viewer
+      const parentPath = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+      const fileName = path.split('/').pop();
+      container.innerHTML = '';
+      container.appendChild(el('div', { class: 'card' },
+        el('div', { style: 'display:flex;align-items:center;gap:8px;margin-bottom:12px' },
+          el('span', { class: 'fb-crumb', style: 'cursor:pointer', onClick: () => loadFileBrowser(projectId, siteId, container, parentPath) }, '← Back'),
+          el('span', { class: 'text-muted' }, fileName),
+          el('span', { class: 'text-muted text-sm' }, data.size != null ? '(' + Math.round(data.size / 1024 * 10) / 10 + ' KB)' : '')
+        ),
+        data.truncated
+          ? el('div', { class: 'alert alert-error' }, 'File too large to display (> 512 KB)')
+          : el('pre', { class: 'fb-content' }, data.content ?? '')
+      ));
+    }
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
