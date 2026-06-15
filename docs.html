@@ -154,10 +154,17 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#keys">API Keys</a>
   </div>
   <div class="sb-group">
-    <span class="sb-label">Auth</span>
+    <span class="sb-label">Platform Auth</span>
     <a class="sb-link" href="#signup">POST /auth/signup</a>
     <a class="sb-link" href="#login">POST /auth/login</a>
     <a class="sb-link" href="#me">GET /auth/me</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Project User Auth</span>
+    <a class="sb-link" href="#proj-signup">POST /projects/:id/auth/signup</a>
+    <a class="sb-link" href="#proj-login">POST /projects/:id/auth/login</a>
+    <a class="sb-link" href="#proj-me">GET /projects/:id/auth/me</a>
+    <a class="sb-link" href="#proj-refresh">POST /projects/:id/auth/refresh</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Projects</span>
@@ -250,7 +257,8 @@ curl "https://your-domain/api/v1/data/1/users" \
 <p>A <strong>Personal Access Token</strong> (PAT) acts as your login credential for the control plane (managing projects, tables, etc.) — useful in CI/CD. Create them in <a href="/dashboard/#/account">Account</a>.</p>
 
 <!-- ── Auth ── -->
-<h2 id="signup">Authentication</h2>
+<h2 id="signup">Platform Authentication</h2>
+<p>These endpoints are for <strong>SupaBein operators</strong> (developers who manage projects, tables, and deployments). To authenticate your app's own end-users, see <a href="#proj-signup">Project User Auth</a> below.</p>
 
 <div class="endpoint" id="signup">
   <div class="endpoint-head">
@@ -296,6 +304,76 @@ curl "https://your-domain/api/v1/data/1/users" \
     <div class="code-wrap"><pre class="code" id="c-me">curl "https://your-domain/api/v1/auth/me" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-me',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Project User Auth ── -->
+<h2 id="proj-signup">Project User Auth</h2>
+<p>
+  These endpoints manage <strong>end-users of apps built on SupaBein</strong> — not SupaBein
+  platform operators. Each project maintains its own user table (<code>project_users</code>).
+  Tokens carry a <code>pid</code> claim and are rejected by other projects' data endpoints.
+</p>
+
+<div class="endpoint" id="proj-signup">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/auth/signup</span>
+    <span class="desc">Register an end-user in the project</span>
+  </div>
+  <div class="endpoint-body">
+    <table><tr><th>Body field</th><th>Type</th><th>Description</th></tr>
+      <tr><td>email</td><td>string</td><td>Valid email address</td></tr>
+      <tr><td>password</td><td>string</td><td>Minimum 8 characters</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-proj-signup">curl -X POST "https://your-domain/api/v1/projects/5/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-proj-signup',this)">Copy</button></div>
+    <p>Returns <code>{"token": "eyJ..."}</code> — a project-scoped JWT (role: <code>authenticated</code>).</p>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-login">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/auth/login</span>
+    <span class="desc">Sign in a project end-user</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-proj-login">curl -X POST "https://your-domain/api/v1/projects/5/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-proj-login',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-me">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/auth/me</span>
+    <span class="desc">Get the current project user's profile</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Requires a project-scoped JWT (obtained from signup/login above).</p>
+    <div class="code-wrap"><pre class="code" id="c-proj-me">curl "https://your-domain/api/v1/projects/5/auth/me" \
+  -H "Authorization: Bearer USER_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-proj-me',this)">Copy</button></div>
+    <p>Returns <code>{"id": 1, "project_id": 5, "email": "...", "created_at": "..."}</code>.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="proj-refresh">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/auth/refresh</span>
+    <span class="desc">Refresh a project-user JWT</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Supply the existing project-scoped JWT. Returns a new token with a fresh expiry.</p>
+    <div class="code-wrap"><pre class="code" id="c-proj-refresh">curl -X POST "https://your-domain/api/v1/projects/5/auth/refresh" \
+  -H "Authorization: Bearer USER_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-proj-refresh',this)">Copy</button></div>
   </div>
 </div>
 

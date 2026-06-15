@@ -141,3 +141,23 @@ function issue_jwt(int $userId, string $email, string $role): string
     ];
     return JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
 }
+
+/**
+ * Issue a project-scoped JWT for an end-user of an app built on SupaBein.
+ * The pid claim ties the token to a specific project so cross-project access is blocked.
+ */
+function issue_project_jwt(int $projectUserId, string $email, int $projectId): string
+{
+    $config = App::get('config');
+    $now    = time();
+    $payload = [
+        'iss'   => 'supabein',
+        'sub'   => (string)$projectUserId,
+        'email' => $email,
+        'role'  => 'authenticated',
+        'pid'   => $projectId,
+        'iat'   => $now,
+        'exp'   => $now + $config['JWT_TTL'],
+    ];
+    return JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
+}

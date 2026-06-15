@@ -73,12 +73,14 @@ require_once SUPABEIN_ROOT . '/app/routes/project_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/table_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/data_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/deploy_routes.php';
+require_once SUPABEIN_ROOT . '/app/routes/project_auth_routes.php';
 
 register_auth_routes($router);
 register_project_routes($router);
 register_table_routes($router);
 register_data_routes($router);
 register_deploy_routes($router);
+register_project_auth_routes($router);
 
 try {
     $router->dispatch($request);

@@ -25,6 +25,12 @@ class Crud
             abort(404, 'Project not found');
         }
 
+        // Project-scoped tokens (pid in JWT) must match this project
+        if ($auth !== null && isset($auth['project_id']) && $auth['project_id'] !== null
+            && $auth['project_id'] !== $projectId) {
+            abort(403, 'Token is not valid for this project');
+        }
+
         $colRows     = $catalog->listColumns((int)$table['id']);
         $allowedCols = array_column($colRows, 'col_name');
 

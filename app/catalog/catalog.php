@@ -348,6 +348,36 @@ class Catalog
         return self::castRows($stmt->fetchAll(), ['id', 'site_id', 'size_bytes']);
     }
 
+    // ─── Project Users ───────────────────────────────────────────────────────
+
+    public function createProjectUser(int $projectId, string $email, string $passwordHash): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO project_users (project_id, email, password_hash) VALUES (?, ?, ?)'
+        );
+        $stmt->execute([$projectId, $email, $passwordHash]);
+        $id = (int)$this->pdo->lastInsertId();
+        return $this->getProjectUserById($projectId, $id);
+    }
+
+    public function getProjectUserById(int $projectId, int $userId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_id, email, created_at FROM project_users WHERE project_id = ? AND id = ?'
+        );
+        $stmt->execute([$projectId, $userId]);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
+    }
+
+    public function findProjectUserByEmail(int $projectId, string $email): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_id, email, password_hash FROM project_users WHERE project_id = ? AND email = ?'
+        );
+        $stmt->execute([$projectId, $email]);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
+    }
+
     // ─── Personal Access Tokens ──────────────────────────────────────────────
 
     public function listPats(int $userId): array

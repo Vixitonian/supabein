@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS `deploys` (
     FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `project_users` (
+    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`    INT UNSIGNED NOT NULL,
+    `email`         VARCHAR(255) NOT NULL,
+    `password_hash` VARCHAR(255) NOT NULL,
+    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_email` (`project_id`, `email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
     `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `user_id`      INT UNSIGNED NOT NULL,
@@ -108,6 +118,16 @@ SET foreign_key_checks = 1;
 -- ALTER TABLE `projects`
 --   ADD COLUMN `anon_key`    TEXT DEFAULT NULL AFTER `name`,
 --   ADD COLUMN `service_key` TEXT DEFAULT NULL AFTER `anon_key`;
+--
+-- CREATE TABLE IF NOT EXISTS `project_users` (
+--     `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `project_id`    INT UNSIGNED NOT NULL,
+--     `email`         VARCHAR(255) NOT NULL,
+--     `password_hash` VARCHAR(255) NOT NULL,
+--     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+--     UNIQUE KEY `uq_project_email` (`project_id`, `email`)
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 --
 -- CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
 --     `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

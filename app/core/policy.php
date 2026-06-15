@@ -88,6 +88,6 @@ class Policy
         $userId = $auth ? (int)$auth['user_id'] : 0;
 
         // Only substitute the known safe token :current_user_id
-        return str_replace(':current_user_id', $userId, $raw);
+        return str_replace(':current_user_id', (string)$userId, $raw);
     }
 }

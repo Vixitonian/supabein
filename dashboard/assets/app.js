@@ -290,14 +290,29 @@ curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Auth
 
 ---
 
-## User Auth (from the frontend)
+## User Auth (project-scoped, for your app's end-users)
+
+Each project has its own user table. Tokens are scoped to the project (pid claim)
+and will be rejected by other projects' data endpoints.
 
 \`\`\`bash
-# Sign up
-curl -s -X POST "${siteUrl}/api/v1/auth/signup" -H "Content-Type: application/json" -d '{"email":"user@example.com","password":"secret123"}'
+# Sign up  → returns { token: "eyJ..." }
+curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/signup" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email":"user@example.com","password":"secret123"}'
 
 # Log in  → returns { token: "eyJ..." }
-curl -s -X POST "${siteUrl}/api/v1/auth/login" -H "Content-Type: application/json" -d '{"email":"user@example.com","password":"secret123"}'
+curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/login" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email":"user@example.com","password":"secret123"}'
+
+# Get current user
+curl -s "${siteUrl}/api/v1/projects/${pid}/auth/me" \\
+  -H "Authorization: Bearer $USER_TOKEN"
+
+# Refresh token (returns new token with fresh expiry)
+curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/refresh" \\
+  -H "Authorization: Bearer $USER_TOKEN"
 \`\`\`
 
 ---
@@ -373,6 +388,9 @@ async function sbInsert(table, data) {
 - Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
 - The anon key is safe for frontend bundles. The PAT and service key must never be in frontend code.
 - Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
+- **Two auth tiers**: use \`/v1/projects/:id/auth/*\` for your app's end-users (project-scoped);
+  use \`/v1/auth/*\` only for SupaBein platform management (operators/CI), not for app users.
+- Project-user JWTs are scoped to their project — do not share them across projects.
 `;
 }
 

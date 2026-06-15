@@ -41,11 +41,12 @@ function resolve_token(string $token): ?array
         return ['user_id' => null, 'role' => 'service_role', 'email' => '', 'project_id' => (int)($decoded->pid ?? 0)];
     }
 
-    // Normal user JWT
+    // Normal user JWT (project-user tokens carry pid; platform user tokens do not)
     return [
-        'user_id' => (int)$decoded->sub,
-        'role'    => $decoded->role,
-        'email'   => $decoded->email,
+        'user_id'    => (int)$decoded->sub,
+        'role'       => $decoded->role,
+        'email'      => $decoded->email,
+        'project_id' => isset($decoded->pid) ? (int)$decoded->pid : null,
     ];
 }
 
