@@ -664,8 +664,11 @@ async function renderSites({ id }) {
           el('td', {}, el('a', { href: `#/projects/${id}/sites/${s.id}` }, s.subdomain)),
           el('td', {}, s.spa_mode ? 'Yes' : 'No'),
           el('td', { class: 'text-muted text-sm' }, s.current_version ? `${s.current_version} (${fmtDate(s.deployed_at)})` : 'None'),
-          el('td', {},
-            el('a', { class: 'btn btn-sm btn-secondary', href: `#/projects/${id}/sites/${s.id}` }, 'Manage')
+          el('td', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
+            el('a', { class: 'btn btn-sm btn-secondary', href: `#/projects/${id}/sites/${s.id}` }, 'Manage'),
+            s.current_deploy_id
+              ? el('a', { class: 'btn btn-sm btn-primary', href: `/sites/p${id}/current/`, target: '_blank', rel: 'noopener' }, 'View →')
+              : ''
           )
         )
       ))
@@ -733,6 +736,15 @@ async function loadDeployContent(projectId, siteId) {
       Api.get(`/v1/projects/${projectId}/sites/${siteId}`),
       Api.get(`/v1/projects/${projectId}/sites/${siteId}/deploys`)
     ]);
+
+    const header = document.querySelector('.page-header');
+    const existingViewBtn = header && header.querySelector('#view-site-btn');
+    if (existingViewBtn) existingViewBtn.remove();
+    if (header && site.current_deploy_id) {
+      header.appendChild(
+        el('a', { id: 'view-site-btn', class: 'btn btn-primary btn-sm', href: `/sites/p${projectId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →')
+      );
+    }
 
     const uploadForm = h(`
       <div class="card">
