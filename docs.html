@@ -182,7 +182,11 @@ tr:last-child td{border-bottom:none}
   </div>
   <div class="sb-group">
     <span class="sb-label">Sites &amp; Deploys</span>
-    <a class="sb-link" href="#sites">Create site</a>
+    <a class="sb-link" href="#sites-list">List sites</a>
+    <a class="sb-link" href="#sites-get">Get site</a>
+    <a class="sb-link" href="#sites-delete">Delete site</a>
+    <a class="sb-link" href="#sites-create">Create site</a>
+    <a class="sb-link" href="#deploys-list">List deploys</a>
     <a class="sb-link" href="#deploys">Deploy zip</a>
     <a class="sb-link" href="#rollback">Rollback</a>
   </div>
@@ -499,9 +503,50 @@ curl "https://your-domain/api/v1/data/1/users" \
 </div>
 
 <!-- ── Sites ── -->
-<h2 id="sites">Sites &amp; Deploys</h2>
+<h2 id="sites-list">Sites &amp; Deploys</h2>
 
 <div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/sites</span>
+    <span class="desc">List sites for a project</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-slist">curl "https://your-domain/api/v1/projects/1/sites" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-slist',this)">Copy</button></div>
+    <p>Returns an array of site objects including <code>id</code>, <code>subdomain</code>, <code>spa_mode</code>, <code>current_deploy_id</code>, and <code>created_at</code>. Each project supports one site.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="sites-get">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/sites/:site_id</span>
+    <span class="desc">Get a single site</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-sget">curl "https://your-domain/api/v1/projects/1/sites/1" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-sget',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="sites-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/projects/:id/sites/:site_id</span>
+    <span class="desc">Delete a site and all its deploys</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-sdel">curl -X DELETE "https://your-domain/api/v1/projects/1/sites/1" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-sdel',this)">Copy</button></div>
+    <p>Permanently deletes the site record and all associated deploy records. The deployed files on disk are also removed.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="sites-create">
   <div class="endpoint-head">
     <span class="method post">POST</span>
     <span class="path">/v1/projects/:id/sites</span>
@@ -514,6 +559,20 @@ curl "https://your-domain/api/v1/data/1/users" \
   -d '{"subdomain": "myapp", "spa_mode": false}'</pre>
     <button class="copy-btn" onclick="copyEl('c-site',this)">Copy</button></div>
     <p>Set <code>spa_mode: true</code> for single-page apps — unknown paths will serve <code>index.html</code> instead of 404.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploys-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys</span>
+    <span class="desc">List deploy history</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-dlist2">curl "https://your-domain/api/v1/projects/1/sites/1/deploys" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-dlist2',this)">Copy</button></div>
+    <p>Returns deploys newest-first with <code>id</code>, <code>version_label</code>, <code>status</code> (<code>pending</code> / <code>processing</code> / <code>ready</code> / <code>failed</code>), <code>size_bytes</code>, and <code>uploaded_at</code>.</p>
   </div>
 </div>
 
