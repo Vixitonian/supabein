@@ -58,6 +58,16 @@ function register_deploy_routes(\SupaBein\Router $router): void
         json_out($site);
     }, ['auth_middleware']);
 
+    // DELETE /v1/projects/:id/sites/:site_id
+    $router->delete('/v1/projects/:id/sites/:site_id', function (array $req) use ($catalog, $ownProject): void {
+        $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+        $deleted = $catalog->deleteSite((int)$req['params']['id'], (int)$req['params']['site_id']);
+        if (!$deleted) {
+            abort(404, 'Site not found');
+        }
+        json_out(['deleted' => true]);
+    }, ['auth_middleware']);
+
     // POST /v1/projects/:project_id/sites/:site_id/deploys  (file upload)
     $router->post('/v1/projects/:project_id/sites/:site_id/deploys', [\SupaBein\Deploy::class, 'upload'], ['auth_middleware']);
 

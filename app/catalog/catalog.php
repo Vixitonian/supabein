@@ -282,6 +282,15 @@ class Catalog
         $stmt->execute([$deployId, $siteId]);
     }
 
+    public function deleteSite(int $projectId, int $siteId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'DELETE FROM sites WHERE id = ? AND project_id = ?'
+        );
+        $stmt->execute([$siteId, $projectId]);
+        return $stmt->rowCount() > 0;
+    }
+
     // ─── Deploys ─────────────────────────────────────────────────────────────
 
     public function createDeploy(int $siteId, string $versionLabel, int $sizeBytes): array

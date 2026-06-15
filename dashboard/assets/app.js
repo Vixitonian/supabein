@@ -636,53 +636,47 @@ async function renderPoliciesTab(projectId, tableName) {
 async function renderSites({ id }) {
   if (!requireAuth()) return;
 
+  // Show a minimal loading state while we check
   renderLayout(id, 'sites', [
-    el('div', { class: 'page-header' },
-      el('h1', { class: 'page-title' }, 'Sites'),
-      el('button', { class: 'btn btn-primary', id: 'new-site' }, '+ New Site')
-    ),
+    el('div', { class: 'page-header' }, el('h1', { class: 'page-title' }, 'Site')),
     el('div', { id: 'site-list' }, 'Loading...')
   ]);
-
-  document.getElementById('new-site').addEventListener('click', () => showNewSiteModal(id));
 
   try {
     const sites = await Api.get(`/v1/projects/${id}/sites`);
 
-    // One site per project — go straight to the manager
-    if (sites.length === 1) {
+    // Any existing site → go straight to the manager
+    if (sites.length >= 1) {
       Router.navigate(`/projects/${id}/sites/${sites[0].id}`);
       return;
     }
 
-    const list = document.getElementById('site-list');
+    // No site yet — show create form
+    renderLayout(id, 'sites', [
+      el('div', { class: 'page-header' }, el('h1', { class: 'page-title' }, 'Site')),
+      el('div', { class: 'card' },
+        el('div', { class: 'card-title' }, 'Create your site'),
+        el('div', { class: 'form-group' },
+          el('label', {}, 'Subdomain'),
+          el('input', { type: 'text', id: 'subdomain', placeholder: 'my-app' })
+        ),
+        el('div', { class: 'form-group', style: 'display:flex;align-items:center;gap:8px' },
+          el('input', { type: 'checkbox', id: 'spa-mode', checked: true }),
+          el('label', { for: 'spa-mode' }, 'SPA Mode (React/Vue/etc — rewrites all paths to index.html)')
+        ),
+        el('button', { class: 'btn btn-primary', id: 'create-site' }, 'Create Site')
+      )
+    ]);
 
-    if (!sites.length) {
-      list.innerHTML = '<div class="text-muted">No sites yet. Click "+ New Site" to create one.</div>';
-      return;
-    }
-
-    const tbl = el('table', { class: 'data-table' },
-      el('thead', {}, el('tr', {},
-        el('th', {}, 'Subdomain'), el('th', {}, 'SPA Mode'), el('th', {}, 'Current Deploy'), el('th', {}, '')
-      )),
-      el('tbody', {}, ...sites.map(s =>
-        el('tr', {},
-          el('td', {}, el('a', { href: `#/projects/${id}/sites/${s.id}` }, s.subdomain)),
-          el('td', {}, s.spa_mode ? 'Yes' : 'No'),
-          el('td', { class: 'text-muted text-sm' }, s.current_version ? `${s.current_version} (${fmtDate(s.deployed_at)})` : 'None'),
-          el('td', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
-            el('a', { class: 'btn btn-sm btn-secondary', href: `#/projects/${id}/sites/${s.id}` }, 'Manage'),
-            s.current_deploy_id
-              ? el('a', { class: 'btn btn-sm btn-primary', href: `/sites/s${s.id}/current/`, target: '_blank', rel: 'noopener' }, 'View →')
-              : ''
-          )
-        )
-      ))
-    );
-
-    list.innerHTML = '';
-    list.appendChild(tbl);
+    document.getElementById('create-site').addEventListener('click', async () => {
+      const subdomain = document.getElementById('subdomain').value.trim();
+      const spa_mode  = document.getElementById('spa-mode').checked;
+      if (!subdomain) return;
+      try {
+        const site = await Api.post(`/v1/projects/${id}/sites`, { subdomain, spa_mode });
+        Router.navigate(`/projects/${id}/sites/${site.id}`);
+      } catch (e) { alert(e.message); }
+    });
   } catch (e) {
     document.getElementById('site-list').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
@@ -726,11 +720,19 @@ async function renderSiteManager({ id, site_id }) {
 
   renderLayout(id, 'sites', [
     el('div', { class: 'page-header' },
-      el('h1', { class: 'page-title' }, 'Deploy'),
-      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}/sites` }, '← Sites')
+      el('h1', { class: 'page-title' }, 'Site'),
+      el('button', { class: 'btn btn-danger btn-sm', id: 'delete-site-btn' }, 'Delete Site')
     ),
     el('div', { id: 'deploy-content' }, 'Loading...')
   ]);
+
+  document.getElementById('delete-site-btn').addEventListener('click', async () => {
+    if (!confirm('Delete this site and all its deploys? This cannot be undone.')) return;
+    try {
+      await Api.delete(`/v1/projects/${id}/sites/${site_id}`);
+      Router.navigate(`/projects/${id}/sites`);
+    } catch (e) { alert(e.message); }
+  });
 
   await loadDeployContent(id, site_id);
 }
