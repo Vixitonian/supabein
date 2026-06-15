@@ -937,7 +937,25 @@ async function loadFileBrowser(projectId, siteId, container, path) {
         ),
         data.truncated
           ? el('div', { class: 'alert alert-error' }, 'File too large to display (> 512 KB)')
-          : el('pre', { class: 'fb-content' }, data.content ?? '')
+          : (() => {
+              const EXT_LANG = {
+                html: 'html', htm: 'html', css: 'css',
+                js: 'javascript', mjs: 'javascript', ts: 'typescript',
+                json: 'json', php: 'php', md: 'markdown',
+                xml: 'xml', svg: 'xml', sh: 'bash', bash: 'bash',
+                py: 'python', rb: 'ruby', sql: 'sql', yaml: 'yaml', yml: 'yaml',
+              };
+              const ext = fileName.split('.').pop().toLowerCase();
+              const lang = EXT_LANG[ext] || 'plaintext';
+              const pre = document.createElement('pre');
+              pre.className = 'fb-content';
+              const code = document.createElement('code');
+              code.className = `language-${lang}`;
+              code.textContent = data.content ?? '';
+              pre.appendChild(code);
+              if (window.hljs) hljs.highlightElement(code);
+              return pre;
+            })()
       ));
     }
   } catch (e) {
