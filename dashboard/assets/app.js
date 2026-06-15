@@ -129,6 +129,224 @@ function fmtDate(d) {
   return d ? new Date(d).toLocaleString() : '—';
 }
 
+function downloadText(filename, content) {
+  const blob = new Blob([content], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function generateClaudeMd(baseUrl, projectId, anonKey) {
+  const pid  = projectId || 'YOUR_PROJECT_ID';
+  const anon = anonKey   || 'YOUR_ANON_KEY';
+  const siteUrl = baseUrl;
+
+  return `# CLAUDE.md — SupaBein Project
+
+This project uses **SupaBein** as its backend (database, REST API, and site hosting).
+Read this file before writing any backend code — all data and hosting goes through SupaBein.
+
+---
+
+## Configuration
+
+\`\`\`
+SUPABEIN_URL=${siteUrl}
+SUPABEIN_TOKEN=sb_pat_xxxx          # Personal Access Token — create one at ${siteUrl}/dashboard/#/account
+SUPABEIN_PROJECT_ID=${pid}
+SUPABEIN_ANON_KEY=${anon}
+SUPABEIN_SITE_ID=YOUR_SITE_ID       # Fill in after creating a site (from Deploy tab)
+\`\`\`
+
+> The PAT authenticates as the project owner and can create tables, set policies, and deploy.
+> The anon key is safe to use in frontend code — it respects table policies.
+
+---
+
+## First-time Setup (run once)
+
+### 1. Create the project
+\`\`\`bash
+PROJECT=$(curl -s -X POST "${siteUrl}/api/v1/projects" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"my-app"}')
+
+PROJECT_ID=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+ANON_KEY=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['anon_key'])")
+
+echo "Project ID: $PROJECT_ID"
+echo "Anon key:   $ANON_KEY"
+\`\`\`
+
+### 2. Create a site (for frontend hosting)
+\`\`\`bash
+curl -s -X POST "${siteUrl}/api/v1/projects/$PROJECT_ID/sites" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"subdomain":"my-app","spa_mode":true}'
+\`\`\`
+Save the returned \`id\` as \`SUPABEIN_SITE_ID\`.
+
+---
+
+## Tables
+
+### Create a table with columns
+\`\`\`bash
+curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "name": "posts",
+    "columns": [
+      { "name": "title",   "type": "VARCHAR(255)", "nullable": false },
+      { "name": "body",    "type": "TEXT",         "nullable": true  },
+      { "name": "user_id", "type": "INT",          "nullable": false }
+    ]
+  }'
+\`\`\`
+
+### Allowed column types
+\`INT\` \`BIGINT\` \`VARCHAR(255)\` \`TEXT\` \`BOOLEAN\` \`DATETIME\` \`DECIMAL(10,2)\` \`FLOAT\`
+
+### List / delete tables
+\`\`\`bash
+curl -s "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables" -H "Authorization: Bearer $SUPABEIN_TOKEN"
+curl -s -X DELETE "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts" -H "Authorization: Bearer $SUPABEIN_TOKEN"
+\`\`\`
+
+---
+
+## Row-Level Policies
+
+Every table defaults to **deny all**. Set policies before querying as anon.
+
+\`\`\`bash
+curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/policies" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '[
+    { "api_role": "anon",          "operation": "SELECT", "allowed": true  },
+    { "api_role": "anon",          "operation": "INSERT", "allowed": false },
+    { "api_role": "authenticated", "operation": "SELECT", "allowed": true  },
+    { "api_role": "authenticated", "operation": "INSERT", "allowed": true  },
+    { "api_role": "authenticated", "operation": "UPDATE", "allowed": true  },
+    { "api_role": "authenticated", "operation": "DELETE", "allowed": true  }
+  ]'
+\`\`\`
+
+Roles: \`anon\` (no token), \`authenticated\` (valid user JWT), \`service_role\` (service key, bypasses all).
+Operations: \`SELECT\` \`INSERT\` \`UPDATE\` \`DELETE\`
+
+---
+
+## Data API
+
+Use the **anon key** for frontend calls. Use the **PAT or service key** for trusted server calls.
+
+\`\`\`bash
+# List rows
+curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=50" \\
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+
+# Insert
+curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
+  -H "Authorization: Bearer $SUPABEIN_ANON_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"title":"Hello","body":"World","user_id":1}'
+
+# Get / Update / Delete
+curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+curl -s -X PATCH "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_ANON_KEY" -H "Content-Type: application/json" -d '{"title":"Updated"}'
+curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+\`\`\`
+
+---
+
+## User Auth (from the frontend)
+
+\`\`\`bash
+# Sign up
+curl -s -X POST "${siteUrl}/api/v1/auth/signup" -H "Content-Type: application/json" -d '{"email":"user@example.com","password":"secret123"}'
+
+# Log in  → returns { token: "eyJ..." }
+curl -s -X POST "${siteUrl}/api/v1/auth/login" -H "Content-Type: application/json" -d '{"email":"user@example.com","password":"secret123"}'
+\`\`\`
+
+---
+
+## Deploying the Frontend
+
+### Option A — Zip upload
+\`\`\`bash
+cd dist && zip -r ../deploy.zip . && cd ..
+curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "zipfile=@./deploy.zip" -F "label=v1.0.0"
+\`\`\`
+
+### Option B — File by file (CI/CD)
+\`\`\`bash
+DID=$(curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/open" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"label":"v1.0.0"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+
+find dist -type f | while read f; do
+  REL="\${f#dist/}"
+  curl -sX PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/files?path=$REL" \\
+    -H "Authorization: Bearer $SUPABEIN_TOKEN" --data-binary "@$f"
+done
+
+curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/finalize" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+\`\`\`
+
+Live site: \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/current/\`
+
+---
+
+## Using the anon key in frontend JS
+
+\`\`\`js
+const SB_URL = '${siteUrl}/api/v1';
+const SB_KEY = '${anon}';
+const SB_PID = ${pid};
+
+async function sbQuery(table, params = {}) {
+  const qs  = new URLSearchParams(params).toString();
+  const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`, {
+    headers: { Authorization: \`Bearer \${SB_KEY}\` }
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function sbInsert(table, data) {
+  const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}\`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: \`Bearer \${SB_KEY}\` },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+\`\`\`
+
+---
+
+## Rules for Claude
+
+- Never use a separate database — all data goes through the SupaBein data API.
+- Never hardcode project ID or tokens in source files — read from environment variables.
+- Always create tables before inserting data.
+- Always set policies on new tables — the default is deny all.
+- Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
+- The anon key is safe for frontend bundles. The PAT and service key must never be in frontend code.
+- Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
+`;
+}
+
 function requireAuth() {
   if (!Auth.isLoggedIn()) {
     Router.navigate('/login');
@@ -1353,6 +1571,59 @@ async function renderAccount() {
     tokenDisplay
   );
 
+  // ── CLAUDE.md Builder card ──
+  let projects = [];
+  try { projects = await Api.get('/v1/projects'); } catch (_) {}
+
+  const baseUrl   = window.location.origin;
+  const previewEl = el('textarea', {
+    readonly: 'readonly',
+    style: 'width:100%;height:320px;font-family:monospace;font-size:0.75rem;background:#0a0d14;color:#e2e8f0;border:1px solid var(--border);border-radius:6px;padding:12px;resize:vertical;white-space:pre',
+  });
+  previewEl.value = generateClaudeMd(baseUrl, null, null);
+
+  const projSelect = el('select', { class: 'form-control', style: 'max-width:320px' },
+    el('option', { value: '' }, '— No project (generic template) —'),
+    ...projects.map(p => el('option', { value: p.id }, `${p.name} (id: ${p.id})`))
+  );
+
+  projSelect.addEventListener('change', async () => {
+    const pid = projSelect.value;
+    if (!pid) {
+      previewEl.value = generateClaudeMd(baseUrl, null, null);
+      return;
+    }
+    try {
+      const proj = await Api.get(`/v1/projects/${pid}`);
+      previewEl.value = generateClaudeMd(baseUrl, proj.id, proj.anon_key);
+    } catch (e) { alert(e.message); }
+  });
+
+  const copyMdBtn = el('button', { class: 'btn btn-secondary btn-sm' }, 'Copy');
+  copyMdBtn.onclick = () => {
+    navigator.clipboard.writeText(previewEl.value).then(() => {
+      const orig = copyMdBtn.textContent;
+      copyMdBtn.textContent = 'Copied!';
+      setTimeout(() => { copyMdBtn.textContent = orig; }, 1500);
+    });
+  };
+
+  const dlBtn = el('button', { class: 'btn btn-primary btn-sm' }, 'Download CLAUDE.md');
+  dlBtn.onclick = () => downloadText('CLAUDE.md', previewEl.value);
+
+  const builderCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'CLAUDE.md Builder'),
+    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
+      'Generate a ready-to-use CLAUDE.md for any new project repo. Drop it at the repo root — Claude Code will read it automatically and know how to use SupaBein as the backend.'
+    ),
+    el('div', { style: 'margin-bottom:12px' },
+      el('label', { class: 'label', style: 'margin-bottom:4px;display:block' }, 'Project (optional)'),
+      projSelect
+    ),
+    previewEl,
+    el('div', { style: 'display:flex;gap:8px;margin-top:10px' }, copyMdBtn, dlBtn)
+  );
+
   renderLayout(null, 'account', [
     el('div', { class: 'page-header' },
       el('h1', { class: 'page-title' }, 'Account'),
@@ -1360,6 +1631,7 @@ async function renderAccount() {
     ),
     infoCard,
     patCard,
+    builderCard,
   ]);
 }
 
