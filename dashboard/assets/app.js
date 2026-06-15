@@ -153,7 +153,8 @@ function renderLayout(projectId, activeTab, content) {
       el('a', { href: `#/projects/${projectId}/api`, class: activeTab === 'api' ? 'active' : '' }, 'API'),
     ] : []),
     el('div', { style: 'flex:1' }),
-    el('a', { href: '#/logout', style: 'margin-top:auto' }, user?.email || 'Logout')
+    el('a', { href: '#/account', class: activeTab === 'account' ? 'active' : '' }, 'Account'),
+    el('a', { href: '#/logout', style: 'margin-top:6px' }, user?.email || 'Logout')
   );
 
   const wrap = el('div', { class: 'layout' }, sidebar, el('main', { class: 'main', id: 'content' }, ...content));
@@ -990,12 +991,11 @@ async function renderApi({ id }) {
   const baseUrl = window.location.origin + '/api/v1';
   const projectId = parseInt(id);
 
-  let tables = [], project = null, pats = [];
+  let tables = [], project = null;
   try {
-    [project, tables, pats] = await Promise.all([
+    [project, tables] = await Promise.all([
       Api.get(`/v1/projects/${id}`),
       Api.get(`/v1/projects/${id}/tables`),
-      Api.get('/v1/auth/tokens'),
     ]);
   } catch (e) {
     renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
@@ -1208,84 +1208,6 @@ const { token } = await res.json();
       )
     : null;
 
-  // PAT management card
-  function buildPatCard(initialPats) {
-    let patList = [...initialPats];
-
-    const listEl = el('div', { class: 'pat-list' });
-
-    function renderList() {
-      listEl.innerHTML = '';
-      if (patList.length === 0) {
-        listEl.appendChild(el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:8px 0' }, 'No tokens yet.'));
-        return;
-      }
-      patList.forEach(pat => {
-        const revokeBtn = el('button', { class: 'btn btn-sm btn-danger' }, 'Revoke');
-        revokeBtn.onclick = async () => {
-          if (!confirm(`Revoke token "${pat.name}"?`)) return;
-          try {
-            await Api.delete(`/v1/auth/tokens/${pat.id}`);
-            patList = patList.filter(p => p.id !== pat.id);
-            renderList();
-          } catch (e) { alert(e.message); }
-        };
-        const lastUsed = pat.last_used_at ? new Date(pat.last_used_at).toLocaleDateString() : 'Never';
-        listEl.appendChild(
-          el('div', { class: 'pat-row' },
-            el('span', { class: 'pat-name' }, pat.name),
-            el('span', { class: 'text-muted pat-meta' }, `Created ${new Date(pat.created_at).toLocaleDateString()} · Last used: ${lastUsed}`),
-            revokeBtn
-          )
-        );
-      });
-    }
-
-    renderList();
-
-    const nameInput = el('input', { type: 'text', class: 'form-control', placeholder: 'Token name…', style: 'flex:1' });
-    const createBtn = el('button', { class: 'btn btn-primary' }, '+ New Token');
-    const newTokenDisplay = el('div', { style: 'display:none;margin-top:12px' });
-
-    createBtn.onclick = async () => {
-      const name = nameInput.value.trim();
-      if (!name) { nameInput.focus(); return; }
-      try {
-        createBtn.disabled = true;
-        const res = await Api.post('/v1/auth/tokens', { name });
-        nameInput.value = '';
-        const tokenPre = el('pre', { class: 'api-code-block' }, res.token);
-        const copyBtn2 = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
-        copyBtn2.onclick = () => copyCode(copyBtn2, res.token);
-        newTokenDisplay.style.display = '';
-        newTokenDisplay.innerHTML = '';
-        newTokenDisplay.appendChild(
-          el('div', {},
-            el('p', { style: 'font-size:0.8rem;color:#f59e0b;margin-bottom:6px' }, '⚠ Copy this token now — it will not be shown again.'),
-            el('div', { style: 'position:relative' }, tokenPre, copyBtn2)
-          )
-        );
-        // Refresh list from server
-        const freshPats = await Api.get('/v1/auth/tokens');
-        patList = freshPats;
-        renderList();
-      } catch (e) { alert(e.message); }
-      finally { createBtn.disabled = false; }
-    };
-
-    return el('div', { class: 'api-table-card', style: 'margin-top:32px' },
-      el('div', { class: 'api-table-title' }, 'Personal Access Tokens'),
-      el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-        'PATs authenticate as you across all projects. Use them in scripts or CI/CD pipelines.'
-      ),
-      listEl,
-      el('div', { style: 'display:flex;gap:8px;margin-top:12px' }, nameInput, createBtn),
-      newTokenDisplay
-    );
-  }
-
-  const patCard = buildPatCard(pats);
-
   const content = [
     el('div', { class: 'page-header' },
       el('div', {},
@@ -1297,10 +1219,220 @@ const { token } = await res.json();
     keysCard,
     authCard,
     ...(emptyState ? [emptyState] : tables.map(tableCard)),
-    patCard,
   ];
 
   renderLayout(id, 'api', content);
+}
+
+// ─── Account ──────────────────────────────────────────────────────────────────
+
+async function renderAccount() {
+  if (!requireAuth()) return;
+  renderLayout(null, 'account', [el('p', { class: 'text-muted' }, 'Loading…')]);
+
+  const baseUrl = window.location.origin + '/api/v1';
+  let user = null, pats = [];
+  try {
+    [user, pats] = await Promise.all([
+      Api.get('/v1/auth/me'),
+      Api.get('/v1/auth/tokens'),
+    ]);
+  } catch (e) {
+    renderLayout(null, 'account', [el('div', { class: 'alert alert-error' }, e.message)]);
+    return;
+  }
+
+  // ── User info card ──
+  const infoCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'Your Account'),
+    el('div', { style: 'margin-top:12px;display:flex;flex-direction:column;gap:8px' },
+      el('div', { style: 'display:flex;gap:12px;font-size:0.85rem' },
+        el('span', { style: 'color:var(--muted);width:80px;flex-shrink:0' }, 'Email'),
+        el('span', {}, user.email)
+      ),
+      el('div', { style: 'display:flex;gap:12px;font-size:0.85rem' },
+        el('span', { style: 'color:var(--muted);width:80px;flex-shrink:0' }, 'Role'),
+        el('span', {}, user.role)
+      ),
+      el('div', { style: 'display:flex;gap:12px;font-size:0.85rem' },
+        el('span', { style: 'color:var(--muted);width:80px;flex-shrink:0' }, 'Member since'),
+        el('span', {}, new Date(user.created_at).toLocaleDateString())
+      )
+    )
+  );
+
+  // ── PAT card ──
+  function copyCode(btn, text) {
+    navigator.clipboard.writeText(text).then(() => {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+  }
+
+  let patList = [...pats];
+  const listEl = el('div', { class: 'pat-list' });
+
+  function renderPatList() {
+    listEl.innerHTML = '';
+    if (patList.length === 0) {
+      listEl.appendChild(el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:8px 0' }, 'No tokens yet.'));
+      return;
+    }
+    patList.forEach(pat => {
+      const revokeBtn = el('button', { class: 'btn btn-sm btn-danger' }, 'Revoke');
+      revokeBtn.onclick = async () => {
+        if (!confirm(`Revoke token "${pat.name}"?`)) return;
+        try {
+          await Api.delete(`/v1/auth/tokens/${pat.id}`);
+          patList = patList.filter(p => p.id !== pat.id);
+          renderPatList();
+        } catch (e) { alert(e.message); }
+      };
+      const lastUsed = pat.last_used_at ? new Date(pat.last_used_at).toLocaleDateString() : 'Never';
+      listEl.appendChild(
+        el('div', { class: 'pat-row' },
+          el('span', { class: 'pat-name' }, pat.name),
+          el('span', { class: 'text-muted pat-meta' }, `Created ${new Date(pat.created_at).toLocaleDateString()} · Last used: ${lastUsed}`),
+          revokeBtn
+        )
+      );
+    });
+  }
+  renderPatList();
+
+  const nameInput    = el('input', { type: 'text', class: 'form-control', placeholder: 'Token name (e.g. "CI deploy")…', style: 'flex:1' });
+  const createBtn    = el('button', { class: 'btn btn-primary' }, '+ New Token');
+  const tokenDisplay = el('div', { style: 'display:none;margin-top:12px' });
+
+  createBtn.onclick = async () => {
+    const name = nameInput.value.trim();
+    if (!name) { nameInput.focus(); return; }
+    try {
+      createBtn.disabled = true;
+      const res = await Api.post('/v1/auth/tokens', { name });
+      nameInput.value = '';
+      const tokenPre = el('pre', { class: 'api-code-block' }, res.token);
+      const copyBtn2 = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
+      copyBtn2.onclick = () => copyCode(copyBtn2, res.token);
+      tokenDisplay.style.display = '';
+      tokenDisplay.innerHTML = '';
+      tokenDisplay.appendChild(
+        el('div', {},
+          el('p', { style: 'font-size:0.8rem;color:#f59e0b;margin-bottom:6px' }, '⚠ Copy this token now — it will not be shown again.'),
+          el('div', { style: 'position:relative' }, tokenPre, copyBtn2)
+        )
+      );
+      const freshPats = await Api.get('/v1/auth/tokens');
+      patList = freshPats;
+      renderPatList();
+    } catch (e) { alert(e.message); }
+    finally { createBtn.disabled = false; }
+  };
+
+  const patCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'Personal Access Tokens'),
+    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
+      'PATs let you authenticate as yourself in scripts, CI/CD pipelines, or any tool that needs API access across all your projects. They work like a login session that never expires.'
+    ),
+    listEl,
+    el('div', { style: 'display:flex;gap:8px;margin-top:14px' }, nameInput, createBtn),
+    tokenDisplay
+  );
+
+  // ── User-level API docs card ──
+  function methodBadge(method) {
+    return el('span', { class: `method-badge method-${method.toLowerCase()}` }, method);
+  }
+
+  function docRow(method, path, desc) {
+    const curlMap = {
+      'POST /v1/auth/signup':
+`curl -X POST "${baseUrl}/auth/signup" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "you@example.com", "password": "yourpassword"}'`,
+      'POST /v1/auth/login':
+`curl -X POST "${baseUrl}/auth/login" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "you@example.com", "password": "yourpassword"}'`,
+      'GET /v1/auth/me':
+`curl -X GET "${baseUrl}/auth/me" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`,
+      'GET /v1/projects':
+`curl -X GET "${baseUrl}/projects" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`,
+      'POST /v1/projects':
+`curl -X POST "${baseUrl}/projects" \\
+  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "My Project"}'`,
+      'DELETE /v1/projects/:id':
+`curl -X DELETE "${baseUrl}/projects/1" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`,
+      'GET /v1/auth/tokens':
+`curl -X GET "${baseUrl}/auth/tokens" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`,
+      'POST /v1/auth/tokens':
+`curl -X POST "${baseUrl}/auth/tokens" \\
+  -H "Authorization: Bearer YOUR_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "CI deploy"}'`,
+      'DELETE /v1/auth/tokens/:id':
+`curl -X DELETE "${baseUrl}/auth/tokens/1" \\
+  -H "Authorization: Bearer YOUR_TOKEN"`,
+    };
+    const key = `${method} ${path}`;
+    const curl = curlMap[key] || `curl -X ${method} "${baseUrl}${path.replace('/v1', '')}"`;
+    const details = el('div', { class: 'api-endpoint-detail' },
+      el('pre', { class: 'api-code-block', style: 'position:relative' }, curl)
+    );
+    details.style.display = 'none';
+    let open = false;
+    const toggleBtn = el('button', { class: 'btn btn-sm', style: 'margin-left:auto;flex-shrink:0' }, '▾');
+    const row = el('div', { class: 'endpoint-row' },
+      methodBadge(method),
+      el('span', { class: 'endpoint-path' }, path),
+      el('span', { class: 'endpoint-desc' }, desc),
+      toggleBtn
+    );
+    toggleBtn.onclick = () => {
+      open = !open;
+      details.style.display = open ? '' : 'none';
+      toggleBtn.textContent = open ? '▴' : '▾';
+    };
+    return el('div', {}, row, details);
+  }
+
+  const docsCard = el('div', { class: 'api-table-card' },
+    el('div', { class: 'api-table-title' }, 'User-Level API'),
+    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
+      'Base URL: ', el('span', { class: 'api-base-url', style: 'font-size:0.75rem' }, baseUrl),
+      el('br'), el('span', { style: 'margin-top:4px;display:inline-block' },
+        'Use ', el('strong', {}, 'your login JWT'), ' or a ', el('strong', {}, 'Personal Access Token'), ' in the Authorization header.'
+      )
+    ),
+    el('div', { style: 'margin-bottom:8px;font-size:0.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em' }, 'Authentication'),
+    docRow('POST', '/v1/auth/signup',  'Create an account → returns JWT'),
+    docRow('POST', '/v1/auth/login',   'Sign in → returns JWT'),
+    docRow('GET',  '/v1/auth/me',      'Get your profile (auth required)'),
+    el('div', { style: 'margin:10px 0 8px;font-size:0.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em' }, 'Projects'),
+    docRow('GET',    '/v1/projects',      'List your projects'),
+    docRow('POST',   '/v1/projects',      'Create a project'),
+    docRow('DELETE', '/v1/projects/:id',  'Delete a project'),
+    el('div', { style: 'margin:10px 0 8px;font-size:0.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em' }, 'Personal Access Tokens'),
+    docRow('GET',    '/v1/auth/tokens',      'List your PATs'),
+    docRow('POST',   '/v1/auth/tokens',      'Create a PAT {name}'),
+    docRow('DELETE', '/v1/auth/tokens/:id',  'Revoke a PAT'),
+  );
+
+  renderLayout(null, 'account', [
+    el('div', { class: 'page-header' },
+      el('h1', { class: 'page-title' }, 'Account')
+    ),
+    infoCard,
+    patCard,
+    docsCard,
+  ]);
 }
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
@@ -1325,6 +1457,7 @@ Router.add('projects/:id/tables/:name',             renderTableEditor);
 Router.add('projects/:id/sites',                    renderSites);
 Router.add('projects/:id/sites/:site_id',           renderSiteManager);
 Router.add('projects/:id/api',                      renderApi);
+Router.add('account',                               renderAccount);
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
