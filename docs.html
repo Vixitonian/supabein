@@ -412,20 +412,28 @@ curl "https://your-domain/api/v1/data/1/users" \
   <div class="endpoint-head">
     <span class="method put">PUT</span>
     <span class="path">/v1/projects/:id/tables/:name/policies</span>
-    <span class="desc">Create or update a policy</span>
+    <span class="desc">Create or update a policy (single or batch)</span>
   </div>
   <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-policy">curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
+    <p>Accepts a <strong>single policy object</strong> or a <strong>JSON array</strong> of objects for batch upsert in one call.</p>
+    <div class="code-wrap"><pre class="code" id="c-policy">## Batch (recommended) — set all policies at once
+curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "api_role": "anon",
-    "operation": "SELECT",
-    "allowed": true,
-    "constraint_sql": null
-  }'</pre>
+  -d '[
+    { "api_role": "anon",          "operation": "SELECT", "allowed": true  },
+    { "api_role": "anon",          "operation": "INSERT", "allowed": false },
+    { "api_role": "authenticated", "operation": "SELECT", "allowed": true  },
+    { "api_role": "authenticated", "operation": "INSERT", "allowed": true  }
+  ]'
+
+## Single object — one policy per call
+curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "api_role": "anon", "operation": "SELECT", "allowed": true }'</pre>
     <button class="copy-btn" onclick="copyEl('c-policy',this)">Copy</button></div>
-    <p><code>constraint_sql</code> is an optional WHERE clause appended to queries. Use <code>:current_user_id</code> as a placeholder for the authenticated user's ID (e.g. <code>"user_id = :current_user_id"</code>).</p>
+    <p><code>constraint_sql</code> is an optional WHERE clause appended to queries. Use <code>:current_user_id</code> as a placeholder for the authenticated user's ID (e.g. <code>"user_id = :current_user_id"</code>). Batch response: <code>{"updated": N, "policies": [...]}</code>.</p>
   </div>
 </div>
 
@@ -442,10 +450,12 @@ curl "https://your-domain/api/v1/data/1/users" \
   </div>
   <div class="endpoint-body">
     <table><tr><th>Query param</th><th>Default</th><th>Description</th></tr>
-      <tr><td>limit</td><td>50</td><td>Max rows to return (cap: 1000)</td></tr>
+      <tr><td>limit</td><td>20</td><td>Max rows to return (cap: 1000)</td></tr>
       <tr><td>offset</td><td>0</td><td>Skip N rows (pagination)</td></tr>
+      <tr><td>colname=value</td><td>—</td><td>Exact-match filter on any column, e.g. <code>?status=active</code></td></tr>
     </table>
-    <div class="code-wrap"><pre class="code" id="c-dlist">curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0" \
+    <p>Rows are always returned newest-first (<code>id DESC</code>). Custom ordering is not supported. <strong>IDs in responses are numbers</strong> (integers), not strings.</p>
+    <div class="code-wrap"><pre class="code" id="c-dlist">curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
     <button class="copy-btn" onclick="copyEl('c-dlist',this)">Copy</button></div>
   </div>
@@ -590,9 +600,14 @@ curl "https://your-domain/api/v1/data/1/users" \
   </div>
   <div class="endpoint-body">
     <p>Upload a zip archive (multipart/form-data, field name <code>zipfile</code>, max 50 MB). The zip must not contain <code>.php</code>, <code>.sh</code>, or other server-executable files. If the zip has a single wrapper folder, it's automatically unwrapped.</p>
-    <div class="code-wrap"><pre class="code" id="c-deploy">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
+    <div class="callout"><strong>Zip structure:</strong> files must be at the <strong>root</strong> of the zip, not inside a subfolder.<br>
+    ✓ correct: <code>cd dist &amp;&amp; zip -r ../deploy.zip .</code><br>
+    ✗ wrong: <code>zip -r deploy.zip dist/</code> — creates a <code>dist/</code> subfolder inside the zip and the site will 404.</div>
+    <div class="code-wrap"><pre class="code" id="c-deploy">cd dist && zip -r ../deploy.zip . && cd ..
+curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
   -H "Authorization: Bearer YOUR_TOKEN" \
-  -F "zipfile=@./dist.zip"</pre>
+  -F "zipfile=@./deploy.zip" \
+  -F "label=v1.0.0"</pre>
     <button class="copy-btn" onclick="copyEl('c-deploy',this)">Copy</button></div>
     <p>After a successful deploy, your site is live at:<br>
     <code>https://your-domain/sites/s{site_id}/current/</code></p>

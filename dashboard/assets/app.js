@@ -190,6 +190,8 @@ curl -s -X POST "${siteUrl}/api/v1/projects/$PROJECT_ID/sites" \\
 \`\`\`
 Save the returned \`id\` as \`SUPABEIN_SITE_ID\`.
 
+> **spa_mode** — when \`true\`, every URL path serves \`index.html\` so your client-side router (React Router, Vue Router, etc.) handles routing. Set \`false\` for plain static sites where each URL must match a real file.
+
 ---
 
 ## Tables
@@ -224,7 +226,10 @@ curl -s -X DELETE "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts"
 
 Every table defaults to **deny all**. Set policies before querying as anon.
 
+The endpoint accepts **one policy object per call** OR **an array** for batch upsert:
+
 \`\`\`bash
+# Batch — send an array (recommended)
 curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/policies" \\
   -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
   -H "Content-Type: application/json" \\
@@ -236,6 +241,12 @@ curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/pol
     { "api_role": "authenticated", "operation": "UPDATE", "allowed": true  },
     { "api_role": "authenticated", "operation": "DELETE", "allowed": true  }
   ]'
+
+# Single — send one object
+curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/policies" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "api_role": "anon", "operation": "SELECT", "allowed": true }'
 \`\`\`
 
 Roles: \`anon\` (no token), \`authenticated\` (valid user JWT), \`service_role\` (service key, bypasses all).
@@ -247,9 +258,22 @@ Operations: \`SELECT\` \`INSERT\` \`UPDATE\` \`DELETE\`
 
 Use the **anon key** for frontend calls. Use the **PAT or service key** for trusted server calls.
 
+> **ID types**: \`id\` fields in responses are numbers (integers), not strings.
+> Use \`===\` comparisons safely.
+
+### Query parameters for list endpoints
+
+| Param | Effect |
+|-------|--------|
+| \`?limit=N\` | Max rows to return (1–1000, default 20) |
+| \`?offset=N\` | Skip N rows for pagination |
+| \`?colname=value\` | Exact-match filter on any column (e.g. \`?status=active\`) |
+
+Rows are always returned newest-first (\`id DESC\`). Custom ordering is not yet supported.
+
 \`\`\`bash
-# List rows
-curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=50" \\
+# List rows (with filter + pagination)
+curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=20&offset=0&status=active" \\
   -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
 
 # Insert
@@ -281,6 +305,10 @@ curl -s -X POST "${siteUrl}/api/v1/auth/login" -H "Content-Type: application/jso
 ## Deploying the Frontend
 
 ### Option A — Zip upload
+> **Zip structure**: files must be at the **root** of the zip, not inside a subfolder.
+> ✓ correct: \`cd dist && zip -r ../deploy.zip .\`
+> ✗ wrong: \`zip -r deploy.zip dist/\` — creates a \`dist/\` subfolder inside the zip and the site will 404.
+
 \`\`\`bash
 cd dist && zip -r ../deploy.zip . && cd ..
 curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\

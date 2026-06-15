@@ -64,6 +64,7 @@ class Crud
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         $rows = $stmt->fetchAll();
+        $rows = array_map(fn($r) => isset($r['id']) ? array_merge($r, ['id' => (int)$r['id']]) : $r, $rows);
 
         json_out(['data' => $rows, 'count' => count($rows), 'limit' => $limit, 'offset' => $offset]);
     }
@@ -94,6 +95,7 @@ class Crud
             abort(404, 'Row not found');
         }
 
+        if (isset($row['id'])) $row['id'] = (int)$row['id'];
         json_out($row);
     }
 
@@ -122,7 +124,9 @@ class Crud
 
         $stmt = $pdo->prepare('SELECT * FROM `' . $table['physical_name'] . '` WHERE id = ?');
         $stmt->execute([$newId]);
-        json_out($stmt->fetch(), 201);
+        $row = $stmt->fetch();
+        if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
+        json_out($row, 201);
     }
 
     // ─── UPDATE ──────────────────────────────────────────────────────────────
@@ -157,7 +161,9 @@ class Crud
 
         $stmt2 = $pdo->prepare('SELECT * FROM `' . $table['physical_name'] . '` WHERE id = ?');
         $stmt2->execute([$rowId]);
-        json_out($stmt2->fetch());
+        $row = $stmt2->fetch();
+        if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
+        json_out($row);
     }
 
     // ─── DELETE ──────────────────────────────────────────────────────────────

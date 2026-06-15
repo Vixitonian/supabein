@@ -184,27 +184,34 @@ function register_table_routes(\SupaBein\Router $router): void
     }, ['auth_middleware']);
 
     // PUT /v1/projects/:id/tables/:name/policies
+    // Accepts a single policy object OR an array of policy objects (batch upsert).
     $router->put('/v1/projects/:id/tables/:name/policies', function (array $req) use ($catalog, $ownProject, $ownTable): void {
-        $project  = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $table    = $ownTable($project['id'], $req['params']['name']);
+        $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+        $table   = $ownTable($project['id'], $req['params']['name']);
 
-        $apiRole  = $req['body']['api_role'] ?? '';
-        $operation = strtoupper($req['body']['operation'] ?? '');
-        $allowed  = (bool)($req['body']['allowed'] ?? false);
-        $constraint = $req['body']['constraint_sql'] ?? null;
+        $body     = $req['body'];
+        $policies = isset($body[0]) ? $body : [$body];
 
-        if (!$apiRole || !in_array($operation, ['SELECT','INSERT','UPDATE','DELETE'], true)) {
-            abort(422, 'api_role and operation (SELECT|INSERT|UPDATE|DELETE) are required');
-        }
+        $results = [];
+        foreach ($policies as $i => $policy) {
+            $apiRole    = $policy['api_role']      ?? '';
+            $operation  = strtoupper($policy['operation'] ?? '');
+            $allowed    = (bool)($policy['allowed'] ?? false);
+            $constraint = $policy['constraint_sql'] ?? null;
 
-        // Validate constraint SQL if provided
-        if ($constraint !== null) {
-            if (preg_match('/(--)|(;)|(\bDROP\b)|(\bINSERT\b)|(\bUPDATE\b)|(\bDELETE\b)|(\bSELECT\b)/i', $constraint)) {
-                abort(422, 'Constraint SQL contains disallowed keywords or characters');
+            if (!$apiRole || !in_array($operation, ['SELECT','INSERT','UPDATE','DELETE'], true)) {
+                abort(422, "Policy[$i]: api_role and operation (SELECT|INSERT|UPDATE|DELETE) are required. Send a single object {api_role,operation,allowed} or an array of objects.");
             }
+
+            if ($constraint !== null) {
+                if (preg_match('/(--)|(;)|(\bDROP\b)|(\bINSERT\b)|(\bUPDATE\b)|(\bDELETE\b)|(\bSELECT\b)/i', $constraint)) {
+                    abort(422, "Policy[$i]: constraint_sql contains disallowed keywords or characters");
+                }
+            }
+
+            $results[] = $catalog->upsertPolicy($table['id'], $apiRole, $operation, $allowed, $constraint);
         }
 
-        $policy = $catalog->upsertPolicy($table['id'], $apiRole, $operation, $allowed, $constraint);
-        json_out($policy);
+        json_out(count($results) === 1 ? $results[0] : ['updated' => count($results), 'policies' => $results]);
     }, ['auth_middleware']);
 }
