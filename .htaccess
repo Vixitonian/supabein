@@ -1,4 +1,4 @@
-Options -Indexes +FollowSymLinks
+Options -Indexes
 
 RewriteEngine On
 
