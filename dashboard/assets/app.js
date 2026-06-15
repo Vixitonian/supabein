@@ -748,16 +748,17 @@ async function loadDeployContent(projectId, siteId) {
       </div>
     `);
 
-    uploadForm.querySelector('#deploy-btn').addEventListener('click', async () => {
-      const file = uploadForm.querySelector('#zip-file').files[0];
+    const uploadFormEl = uploadForm.firstElementChild;
+    uploadFormEl.querySelector('#deploy-btn').addEventListener('click', async () => {
+      const file = uploadFormEl.querySelector('#zip-file').files[0];
       if (!file) { alert('Select a zip file first'); return; }
 
       const fd = new FormData();
       fd.append('zipfile', file);
 
-      const progressWrap = uploadForm.querySelector('#progress-wrap');
-      const progressBar  = uploadForm.querySelector('#progress-bar');
-      const status       = uploadForm.querySelector('#upload-status');
+      const progressWrap = uploadFormEl.querySelector('#progress-wrap');
+      const progressBar  = uploadFormEl.querySelector('#progress-bar');
+      const status       = uploadFormEl.querySelector('#upload-status');
       progressWrap.classList.remove('hidden');
       status.textContent = 'Uploading...';
 
@@ -830,7 +831,7 @@ async function loadDeployContent(projectId, siteId) {
       : el('div', { class: 'text-muted' }, 'No deploys yet. Upload a zip above.');
 
     content.innerHTML = '';
-    content.appendChild(uploadForm.firstChild);
+    content.appendChild(uploadFormEl);
     content.appendChild(el('div', { class: 'card mt-3' },
       el('div', { class: 'card-title' }, 'Deploy History'),
       deployTable
