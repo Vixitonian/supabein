@@ -5,8 +5,11 @@ RewriteEngine On
 # Block direct access to sensitive backend directories
 RewriteRule ^(app|config|storage|vendor)(/.*)? - [F,NC,L]
 
-# sites/ is the hosting plane — served directly by Apache
-RewriteRule ^sites(/.*)?$ - [L]
+# sites/s{id}/current/* — proxied through PHP (Apache can't serve files outside web root)
+RewriteRule ^sites/s[0-9]+/current(/.*)?$ /site-serve.php [QSA,L,NC]
+
+# Block direct access to any other sites/ paths
+RewriteRule ^sites(/.*)?$ - [F,L]
 
 # Redirect bare root to the dashboard SPA
 RewriteRule ^$ /dashboard/ [R=302,L]
