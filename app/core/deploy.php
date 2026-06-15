@@ -288,6 +288,7 @@ class Deploy
     private static function buildHardeningHtaccess(bool $spaMode): string
     {
         $htaccess = <<<'HTACCESS'
+DirectoryIndex index.html index.htm
 Options -Indexes -ExecCGI
 RemoveHandler .php .php3 .php4 .php5 .php7 .php8 .phtml .phar .cgi .pl .py .rb .sh
 AddType text/plain .php .php3 .php4 .php5 .php7 .php8 .phtml .phar
