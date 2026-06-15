@@ -91,7 +91,7 @@ class Deploy
         // ── Phase 2: Validate zip entries ────────────────────────────────────
 
         $sitesPath = $config['SITES_PATH'];
-        $deployDir = $sitesPath . '/p' . $projectId . '/deploys/'
+        $deployDir = $sitesPath . '/s' . $siteId . '/deploys/'
                    . date('Ymd_His') . '_' . $deploy['id'];
 
         $zip = new \ZipArchive();
@@ -154,7 +154,7 @@ class Deploy
 
         // ── Phase 5: Install to current/ directory ───────────────────────────
 
-        $currentDir = $sitesPath . '/p' . $projectId . '/current';
+        $currentDir = $sitesPath . '/s' . $siteId . '/current';
 
         if (is_dir($currentDir) && !is_link($currentDir)) {
             self::rrmdir($currentDir);
@@ -205,7 +205,7 @@ class Deploy
             abort(400, 'Deploy directory no longer exists');
         }
 
-        $currentDir = $sitesPath . '/p' . $projectId . '/current';
+        $currentDir = $sitesPath . '/s' . $siteId . '/current';
 
         if (is_dir($currentDir) && !is_link($currentDir)) {
             self::rrmdir($currentDir);

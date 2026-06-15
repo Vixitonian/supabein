@@ -31,6 +31,11 @@ function register_deploy_routes(\SupaBein\Router $router): void
             abort(422, 'Invalid subdomain. Use 2-63 lowercase alphanumeric or hyphen characters.');
         }
 
+        $existing = $catalog->listSites($project['id']);
+        if (!empty($existing)) {
+            abort(409, 'This project already has a site. Each project supports one site.');
+        }
+
         try {
             $site = $catalog->createSite($project['id'], $subdomain, $spaMode);
         } catch (\PDOException $e) {

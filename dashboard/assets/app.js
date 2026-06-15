@@ -648,10 +648,17 @@ async function renderSites({ id }) {
 
   try {
     const sites = await Api.get(`/v1/projects/${id}/sites`);
-    const list  = document.getElementById('site-list');
+
+    // One site per project — go straight to the manager
+    if (sites.length === 1) {
+      Router.navigate(`/projects/${id}/sites/${sites[0].id}`);
+      return;
+    }
+
+    const list = document.getElementById('site-list');
 
     if (!sites.length) {
-      list.innerHTML = '<div class="text-muted">No sites yet.</div>';
+      list.innerHTML = '<div class="text-muted">No sites yet. Click "+ New Site" to create one.</div>';
       return;
     }
 
@@ -667,7 +674,7 @@ async function renderSites({ id }) {
           el('td', { style: 'display:flex;gap:6px;flex-wrap:wrap' },
             el('a', { class: 'btn btn-sm btn-secondary', href: `#/projects/${id}/sites/${s.id}` }, 'Manage'),
             s.current_deploy_id
-              ? el('a', { class: 'btn btn-sm btn-primary', href: `/sites/p${id}/current/`, target: '_blank', rel: 'noopener' }, 'View →')
+              ? el('a', { class: 'btn btn-sm btn-primary', href: `/sites/s${s.id}/current/`, target: '_blank', rel: 'noopener' }, 'View →')
               : ''
           )
         )
@@ -742,7 +749,7 @@ async function loadDeployContent(projectId, siteId) {
     if (existingViewBtn) existingViewBtn.remove();
     if (header && site.current_deploy_id) {
       header.appendChild(
-        el('a', { id: 'view-site-btn', class: 'btn btn-primary btn-sm', href: `/sites/p${projectId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →')
+        el('a', { id: 'view-site-btn', class: 'btn btn-primary btn-sm', href: `/sites/s${siteId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →')
       );
     }
 
