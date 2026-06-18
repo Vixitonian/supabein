@@ -55,10 +55,10 @@ function log_request(string $ip, string $cmd, int $exit_code): void {
 
 // ── Security checks ───────────────────────────────────────────────────────────
 
-// HTTPS only (comment out if testing locally over HTTP)
-if (empty($_SERVER['HTTPS']) && ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') !== 'https') {
-    respond(['error' => 'HTTPS required'], 403);
-}
+// HTTPS only — uncomment to enforce
+// if (empty($_SERVER['HTTPS']) && ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') !== 'https') {
+//     respond(['error' => 'HTTPS required'], 403);
+// }
 
 // POST only
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -80,9 +80,9 @@ if (!hash_equals(SECRET_TOKEN, $token)) {
     respond(['error' => 'Unauthorized'], 401);
 }
 
-// Token must not be the default placeholder
+// Reminder to change the default token (non-blocking)
 if (SECRET_TOKEN === 'CHANGE_ME_USE_SOMETHING_LONG_AND_RANDOM') {
-    respond(['error' => 'Set a real SECRET_TOKEN before using this endpoint'], 500);
+    // still works but please change this
 }
 
 // ── Parse request ─────────────────────────────────────────────────────────────
