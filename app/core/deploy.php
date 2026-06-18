@@ -184,30 +184,30 @@ class Deploy
         $htaccess  = self::buildHardeningHtaccess($spaMode);
         file_put_contents($deployDir . '/.htaccess', $htaccess);
 
-        // ── Phase 5: Install to current/ directory ───────────────────────────
+        // ── Phase 5: Copy to staging/ — preview before going live ───────────
 
-        $currentDir = $sitesPath . '/s' . $siteId . '/current';
+        $stagingDir = $sitesPath . '/s' . $siteId . '/staging';
 
-        if (is_dir($currentDir) && !is_link($currentDir)) {
-            self::rrmdir($currentDir);
-        } elseif (is_link($currentDir)) {
-            unlink($currentDir);
+        if (is_dir($stagingDir) && !is_link($stagingDir)) {
+            self::rrmdir($stagingDir);
+        } elseif (is_link($stagingDir)) {
+            unlink($stagingDir);
         }
 
-        self::rcopy($deployDir, $currentDir);
+        self::rcopy($deployDir, $stagingDir);
 
         // Verify files actually landed
-        if (!is_dir($currentDir)) {
+        if (!is_dir($stagingDir)) {
             $catalog->updateDeploy($deploy['id'], 'failed');
-            abort(500, 'Deploy copy failed — current/ directory was not created. Check PHP open_basedir or directory permissions for: ' . $currentDir);
+            abort(500, 'Deploy copy failed — staging/ directory was not created. Check PHP open_basedir or directory permissions for: ' . $stagingDir);
         }
 
         $catalog->updateDeploy($deploy['id'], 'ready', $deployDir);
-        $catalog->updateSiteCurrentDeploy($siteId, $deploy['id']);
+        $catalog->updateSiteStagingDeploy($siteId, $deploy['id']);
 
         $result = $catalog->getDeployById($deploy['id']);
-        $result['current_dir'] = $currentDir;
-        $result['current_dir_exists'] = is_dir($currentDir);
+        $result['staging_dir'] = $stagingDir;
+        $result['staging_dir_exists'] = is_dir($stagingDir);
         json_out($result, 201);
 
     }
@@ -433,19 +433,19 @@ class Deploy
         }
 
         $sitesPath  = $config['SITES_PATH'];
-        $currentDir = $sitesPath . '/s' . $siteId . '/current';
+        $stagingDir = $sitesPath . '/s' . $siteId . '/staging';
 
-        if (is_dir($currentDir) && !is_link($currentDir)) {
-            self::rrmdir($currentDir);
-        } elseif (is_link($currentDir)) {
-            unlink($currentDir);
+        if (is_dir($stagingDir) && !is_link($stagingDir)) {
+            self::rrmdir($stagingDir);
+        } elseif (is_link($stagingDir)) {
+            unlink($stagingDir);
         }
 
-        self::rcopy($deployDir, $currentDir);
+        self::rcopy($deployDir, $stagingDir);
 
-        if (!is_dir($currentDir)) {
+        if (!is_dir($stagingDir)) {
             $catalog->updateDeploy($deployId, 'failed', $deployDir);
-            abort(500, 'Finalize copy failed — current/ directory was not created');
+            abort(500, 'Finalize copy failed — staging/ directory was not created');
         }
 
         // Update size in DB via a direct query since updateDeploy doesn't expose size
@@ -453,9 +453,62 @@ class Deploy
         $pdo->prepare('UPDATE deploys SET size_bytes = ? WHERE id = ?')->execute([$totalSize, $deployId]);
 
         $catalog->updateDeploy($deployId, 'ready', $deployDir);
-        $catalog->updateSiteCurrentDeploy($siteId, $deployId);
+        $catalog->updateSiteStagingDeploy($siteId, $deployId);
 
         json_out($catalog->getDeployById($deployId));
+    }
+
+    /**
+     * Promote the current staging deploy to live (current/).
+     * POST /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/publish
+     */
+    public static function publish(array $req): void
+    {
+        $config    = \App::get('config');
+        $catalog   = Catalog::getInstance();
+        $projectId = (int)$req['params']['project_id'];
+        $siteId    = (int)$req['params']['site_id'];
+        $deployId  = (int)$req['params']['deploy_id'];
+
+        $project = $catalog->getProjectById($projectId, $req['auth']['user_id']);
+        if (!$project) abort(404, 'Project not found');
+
+        $site = $catalog->getSiteByProjectId($projectId, $siteId);
+        if (!$site) abort(404, 'Site not found');
+
+        if ((int)$site['staging_deploy_id'] !== $deployId) {
+            abort(409, 'Deploy is not the current staging deploy');
+        }
+
+        $deploy = $catalog->getDeployById($deployId);
+        if (!$deploy || (int)$deploy['site_id'] !== $siteId || $deploy['status'] !== 'ready') {
+            abort(404, 'Deploy not found or not in ready state');
+        }
+
+        $sitesPath  = $config['SITES_PATH'];
+        $stagingDir = $sitesPath . '/s' . $siteId . '/staging';
+        $currentDir = $sitesPath . '/s' . $siteId . '/current';
+
+        if (!is_dir($stagingDir)) {
+            abort(400, 'Staging directory does not exist');
+        }
+
+        if (is_dir($currentDir) && !is_link($currentDir)) {
+            self::rrmdir($currentDir);
+        } elseif (is_link($currentDir)) {
+            unlink($currentDir);
+        }
+
+        self::rcopy($stagingDir, $currentDir);
+
+        if (!is_dir($currentDir)) {
+            abort(500, 'Publish copy failed — current/ directory was not created');
+        }
+
+        $catalog->updateSiteCurrentDeploy($siteId, $deployId);
+        $catalog->updateSiteStagingDeploy($siteId, null);
+
+        json_out($catalog->getSiteByProjectId($projectId, $siteId));
     }
 
     /**

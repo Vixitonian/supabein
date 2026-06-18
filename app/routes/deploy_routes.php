@@ -125,6 +125,13 @@ function register_deploy_routes(\SupaBein\Router $router): void
         json_out($catalog->listDeploys((int)$site['id']));
     }, ['auth_middleware']);
 
+    // POST /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/publish
+    $router->post(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/publish',
+        [\SupaBein\Deploy::class, 'publish'],
+        ['auth_middleware']
+    );
+
     // POST /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/rollback
     $router->post(
         '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/rollback',

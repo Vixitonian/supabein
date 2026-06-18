@@ -871,19 +871,59 @@ async function renderProject({ id }) {
       setTimeout(() => { copyAnonBtn.textContent = 'Copy'; }, 1500);
     });
 
+    const tabTables = el('div', { class: 'tab active' }, 'Tables');
+    const tabUsers  = el('div', { class: 'tab' }, 'Users');
+    const tabApi    = el('div', { class: 'tab' }, 'API');
+    const tabDeploy = el('div', { class: 'tab' }, 'Deploy');
+
+    const paneTablesEl = el('div', { id: 'pane-proj-tables' });
+    const paneUsersEl  = el('div', { id: 'pane-proj-users',  class: 'hidden' });
+    const paneApiEl    = el('div', { id: 'pane-proj-api',    class: 'hidden' });
+    const paneDeployEl = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
+
+    const allTabs  = [tabTables, tabUsers, tabApi, tabDeploy];
+    const allPanes = [paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl];
+
+    function switchProjectTab(idx) {
+      allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
+      allPanes.forEach((p, i) => p.classList.toggle('hidden', i !== idx));
+    }
+
+    tabTables.addEventListener('click', () => {
+      switchProjectTab(0);
+      if (!paneTablesEl.dataset.loaded) {
+        paneTablesEl.dataset.loaded = '1';
+        loadTablesPane(id, paneTablesEl);
+      }
+    });
+    tabUsers.addEventListener('click', () => {
+      switchProjectTab(1);
+      if (!paneUsersEl.dataset.loaded) {
+        paneUsersEl.dataset.loaded = '1';
+        loadUsersPane(id, paneUsersEl);
+      }
+    });
+    tabApi.addEventListener('click', () => {
+      switchProjectTab(2);
+      if (!paneApiEl.dataset.loaded) {
+        paneApiEl.dataset.loaded = '1';
+        loadApiPane(id, paneApiEl);
+      }
+    });
+    tabDeploy.addEventListener('click', () => {
+      switchProjectTab(3);
+      if (!paneDeployEl.dataset.loaded) {
+        paneDeployEl.dataset.loaded = '1';
+        loadDeployPane(id, paneDeployEl);
+      }
+    });
+
     const content = [
       el('div', { class: 'page-header' },
         el('h1', { class: 'page-title' }, project.name),
         el('span', { class: 'text-muted', style: 'font-size:0.8rem' },
           `ID ${project.id} · ${fmtDate(project.created_at)}`
         )
-      ),
-
-      el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px' },
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/tables` }, 'Tables'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/users` }, 'Users'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/api` }, 'API'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/sites` }, 'Deploy'),
       ),
 
       ...(project.anon_key ? [
@@ -900,11 +940,195 @@ async function renderProject({ id }) {
           )
         )
       ] : []),
+
+      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabUsers, tabApi, tabDeploy),
+      paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl,
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
+    // Eagerly load the default (Tables) tab
+    paneTablesEl.dataset.loaded = '1';
+    loadTablesPane(id, paneTablesEl);
   } catch (e) {
     setApp(`<div class="alert alert-danger">${e.message}</div>`);
+  }
+}
+
+async function loadTablesPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const tables = await Api.get(`/v1/projects/${projectId}/tables`);
+
+    const newTableBtn = el('button', { class: 'btn btn-primary btn-sm' }, '+ New Table');
+    newTableBtn.addEventListener('click', () => showNewTableModal(projectId));
+
+    let tableContent;
+    if (!tables.length) {
+      tableContent = el('div', { class: 'text-muted', style: 'padding:20px 0' }, 'No tables yet.');
+    } else {
+      tableContent = el('table', { class: 'data-table' },
+        el('thead', {}, el('tr', {},
+          el('th', {}, 'Name'), el('th', {}, 'Physical Name'), el('th', {}, '')
+        )),
+        el('tbody', {}, ...tables.map(t =>
+          el('tr', {},
+            el('td', {}, el('a', { href: `#/projects/${projectId}/tables/${t.table_name}` }, t.table_name)),
+            el('td', { class: 'text-muted text-sm' }, t.physical_name),
+            el('td', {},
+              el('button', {
+                class: 'btn btn-sm btn-danger',
+                onClick: async () => {
+                  if (!confirm(`Drop table "${t.table_name}"?`)) return;
+                  try {
+                    await Api.delete(`/v1/projects/${projectId}/tables/${t.table_name}`);
+                    loadTablesPane(projectId, container);
+                  } catch (e) { alert(e.message); }
+                }
+              }, 'Drop')
+            )
+          )
+        ))
+      );
+    }
+
+    container.innerHTML = '';
+    container.appendChild(el('div', { style: 'display:flex;justify-content:space-between;align-items:center;margin-bottom:16px' },
+      el('span', { class: 'text-muted', style: 'font-size:0.85rem' }, `${tables.length} table${tables.length !== 1 ? 's' : ''}`),
+      newTableBtn
+    ));
+    container.appendChild(tableContent);
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function loadUsersPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const result = await Api.get(`/v1/projects/${projectId}/users`);
+    const users = result.users || [];
+
+    async function deleteUser(uid) {
+      if (!confirm('Delete this user? This cannot be undone.')) return;
+      try {
+        await Api.delete(`/v1/projects/${projectId}/users/${uid}`);
+        loadUsersPane(projectId, container);
+      } catch (e) { alert('Failed to delete user: ' + e.message); }
+    }
+
+    const rows = users.length === 0
+      ? [el('tr', {}, el('td', { colspan: '4', style: 'text-align:center;color:var(--text-muted);padding:32px' },
+          'No end-users yet. Users appear here after they sign up via your app.'))]
+      : users.map(u =>
+          el('tr', {},
+            el('td', {}, u.email),
+            el('td', {}, u.id),
+            el('td', {}, u.created_at),
+            el('td', {}, el('button', { class: 'btn btn-sm btn-danger', onClick: () => deleteUser(u.id) }, 'Delete'))
+          )
+        );
+
+    container.innerHTML = '';
+    container.appendChild(el('p', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:12px' },
+      `${users.length} end-user${users.length !== 1 ? 's' : ''} registered`
+    ));
+    container.appendChild(
+      el('div', { class: 'card' },
+        el('div', { class: 'table-responsive' },
+          el('table', { class: 'table' },
+            el('thead', {}, el('tr', {},
+              el('th', {}, 'Email'), el('th', {}, 'ID'), el('th', {}, 'Joined'), el('th', {}, '')
+            )),
+            el('tbody', {}, ...rows)
+          )
+        )
+      )
+    );
+    container.appendChild(
+      el('div', { class: 'card' },
+        el('h3', { style: 'margin-top:0;font-size:0.95rem' }, 'Project User Auth API'),
+        el('p', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:0' },
+          "Your app's end-users sign up and log in via the project auth endpoints. See the ",
+          el('a', { href: `#/projects/${projectId}/api` }, 'API tab'),
+          ' for curl examples.'
+        )
+      )
+    );
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function loadApiPane(projectId, container) {
+  return renderApi({ id: projectId }, container);
+}
+
+async function loadDeployPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const sites = await Api.get(`/v1/projects/${projectId}/sites`);
+
+    if (!sites.length) {
+      container.innerHTML = '';
+      const subdomainInp = el('input', { type: 'text', class: 'input', placeholder: 'my-app' });
+      const spaModeInp   = el('input', { type: 'checkbox', id: 'dp-spa-mode' });
+      spaModeInp.checked = true;
+      const createBtn    = el('button', { class: 'btn btn-primary' }, 'Create Site');
+      createBtn.addEventListener('click', async () => {
+        const subdomain = subdomainInp.value.trim();
+        const spa_mode  = spaModeInp.checked;
+        if (!subdomain) return;
+        try {
+          await Api.post(`/v1/projects/${projectId}/sites`, { subdomain, spa_mode });
+          container.dataset.loaded = '';
+          loadDeployPane(projectId, container);
+        } catch (e) { alert(e.message); }
+      });
+      container.appendChild(el('div', { class: 'card' },
+        el('div', { class: 'card-title' }, 'Create your site'),
+        el('div', { class: 'form-group' },
+          el('label', {}, 'Subdomain'),
+          subdomainInp
+        ),
+        el('div', { class: 'form-group', style: 'display:flex;align-items:center;gap:8px' },
+          spaModeInp,
+          el('label', { for: 'dp-spa-mode' }, 'SPA Mode (React/Vue/etc — rewrites all paths to index.html)')
+        ),
+        createBtn
+      ));
+      return;
+    }
+
+    const site   = sites[0];
+    const siteId = site.id;
+
+    const menuBtn  = el('button', { class: 'btn btn-secondary btn-sm', style: 'position:relative' }, '•••');
+    const dropdown = el('div', { class: 'dropdown hidden' },
+      el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Delete Site')
+    );
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      dropdown.classList.toggle('hidden');
+    });
+    document.addEventListener('click', () => dropdown.classList.add('hidden'));
+    dropdown.querySelector('button').addEventListener('click', async () => {
+      dropdown.classList.add('hidden');
+      if (!confirm('Delete this site and all its deploys? This cannot be undone.')) return;
+      try {
+        await Api.delete(`/v1/projects/${projectId}/sites/${siteId}`);
+        container.dataset.loaded = '';
+        loadDeployPane(projectId, container);
+      } catch (e) { alert(e.message); }
+    });
+
+    const deployContentEl = el('div', { id: 'deploy-content' }, 'Loading…');
+    container.innerHTML = '';
+    container.appendChild(el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:8px;gap:8px;position:relative' }, menuBtn, dropdown));
+    container.appendChild(deployContentEl);
+
+    await loadDeployContent(projectId, siteId);
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
@@ -1418,6 +1642,13 @@ async function loadDeployContent(projectId, siteId) {
         el('a', { id: 'view-site-btn', class: 'btn btn-primary btn-sm', href: `/sites/s${siteId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →')
       );
     }
+    const existingStagingBtn = header && header.querySelector('#staging-url-card');
+    if (existingStagingBtn) existingStagingBtn.remove();
+    if (header && site.staging_deploy_id) {
+      header.appendChild(
+        el('a', { id: 'staging-url-card', class: 'btn btn-sm btn-secondary', href: `/sites/s${siteId}/staging/`, target: '_blank', rel: 'noopener' }, 'View Staging →')
+      );
+    }
 
     const uploadForm = h(`
       <div class="card">
@@ -1430,7 +1661,7 @@ async function loadDeployContent(projectId, siteId) {
           <label class="label">Zip file</label>
           <input type="file" id="zip-file" accept=".zip">
         </div>
-        <button class="btn btn-primary" id="deploy-btn">Deploy</button>
+        <button class="btn btn-primary" id="deploy-btn">Deploy to Staging</button>
         <div class="progress-wrap hidden" id="progress-wrap">
           <div class="progress-bar" id="progress-bar"></div>
         </div>
@@ -1475,7 +1706,7 @@ async function loadDeployContent(projectId, siteId) {
           xhr.send(fd);
         });
 
-        status.textContent = 'Deployed!';
+        status.textContent = 'Staged! Click "Publish to Live" to go live.';
         status.style.color = 'var(--accent)';
         await loadDeployContent(projectId, siteId);
       } catch (e) {
@@ -1499,16 +1730,33 @@ async function loadDeployContent(projectId, siteId) {
           el('tbody', {}, ...deploys.map((d, idx) => {
             const isCurrent = d.id === site.current_deploy_id;
             const nextReady = deploys.slice(idx + 1).find(x => x.status === 'ready');
+            const isStaging = d.id === site.staging_deploy_id;
             const labelEl = el('span', {}, d.version_label || '—');
             if (isCurrent) {
               const chip = el('span', { class: 'badge badge-green', style: 'margin-left:6px;font-size:0.7rem' }, 'live');
+              labelEl.appendChild(chip);
+            } else if (isStaging) {
+              const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'staging');
               labelEl.appendChild(chip);
             } else if (d.status === 'pending') {
               const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'pending');
               labelEl.appendChild(chip);
             }
             const actions = el('td', { style: 'white-space:nowrap' });
-            if (!isCurrent && d.status === 'ready') {
+            if (isStaging && d.status === 'ready') {
+              actions.appendChild(el('button', {
+                class: 'btn btn-sm btn-primary',
+                style: 'margin-right:6px',
+                onClick: async () => {
+                  if (!confirm('Publish this staging deploy to live?')) return;
+                  try {
+                    await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/publish`);
+                    loadDeployContent(projectId, siteId);
+                  } catch (e) { alert(e.message); }
+                }
+              }, 'Publish to Live'));
+            }
+            if (!isCurrent && !isStaging && d.status === 'ready') {
               actions.appendChild(el('button', {
                 class: 'btn btn-sm btn-secondary',
                 style: 'margin-right:6px',
@@ -1743,9 +1991,13 @@ async function renderProjectUsers({ id }) {
 
 // ─── API Reference ────────────────────────────────────────────────────────────
 
-async function renderApi({ id }) {
-  if (!requireAuth()) return;
-  renderLayout(id, 'api', [el('p', { class: 'text-muted' }, 'Loading API reference…')]);
+async function renderApi({ id }, renderTarget = null) {
+  if (!renderTarget) {
+    if (!requireAuth()) return;
+    renderLayout(id, 'api', [el('p', { class: 'text-muted' }, 'Loading API reference…')]);
+  } else {
+    renderTarget.innerHTML = '<div class="text-muted">Loading…</div>';
+  }
 
   const baseUrl = window.location.origin + '/api/v1';
   const projectId = parseInt(id);
@@ -1757,7 +2009,11 @@ async function renderApi({ id }) {
       Api.get(`/v1/projects/${id}/tables`),
     ]);
   } catch (e) {
-    renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
+    if (renderTarget) {
+      renderTarget.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    } else {
+      renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
+    }
     return;
   }
 
@@ -1959,7 +2215,17 @@ const row = await res.json();`;
     ...(emptyState ? [emptyState] : tables.map(tableCard)),
   ];
 
-  renderLayout(id, 'api', content);
+  if (renderTarget) {
+    renderTarget.innerHTML = '';
+    // skip page-header (first element) when rendering inline
+    content.slice(1).forEach(c => renderTarget.appendChild(c));
+    const docsLink = el('div', { style: 'margin-top:12px;text-align:right' },
+      el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'Full Docs ↗')
+    );
+    renderTarget.appendChild(docsLink);
+  } else {
+    renderLayout(id, 'api', content);
+  }
 }
 
 // ─── Account ──────────────────────────────────────────────────────────────────
