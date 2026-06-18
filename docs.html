@@ -214,7 +214,8 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#sites-delete">Delete site</a>
     <a class="sb-link" href="#sites-create">Create site</a>
     <a class="sb-link" href="#deploys-list">List deploys</a>
-    <a class="sb-link" href="#deploys">Deploy zip</a>
+    <a class="sb-link" href="#deploys">Deploy zip (to staging)</a>
+    <a class="sb-link" href="#deploy-publish">Publish to live</a>
     <a class="sb-link" href="#rollback">Rollback</a>
     <a class="sb-link" href="#deploy-open">Open deploy</a>
     <a class="sb-link" href="#deploy-put-file">Upload file</a>
@@ -887,7 +888,24 @@ curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
   -F "zipfile=@./deploy.zip" \
   -F "label=v1.0.0"</pre>
     <button class="copy-btn" onclick="copyEl('c-deploy',this)">Copy</button></div>
-    <p>After a successful deploy, your site is live at:<br>
+    <p>After a successful upload, the deploy lands in <strong>staging</strong> (not live yet).<br>
+    Preview at: <code>https://your-domain/sites/s{site_id}/staging/</code><br>
+    Then call <a href="#deploy-publish">Publish to live</a> to make it the active version.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-publish">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/publish</span>
+    <span class="desc">Promote staged deploy to live</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Copies <code>staging/</code> to <code>current/</code>, sets <code>current_deploy_id</code>, and clears <code>staging_deploy_id</code> on the site. The deploy must be the current staging deploy (its ID must match <code>site.staging_deploy_id</code>). Returns the updated site object.</p>
+    <div class="code-wrap"><pre class="code" id="c-publish">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/5/publish" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-publish',this)">Copy</button></div>
+    <p>After publishing, your site is live at:<br>
     <code>https://your-domain/sites/s{site_id}/current/</code></p>
   </div>
 </div>

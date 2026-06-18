@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS `sites` (
     `subdomain`         VARCHAR(63) NOT NULL,
     `custom_domain`     VARCHAR(255) DEFAULT NULL,
     `current_deploy_id` INT UNSIGNED DEFAULT NULL,
+    `staging_deploy_id` INT UNSIGNED DEFAULT NULL,
     `spa_mode`          TINYINT(1) NOT NULL DEFAULT 0,
     `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
@@ -143,6 +144,9 @@ SET foreign_key_checks = 1;
 
 -- ─── Migration SQL for existing installs ────────────────────────────────────
 -- Run these ALTER statements once if you already have the projects table:
+--
+-- ALTER TABLE `sites`
+--   ADD COLUMN `staging_deploy_id` INT UNSIGNED DEFAULT NULL AFTER `current_deploy_id`;
 --
 -- ALTER TABLE `projects`
 --   ADD COLUMN `anon_key`    TEXT DEFAULT NULL AFTER `name`,

@@ -274,7 +274,7 @@ class Catalog
              ORDER BY s.created_at DESC'
         );
         $stmt->execute([$projectId]);
-        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
+        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'current_deploy_id', 'staging_deploy_id', 'spa_mode']);
     }
 
     public function getSiteById(int $siteId): ?array
@@ -283,7 +283,7 @@ class Catalog
             'SELECT * FROM sites WHERE id = ?'
         );
         $stmt->execute([$siteId]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'staging_deploy_id', 'spa_mode']);
     }
 
     public function getSiteByProjectId(int $projectId, int $siteId): ?array
@@ -292,13 +292,21 @@ class Catalog
             'SELECT * FROM sites WHERE id = ? AND project_id = ?'
         );
         $stmt->execute([$siteId, $projectId]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'staging_deploy_id', 'spa_mode']);
     }
 
     public function updateSiteCurrentDeploy(int $siteId, int $deployId): void
     {
         $stmt = $this->pdo->prepare(
             'UPDATE sites SET current_deploy_id = ? WHERE id = ?'
+        );
+        $stmt->execute([$deployId, $siteId]);
+    }
+
+    public function updateSiteStagingDeploy(int $siteId, ?int $deployId): void
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE sites SET staging_deploy_id = ? WHERE id = ?'
         );
         $stmt->execute([$deployId, $siteId]);
     }
