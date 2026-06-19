@@ -256,6 +256,18 @@ function ai_deploy_files(
 
 // ─── Validation helpers ──────────────────────────────────────────────────────
 
+function ai_sanitize_plan(array $plan): array
+{
+    foreach ($plan['tables'] as &$table) {
+        $table['columns'] = array_values(array_filter(
+            $table['columns'] ?? [],
+            fn($col) => !in_array(strtolower($col['name'] ?? ''), ['id', 'created_at'], true)
+        ));
+    }
+    unset($table);
+    return $plan;
+}
+
 function ai_validate_plan(array $plan): ?string
 {
     if (empty($plan['project_name']) || strlen($plan['project_name']) > 80) {
@@ -279,9 +291,7 @@ function ai_validate_plan(array $plan): ?string
             } catch (\InvalidArgumentException $e) {
                 return "tables[$i].columns[$j].name: " . $e->getMessage();
             }
-            if (in_array(strtolower($colName), ['id', 'created_at'], true)) {
-                return "tables[$i].columns[$j].name: 'id' and 'created_at' are reserved";
-            }
+
             try {
                 \SupaBein\Schema::validateDataType($col['type'] ?? '');
             } catch (\InvalidArgumentException $e) {
@@ -674,6 +684,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         }
 
         // ── 3. Validate plan ──────────────────────────────────────────────────
+        $plan = ai_sanitize_plan($plan);
         $validationError = ai_validate_plan($plan);
         if ($validationError) {
             sb_log('ai_build', 'Plan validation failed: ' . $validationError, ['plan_keys' => array_keys($plan)]);
@@ -858,6 +869,7 @@ CHAT;
         try {
             if ($mode === 'build') {
                 $plan = $gemini->generateJsonWithHistory(AI_BUILD_SYSTEM_PROMPT, $history, $prompt);
+                $plan = ai_sanitize_plan($plan);
 
                 $validationError = ai_validate_plan($plan);
                 if ($validationError) {
@@ -951,6 +963,7 @@ PROMPT;
         if (!is_array($plan)) abort(422, 'plan must be an array');
 
         if ($mode === 'build') {
+            $plan = ai_sanitize_plan($plan);
             $validationError = ai_validate_plan($plan);
             if ($validationError) abort(422, 'Invalid plan: ' . $validationError);
             $result = ai_execute_build($plan, $userId);
