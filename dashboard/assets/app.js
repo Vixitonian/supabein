@@ -837,6 +837,29 @@ const AiPanel = (() => {
     }, duration);
   }
 
+  const THINKING_STAGES = {
+    build:    ['Analyzing your idea…', 'Designing data schema…', 'Writing frontend code…', 'Polishing the output…', 'Almost done…'],
+    edit:     ['Reading current schema…', 'Planning the changes…', 'Generating edits…', 'Almost done…'],
+    diagnose: ['Analyzing the issue…', 'Checking schema & policies…', 'Preparing suggestions…', 'Almost done…'],
+    chat:     ['Thinking…', 'Looking up your projects…', 'Formulating reply…'],
+    default:  ['Working on it…', 'Still going…', 'Almost done…'],
+  };
+
+  let stopThinkingStages = null;
+
+  function startThinkingStages(labelEl, mode) {
+    stopThinkingStages?.();
+    const stages = THINKING_STAGES[mode] || THINKING_STAGES.default;
+    let i = 0;
+    labelEl.textContent = stages[0];
+    const timer = setInterval(() => {
+      i++;
+      if (i < stages.length) labelEl.textContent = stages[i];
+      if (i >= stages.length - 1) clearInterval(timer);
+    }, 6000);
+    stopThinkingStages = () => { clearInterval(timer); stopThinkingStages = null; };
+  }
+
   async function callWithFallback(path, body) {
     let selectedM = getSelectedModel();
     const tried = new Set();
@@ -997,9 +1020,13 @@ const AiPanel = (() => {
       return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
     }
     if (msg.type === 'thinking') {
-      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
-        el('span', { class: 'ai-thinking-dots' }, '● ● ●')
+      const thinkingLabel = el('span', { class: 'ai-thinking-label' });
+      const bubble = el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
+        el('span', { class: 'ai-thinking-dots' }, '● ● ●'),
+        thinkingLabel
       );
+      startThinkingStages(thinkingLabel, msg.stageMode || 'default');
+      return bubble;
     }
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
@@ -1199,7 +1226,8 @@ const AiPanel = (() => {
 
     const thinkingId = 'thinking_' + Date.now();
     const sess = currentSession();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '' });
+    const stageMode = selectedProjectId ? 'edit' : 'build';
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
     renderMessages();
 
     try {
@@ -1224,6 +1252,7 @@ const AiPanel = (() => {
 
       const response = await callWithFallback('/v1/ai/plan', body);
 
+      stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
       if (response.mode === 'chat') {
@@ -1234,6 +1263,7 @@ const AiPanel = (() => {
         await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
       }
     } catch(e) {
+      stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
     }
@@ -1245,15 +1275,17 @@ const AiPanel = (() => {
   async function applyPlan(plan, mode) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '' });
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
     renderMessages();
 
     try {
       const { provider: aProvider, model: aModel } = getSelectedModel();
       const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
+      stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
     } catch(e) {
+      stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
     }
