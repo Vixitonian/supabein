@@ -1007,7 +1007,10 @@ const AiPanel = (() => {
     if (msg.type === 'error') {
       return el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ ' + msg.content);
     }
-    return el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
+    const bubble = el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
+    const tokenEl = renderTokenUsage(msg.usage);
+    if (tokenEl) bubble.appendChild(tokenEl);
+    return bubble;
   }
 
   function renderPlanCard(msg) {
@@ -1047,7 +1050,7 @@ const AiPanel = (() => {
       }
     }
 
-    const tokenEl = renderTokenUsage(msg.data.usage);
+    const tokenEl = renderTokenUsage(msg.data?.usage || msg.usage);
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' + (msg.settled ? ' ai-plan-settled' : '') },
       el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
       ...lines,
@@ -1120,7 +1123,7 @@ const AiPanel = (() => {
         lines.push(el('div', { class: 'ai-plan-item' }, (i + 1) + '. ' + s))
       );
     }
-    const tokenEl = renderTokenUsage(data.usage);
+    const tokenEl = renderTokenUsage(data?.usage || msg.usage);
     if (tokenEl) lines.push(tokenEl);
     return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
   }
@@ -1224,7 +1227,7 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
       if (response.mode === 'chat') {
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message });
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
       } else if (response.mode === 'diagnose') {
         await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
       } else {
