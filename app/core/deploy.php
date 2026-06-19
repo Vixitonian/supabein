@@ -118,13 +118,6 @@ class Deploy
                     throw new \RuntimeException("Path traversal attempt in zip entry: $name");
                 }
 
-                // Extension check (skip directories)
-                if (!str_ends_with($name, '/')) {
-                    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
-                    if (in_array($ext, self::BLOCKED_EXTENSIONS, true)) {
-                        throw new \RuntimeException("Blocked file type '$ext' in zip entry: $name");
-                    }
-                }
             }
         } catch (\RuntimeException $e) {
             $zip->close();
@@ -289,11 +282,6 @@ class Deploy
             abort(400, 'Path traversal attempt detected');
         }
 
-        // Blocked extension check — never allow server-side executable types
-        $ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
-        if (in_array($ext, self::BLOCKED_EXTENSIONS, true)) {
-            abort(403, "File type '.$ext' is not allowed in deployments");
-        }
 
         // Refuse overwriting the hardening .htaccess
         if (basename($fullPath) === '.htaccess' && dirname($fullPath) === $stagingDir) {

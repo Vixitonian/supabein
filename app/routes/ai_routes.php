@@ -171,19 +171,11 @@ function ai_deploy_files(
         '__SB_PID__'      => (string)$project['id'],
     ];
 
-    $blockedExtensions = \SupaBein\Deploy::BLOCKED_EXTENSIONS;
-
     $errors = [];
     foreach ($frontendFiles as $fileDef) {
         $relPath = ltrim((string)($fileDef['path'] ?? ''), '/');
         $relPath = str_replace('..', '', $relPath);
         if ($relPath === '') continue;
-
-        $ext = strtolower(pathinfo($relPath, PATHINFO_EXTENSION));
-        if (in_array($ext, $blockedExtensions, true)) {
-            $errors[] = 'Blocked extension in AI output: .' . $ext;
-            continue;
-        }
 
         $fullPath = \SupaBein\Deploy::normalizePath($deployDir . '/' . $relPath);
         if (!str_starts_with($fullPath, $deployDir . '/')) {
