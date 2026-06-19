@@ -788,17 +788,28 @@ async function renderProjects() {
 
   renderLayout(null, '', [el('div', { class: 'page-header' },
     el('h1', { class: 'page-title' }, 'Projects'),
-    el('button', { class: 'btn btn-primary', id: 'new-project' }, '+')
+    el('div', { class: 'page-header-actions' },
+      el('button', { class: 'btn btn-ai', id: 'ai-build' }, '✦ Build with AI'),
+      el('button', { class: 'btn btn-primary', id: 'new-project' }, '+')
+    )
   ), el('div', { id: 'project-list' }, 'Loading...')]);
 
   document.getElementById('new-project').addEventListener('click', () => showNewProjectModal());
+  document.getElementById('ai-build').addEventListener('click', () => showAiBuildModal());
 
   try {
     const projects = await Api.get('/v1/projects');
     const list = document.getElementById('project-list');
 
     if (!projects.length) {
-      list.innerHTML = '<div class="text-muted">No projects yet. Create one to get started.</div>';
+      list.innerHTML = '';
+      list.appendChild(el('div', { class: 'ai-empty-state' },
+        el('p', { class: 'text-muted' }, 'No projects yet.'),
+        el('div', { style: 'display:flex;gap:10px;justify-content:center;margin-top:16px' },
+          el('button', { class: 'btn btn-ai', onClick: () => showAiBuildModal() }, '✦ Build with AI'),
+          el('button', { class: 'btn btn-secondary', onClick: () => showNewProjectModal() }, 'New Project')
+        )
+      ));
       return;
     }
 
@@ -870,6 +881,120 @@ function showNewProjectModal() {
   });
 
   document.body.appendChild(modalEl);
+}
+
+function showAiBuildModal() {
+  const overlay = h(`
+    <div class="modal-overlay" id="ai-build-modal">
+      <div class="modal modal-ai">
+        <div class="modal-title">✦ Build with AI</div>
+        <div class="form-group">
+          <label>Describe your app</label>
+          <textarea id="ai-prompt" rows="4" placeholder="e.g. A blog with posts, comments and user authentication&#10;e.g. A task manager with projects, tasks and team members&#10;e.g. An e-commerce store with products, orders and reviews"></textarea>
+        </div>
+        <div class="ai-hint">Gemini will generate the project, tables, policies, and a complete frontend.</div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="ai-cancel">Cancel</button>
+          <button class="btn btn-ai" id="ai-submit">✦ Generate</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  const modalEl = overlay.firstElementChild;
+
+  modalEl.querySelector('#ai-cancel').addEventListener('click', () => modalEl.remove());
+  modalEl.addEventListener('click', e => { if (e.target === modalEl) modalEl.remove(); });
+
+  modalEl.querySelector('#ai-submit').addEventListener('click', () => {
+    const prompt = modalEl.querySelector('#ai-prompt').value.trim();
+    if (!prompt) { modalEl.querySelector('#ai-prompt').focus(); return; }
+    modalEl.remove();
+    showAiProgressModal(prompt);
+  });
+
+  document.body.appendChild(modalEl);
+  setTimeout(() => modalEl.querySelector('#ai-prompt').focus(), 50);
+}
+
+async function showAiProgressModal(prompt) {
+  const steps = [
+    { id: 'gemini',  label: 'Generating plan with Gemini…' },
+    { id: 'project', label: 'Creating project…' },
+    { id: 'tables',  label: 'Creating tables & policies…' },
+    { id: 'site',    label: 'Creating site…' },
+    { id: 'deploy',  label: 'Deploying frontend…' },
+  ];
+
+  const stepEls = steps.map(s =>
+    el('div', { class: 'ai-step', id: 'ai-step-' + s.id },
+      el('span', { class: 'ai-step-icon' }, '○'),
+      el('span', { class: 'ai-step-label' }, s.label)
+    )
+  );
+
+  const statusMsg = el('div', { class: 'ai-status-msg text-muted' }, 'Sending your request to Gemini…');
+
+  const modal = el('div', { class: 'modal modal-ai' },
+    el('div', { class: 'modal-title' }, '✦ Building your project'),
+    el('div', { class: 'ai-steps' }, ...stepEls),
+    statusMsg
+  );
+  const overlay = el('div', { class: 'modal-overlay', id: 'ai-progress-modal' }, modal);
+  document.body.appendChild(overlay);
+
+  function setStep(stepId, state) {
+    const row = document.getElementById('ai-step-' + stepId);
+    if (!row) return;
+    row.className = 'ai-step ai-step-' + state;
+    const icon = row.querySelector('.ai-step-icon');
+    icon.textContent = state === 'done' ? '✓' : state === 'error' ? '✗' : '◌';
+  }
+
+  setStep('gemini', 'active');
+
+  try {
+    const result = await Api.post('/v1/ai/build', { prompt });
+
+    for (const s of steps) {
+      setStep(s.id, 'done');
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    statusMsg.textContent = '✓ Done! Your project is ready.';
+    statusMsg.style.color = 'var(--accent)';
+
+    const actions = el('div', { style: 'display:flex;gap:8px;margin-top:18px;flex-wrap:wrap' },
+      el('button', { class: 'btn btn-primary', onClick: () => {
+        overlay.remove();
+        Router.navigate('/projects/' + result.project.id);
+      }}, 'Open Project →')
+    );
+
+    if (result.site && result.deploy) {
+      const config = await Api.get('/v1/projects/' + result.project.id);
+      const siteUrl = window.location.origin + '/sites/s' + result.site.id + '/current/';
+      actions.appendChild(
+        el('a', { class: 'btn btn-secondary', href: siteUrl, target: '_blank' }, 'View Live Site ↗')
+      );
+    }
+
+    modal.appendChild(actions);
+
+  } catch (e) {
+    const activeRow = document.querySelector('.ai-step-active');
+    if (activeRow) {
+      const sid = activeRow.id.replace('ai-step-', '');
+      setStep(sid, 'error');
+    }
+    statusMsg.textContent = 'Error: ' + e.message;
+    statusMsg.style.color = 'var(--danger)';
+
+    const closeBtn = el('button', { class: 'btn btn-secondary', style: 'margin-top:16px',
+      onClick: () => overlay.remove()
+    }, 'Close');
+    modal.appendChild(closeBtn);
+  }
 }
 
 // Project overview

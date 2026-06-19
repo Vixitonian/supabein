@@ -16,7 +16,7 @@ namespace SupaBein;
  */
 class Deploy
 {
-    private const BLOCKED_EXTENSIONS = [
+    public const BLOCKED_EXTENSIONS = [
         'php', 'php3', 'php4', 'php5', 'php7', 'php8',
         'phtml', 'phar', 'phps',
         'cgi', 'pl', 'py', 'rb', 'sh', 'bash',
@@ -690,7 +690,7 @@ class Deploy
         return '/' . implode('/', $out);
     }
 
-    private static function buildHardeningHtaccess(bool $spaMode): string
+    public static function buildHardeningHtaccess(bool $spaMode): string
     {
         $htaccess = <<<'HTACCESS'
 DirectoryIndex index.html index.htm
@@ -725,7 +725,7 @@ SPA;
         return $htaccess;
     }
 
-    private static function rrmdir(string $dir): void
+    public static function rrmdir(string $dir): void
     {
         if (!is_dir($dir)) return;
         $it = new \RecursiveIteratorIterator(
@@ -738,7 +738,7 @@ SPA;
         rmdir($dir);
     }
 
-    private static function rcopy(string $src, string $dst): void
+    public static function rcopy(string $src, string $dst): void
     {
         if (!is_dir($dst) && !mkdir($dst, 0755, true)) {
             throw new \RuntimeException("Failed to create directory: $dst");
