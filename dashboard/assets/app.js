@@ -1042,13 +1042,26 @@ const AiPanel = (() => {
     if (picker.value === '' && current) picker.value = '';
   }
 
-  function switchSession(id) {
+  async function loadSessionMessages(id) {
+    if (!id) return;
+    try {
+      const full = await Api.get('/v1/ai/sessions/' + id);
+      if (full && Array.isArray(full.messages)) {
+        const idx = sessions.findIndex(s => s.id === id);
+        if (idx !== -1) sessions[idx].messages = full.messages;
+      }
+    } catch(e) {}
+  }
+
+  async function switchSession(id) {
     currentSessionId = id;
     const sess = getSession(id);
     if (sess) selectedProjectId = sess.projectId;
     renderSidebar();
     renderMessages();
     renderProjectPicker();
+    await loadSessionMessages(id);
+    renderMessages();
   }
 
   async function newSession() {
@@ -1072,7 +1085,7 @@ const AiPanel = (() => {
     const textarea = panelEl.querySelector('#ai-textarea');
     const prompt = textarea ? textarea.value.trim() : '';
     if (!prompt) return;
-    if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; }
+    if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; const sb = panelEl.querySelector('.ai-send-btn'); if (sb) sb.disabled = true; }
 
     if (!currentSessionId || !getSession(currentSessionId)) {
       const sess = await createSession(selectedProjectId);
@@ -1159,17 +1172,21 @@ const AiPanel = (() => {
     textarea.setAttribute('rows', '1');
     textarea.addEventListener('input', () => {
       textarea.style.height = 'auto';
-      textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
-    });
-    textarea.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+      textarea.style.height = Math.min(textarea.scrollHeight, 180) + 'px';
+      sendBtn.disabled = textarea.value.trim() === '';
     });
 
-    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '✦');
+    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '↑');
+    sendBtn.disabled = true;
 
     const inputBar = el('div', { class: 'ai-input-bar' },
-      el('div', { class: 'ai-picker-row' }, projectPicker),
-      el('div', { class: 'ai-input-row' }, textarea, sendBtn)
+      el('div', { class: 'ai-input-card' },
+        textarea,
+        el('div', { class: 'ai-input-actions' },
+          projectPicker,
+          sendBtn
+        )
+      )
     );
 
     const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
@@ -1220,6 +1237,9 @@ const AiPanel = (() => {
     renderSidebar();
     renderMessages();
     renderProjectPicker();
+
+    await loadSessionMessages(currentSessionId);
+    renderMessages();
 
     panelEl.classList.add('ai-panel-open');
 
