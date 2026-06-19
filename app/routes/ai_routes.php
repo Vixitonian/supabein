@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
+require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 
 // ─── Gemini system prompts ───────────────────────────────────────────────────
@@ -512,6 +513,57 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
     ];
 }
 
+// ─── AI provider factory ─────────────────────────────────────────────────────
+
+const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter'];
+const AI_ALLOWED_MODELS = [
+    'gemini' => [
+        'gemini-2.5-flash',
+        'gemini-2.5-pro',
+        'gemini-2.0-flash',
+    ],
+    'openrouter' => [
+        'google/gemini-2.5-flash',
+        'openai/gpt-4o',
+        'anthropic/claude-sonnet-4-5',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'mistralai/devstral-2:free',
+        'qwen/qwen3-coder:free',
+        'deepseek/deepseek-r1:free',
+        'deepseek/deepseek-v3:free',
+        'google/gemma-3-27b-it:free',
+        'nvidia/nemotron-3-ultra:free',
+        'inclusionai/ring-2.6-1t:free',
+        'nex-agi/nex-n2-pro:free',
+        'poolside/laguna-m.1:free',
+        'poolside/laguna-xs.2:free',
+        'openrouter/owl-alpha:free',
+        'mistralai/mistral-small-3.2-24b-instruct',
+    ],
+];
+
+function make_ai_client(array $config, ?string $provider, ?string $model): object
+{
+    $provider = in_array($provider, AI_ALLOWED_PROVIDERS, true)
+        ? $provider
+        : ($config['AI_PROVIDER'] ?? 'gemini');
+
+    if ($provider === 'openrouter') {
+        $key = $config['OPENROUTER_API_KEY'] ?? '';
+        if (!$key) abort(503, 'OpenRouter API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['openrouter'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\OpenRouterClient($key, $model);
+    }
+
+    // Default: Gemini
+    $key = $config['GEMINI_API_KEY'] ?? '';
+    if (!$key) abort(503, 'AI build is not configured on this server (missing GEMINI_API_KEY)');
+    $allowed = AI_ALLOWED_MODELS['gemini'];
+    $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+    return new \SupaBein\GeminiClient($key, $model);
+}
+
 // ─── Route registration ──────────────────────────────────────────────────────
 
 function register_ai_routes(\SupaBein\Router $router): void
@@ -528,14 +580,11 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(422, 'prompt is required and must be under 2000 characters');
         }
 
-        $apiKey = $config['GEMINI_API_KEY'] ?? '';
-        if (!$apiKey) {
-            abort(503, 'AI build is not configured on this server (missing GEMINI_API_KEY)');
-        }
-
-        // ── 2. Call Gemini ────────────────────────────────────────────────────
-        sb_log('ai_build', 'Calling Gemini', ['user_id' => $userId]);
-        $gemini = new \SupaBein\GeminiClient($apiKey);
+        // ── 2. Call AI ───────────────────────────────────────────────────────
+        $provider = $req['body']['provider'] ?? null;
+        $model    = $req['body']['model']    ?? null;
+        sb_log('ai_build', 'Calling AI', ['user_id' => $userId, 'provider' => $provider, 'model' => $model]);
+        $gemini = make_ai_client($config, $provider, $model);
 
         try {
             $plan = $gemini->generateJson(AI_BUILD_SYSTEM_PROMPT, $prompt);
@@ -571,9 +620,6 @@ function register_ai_routes(\SupaBein\Router $router): void
         if (!$projectId) abort(422, 'project_id is required');
         if (!$prompt || strlen($prompt) > 2000) abort(422, 'prompt is required and must be under 2000 characters');
 
-        $apiKey = $config['GEMINI_API_KEY'] ?? '';
-        if (!$apiKey) abort(503, 'AI edit is not configured on this server (missing GEMINI_API_KEY)');
-
         $project = $catalog->getProjectById($projectId, $userId);
         if (!$project) abort(404, 'Project not found');
 
@@ -588,7 +634,7 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
 
-        $gemini = new \SupaBein\GeminiClient($apiKey);
+        $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
         try {
             $delta = $gemini->generateJson(AI_EDIT_SYSTEM_PROMPT, $userMessage);
         } catch (\RuntimeException $e) {
@@ -626,11 +672,6 @@ function register_ai_routes(\SupaBein\Router $router): void
             $history[] = ['role' => $role, 'text' => $text];
         }
 
-        $apiKey = $config['GEMINI_API_KEY'] ?? '';
-        if (!$apiKey) {
-            abort(503, 'AI is not configured on this server (missing GEMINI_API_KEY)');
-        }
-
         // Auto-detect mode
         $diagnoseKeywords = ['why', 'error', 'failing', 'broken', 'wrong', 'issue', 'problem', 'debug', 'not working', 'failed'];
         if ($projectId === null) {
@@ -644,7 +685,7 @@ function register_ai_routes(\SupaBein\Router $router): void
             $mode = $isDiagnose ? 'diagnose' : 'edit';
         }
 
-        $gemini = new \SupaBein\GeminiClient($apiKey);
+        $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
 
         try {
             if ($mode === 'build') {

@@ -794,6 +794,32 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
 
+  const AI_MODELS = [
+    { label: 'Gemini 2.5 Flash',  provider: 'gemini',     model: 'gemini-2.5-flash',                         badge: 'Fast' },
+    { label: 'Gemini 2.5 Pro',    provider: 'gemini',     model: 'gemini-2.5-pro',                           badge: 'Smart' },
+    { label: 'GPT-4o',            provider: 'openrouter', model: 'openai/gpt-4o',                            badge: 'OpenRouter' },
+    { label: 'Claude Sonnet 4.5', provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5',              badge: 'OpenRouter' },
+    { label: 'Qwen3 Coder',       provider: 'openrouter', model: 'qwen/qwen3-coder:free',                    badge: 'Free' },
+    { label: 'DeepSeek R1',       provider: 'openrouter', model: 'deepseek/deepseek-r1:free',                badge: 'Free' },
+    { label: 'DeepSeek V3',       provider: 'openrouter', model: 'deepseek/deepseek-v3:free',                badge: 'Free' },
+    { label: 'Llama 3.3 70B',     provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',   badge: 'Free' },
+    { label: 'Devstral 2',        provider: 'openrouter', model: 'mistralai/devstral-2:free',                badge: 'Free' },
+    { label: 'Gemma 3 27B',       provider: 'openrouter', model: 'google/gemma-3-27b-it:free',               badge: 'Free' },
+    { label: 'Nemotron Ultra',    provider: 'openrouter', model: 'nvidia/nemotron-3-ultra:free',             badge: 'Free' },
+    { label: 'Ring 2.6 1T',       provider: 'openrouter', model: 'inclusionai/ring-2.6-1t:free',             badge: 'Free' },
+    { label: 'Nex N2 Pro',        provider: 'openrouter', model: 'nex-agi/nex-n2-pro:free',                  badge: 'Free' },
+    { label: 'Laguna M.1',        provider: 'openrouter', model: 'poolside/laguna-m.1:free',                 badge: 'Free' },
+    { label: 'Laguna XS.2',       provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                badge: 'Free' },
+    { label: 'OWL Alpha',         provider: 'openrouter', model: 'openrouter/owl-alpha:free',                badge: 'Free' },
+    { label: 'Mistral Small 3.2', provider: 'openrouter', model: 'mistralai/mistral-small-3.2-24b-instruct', badge: 'OpenRouter' },
+  ];
+
+  function getSelectedModel() {
+    try { return JSON.parse(localStorage.getItem('sb:ai_model')) || AI_MODELS[0]; }
+    catch { return AI_MODELS[0]; }
+  }
+  function setSelectedModel(m) { localStorage.setItem('sb:ai_model', JSON.stringify(m)); }
+
   function getOrCreateBackdrop() {
     if (!backdropEl) {
       backdropEl = document.createElement('div');
@@ -1142,6 +1168,9 @@ const AiPanel = (() => {
         }).filter(h => h.text.trim() !== '');
       }
 
+      const { provider, model } = getSelectedModel();
+      body.provider = provider;
+      body.model    = model;
       const response = await Api.post('/v1/ai/plan', body);
 
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
@@ -1167,7 +1196,8 @@ const AiPanel = (() => {
     renderMessages();
 
     try {
-      const result = await Api.post('/v1/ai/apply', { mode, plan });
+      const { provider: aProvider, model: aModel } = getSelectedModel();
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
     } catch(e) {
@@ -1226,9 +1256,41 @@ const AiPanel = (() => {
 
     const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
     const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
+
+    // Model selector button + dropdown
+    function buildModelSelector() {
+      const sel = getSelectedModel();
+      const btn = el('button', { class: 'ai-model-btn', title: 'Switch AI model' }, sel.label + ' ▾');
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const existing = header.querySelector('.ai-model-dropdown');
+        if (existing) { existing.remove(); return; }
+        const dropdown = el('div', { class: 'ai-model-dropdown' });
+        AI_MODELS.forEach(m => {
+          const cur = getSelectedModel();
+          const item = el('div', { class: 'ai-model-option' + (m.model === cur.model ? ' active' : '') },
+            el('span', {}, m.label),
+            el('span', { class: 'ai-model-badge' }, m.badge)
+          );
+          item.addEventListener('click', () => {
+            setSelectedModel(m);
+            btn.textContent = m.label + ' ▾';
+            dropdown.remove();
+          });
+          dropdown.appendChild(item);
+        });
+        header.appendChild(dropdown);
+        const onOutside = () => { dropdown.remove(); document.removeEventListener('click', onOutside); };
+        setTimeout(() => document.addEventListener('click', onOutside), 0);
+      });
+      return btn;
+    }
+    const modelSelectorBtn = buildModelSelector();
+
     const header = el('div', { class: 'ai-header' },
       hamburgerBtn,
       el('span', { class: 'ai-header-title' }, '✦ SupaBein AI'),
+      modelSelectorBtn,
       closeBtn
     );
 
