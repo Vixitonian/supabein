@@ -2174,22 +2174,6 @@ async function loadDeployContent(projectId, siteId) {
       Api.get(`/v1/projects/${projectId}/sites/${siteId}/deploys`)
     ]);
 
-    const header = document.querySelector('.page-header');
-    const existingViewBtn = header && header.querySelector('#view-site-btn');
-    if (existingViewBtn) existingViewBtn.remove();
-    if (header && site.current_deploy_id) {
-      header.appendChild(
-        el('a', { id: 'view-site-btn', class: 'btn btn-primary btn-sm', href: `/sites/s${siteId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →')
-      );
-    }
-    const existingStagingBtn = header && header.querySelector('#staging-url-card');
-    if (existingStagingBtn) existingStagingBtn.remove();
-    if (header && site.staging_deploy_id) {
-      header.appendChild(
-        el('a', { id: 'staging-url-card', class: 'btn btn-sm btn-secondary', href: `/sites/s${siteId}/staging/`, target: '_blank', rel: 'noopener' }, 'View Staging →')
-      );
-    }
-
     const uploadForm = h(`
       <div class="card">
         <div class="card-title">Upload Deploy (zip)</div>
