@@ -773,7 +773,7 @@ PROMPT;
         json_out($catalog->createAiSession($userId, $name ?: 'New session', $projectId), 201);
     }, ['auth_middleware']);
 
-    $router->get('/v1/ai/sessions/{id}', function (array $req): void {
+    $router->get('/v1/ai/sessions/:id', function (array $req): void {
         $userId    = (int)$req['auth']['user_id'];
         $sessionId = (int)$req['params']['id'];
         $catalog   = \SupaBein\Catalog::getInstance();
@@ -782,7 +782,7 @@ PROMPT;
         json_out($sess);
     }, ['auth_middleware']);
 
-    $router->patch('/v1/ai/sessions/{id}', function (array $req): void {
+    $router->patch('/v1/ai/sessions/:id', function (array $req): void {
         $userId    = (int)$req['auth']['user_id'];
         $sessionId = (int)$req['params']['id'];
         $catalog   = \SupaBein\Catalog::getInstance();
@@ -796,7 +796,7 @@ PROMPT;
         json_out($catalog->getAiSession($sessionId, $userId));
     }, ['auth_middleware']);
 
-    $router->delete('/v1/ai/sessions/{id}', function (array $req): void {
+    $router->delete('/v1/ai/sessions/:id', function (array $req): void {
         $userId    = (int)$req['auth']['user_id'];
         $sessionId = (int)$req['params']['id'];
         $catalog   = \SupaBein\Catalog::getInstance();
