@@ -795,23 +795,23 @@ const AiPanel = (() => {
   let sidebarVisible = false;
 
   const AI_MODELS = [
-    { label: 'Gemini 2.5 Flash',  provider: 'gemini',     model: 'gemini-2.5-flash',                         badge: 'Fast' },
-    { label: 'Gemini 2.5 Pro',    provider: 'gemini',     model: 'gemini-2.5-pro',                           badge: 'Smart' },
-    { label: 'GPT-4o',            provider: 'openrouter', model: 'openai/gpt-4o',                            badge: 'OpenRouter' },
-    { label: 'Claude Sonnet 4.5', provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5',              badge: 'OpenRouter' },
-    { label: 'Qwen3 Coder',       provider: 'openrouter', model: 'qwen/qwen3-coder:free',                    badge: 'Free' },
-    { label: 'DeepSeek R1',       provider: 'openrouter', model: 'deepseek/deepseek-r1:free',                badge: 'Free' },
-    { label: 'DeepSeek V3',       provider: 'openrouter', model: 'deepseek/deepseek-v3:free',                badge: 'Free' },
-    { label: 'Llama 3.3 70B',     provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',   badge: 'Free' },
-    { label: 'Devstral 2',        provider: 'openrouter', model: 'mistralai/devstral-2:free',                badge: 'Free' },
-    { label: 'Gemma 3 27B',       provider: 'openrouter', model: 'google/gemma-3-27b-it:free',               badge: 'Free' },
-    { label: 'Nemotron Ultra',    provider: 'openrouter', model: 'nvidia/nemotron-3-ultra:free',             badge: 'Free' },
-    { label: 'Ring 2.6 1T',       provider: 'openrouter', model: 'inclusionai/ring-2.6-1t:free',             badge: 'Free' },
-    { label: 'Nex N2 Pro',        provider: 'openrouter', model: 'nex-agi/nex-n2-pro:free',                  badge: 'Free' },
-    { label: 'Laguna M.1',        provider: 'openrouter', model: 'poolside/laguna-m.1:free',                 badge: 'Free' },
-    { label: 'Laguna XS.2',       provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                badge: 'Free' },
-    { label: 'OWL Alpha',         provider: 'openrouter', model: 'openrouter/owl-alpha:free',                badge: 'Free' },
-    { label: 'Mistral Small 3.2', provider: 'openrouter', model: 'mistralai/mistral-small-3.2-24b-instruct', badge: 'OpenRouter' },
+    { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
+    { label: 'Gemini 2.5 Pro',       provider: 'gemini',     model: 'gemini-2.5-pro',                                    badge: 'Smart' },
+    { label: 'GPT-4o',               provider: 'openrouter', model: 'openai/gpt-4o',                                     badge: 'OpenRouter' },
+    { label: 'Claude Sonnet 4.5',    provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5',                       badge: 'OpenRouter' },
+    { label: 'Mistral Small 3.2',    provider: 'openrouter', model: 'mistralai/mistral-small-3.2-24b-instruct',          badge: 'OpenRouter' },
+    { label: 'Qwen3 Coder',          provider: 'openrouter', model: 'qwen/qwen3-coder:free',                             badge: 'Free' },
+    { label: 'Llama 3.3 70B',        provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',            badge: 'Free' },
+    { label: 'Gemma 4 31B',          provider: 'openrouter', model: 'google/gemma-4-31b-it:free',                        badge: 'Free' },
+    { label: 'Gemma 4 26B (MoE)',    provider: 'openrouter', model: 'google/gemma-4-26b-a4b-it:free',                    badge: 'Free' },
+    { label: 'GPT OSS 120B',         provider: 'openrouter', model: 'openai/gpt-oss-120b:free',                          badge: 'Free' },
+    { label: 'GPT OSS 20B',          provider: 'openrouter', model: 'openai/gpt-oss-20b:free',                           badge: 'Free' },
+    { label: 'Nemotron Ultra 550B',  provider: 'openrouter', model: 'nvidia/nemotron-3-ultra-550b-a55b:free',            badge: 'Free' },
+    { label: 'Nemotron Nano Omni',   provider: 'openrouter', model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', badge: 'Free' },
+    { label: 'OWL Alpha',            provider: 'openrouter', model: 'openrouter/owl-alpha',                              badge: 'Free' },
+    { label: 'Nex N2 Pro',           provider: 'openrouter', model: 'nex-agi/nex-n2-pro:free',                           badge: 'Free' },
+    { label: 'Laguna M.1',           provider: 'openrouter', model: 'poolside/laguna-m.1:free',                          badge: 'Free' },
+    { label: 'Laguna XS.2',          provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                         badge: 'Free' },
   ];
 
   function getSelectedModel() {
@@ -819,6 +819,53 @@ const AiPanel = (() => {
     catch { return AI_MODELS[0]; }
   }
   function setSelectedModel(m) { localStorage.setItem('sb:ai_model', JSON.stringify(m)); }
+
+  function updateModelBtn(m) {
+    if (!panelEl) return;
+    const btn = panelEl.querySelector('.ai-model-btn');
+    if (btn) btn.textContent = m.label + ' ▾';
+  }
+
+  function showToast(message, duration = 4500) {
+    if (!panelEl) return;
+    const toast = el('div', { class: 'ai-toast' }, message);
+    panelEl.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('ai-toast-visible'));
+    setTimeout(() => {
+      toast.classList.remove('ai-toast-visible');
+      setTimeout(() => toast.remove(), 300);
+    }, duration);
+  }
+
+  async function callWithFallback(path, body) {
+    let selectedM = getSelectedModel();
+    const tried = new Set();
+    while (true) {
+      tried.add(selectedM.model);
+      try {
+        return await Api.post(path, { ...body, provider: selectedM.provider, model: selectedM.model });
+      } catch (e) {
+        if (e.status === 402) {
+          const nextModel = AI_MODELS.find(m => !tried.has(m.model));
+          if (nextModel) {
+            showToast(`${selectedM.label} hit its limit — switching to ${nextModel.label}`);
+            setSelectedModel(nextModel);
+            updateModelBtn(nextModel);
+            selectedM = nextModel;
+            continue;
+          }
+        }
+        throw e;
+      }
+    }
+  }
+
+  function renderTokenUsage(usage) {
+    if (!usage || !usage.total_tokens) return null;
+    return el('div', { class: 'ai-token-usage' },
+      `↑ ${usage.prompt_tokens.toLocaleString()} / ↓ ${usage.completion_tokens.toLocaleString()} tokens`
+    );
+  }
 
   function getOrCreateBackdrop() {
     if (!backdropEl) {
@@ -1000,9 +1047,11 @@ const AiPanel = (() => {
       }
     }
 
+    const tokenEl = renderTokenUsage(msg.data.usage);
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' + (msg.settled ? ' ai-plan-settled' : '') },
       el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
-      ...lines
+      ...lines,
+      ...(tokenEl ? [tokenEl] : [])
     );
 
     if (!msg.settled) {
@@ -1071,6 +1120,8 @@ const AiPanel = (() => {
         lines.push(el('div', { class: 'ai-plan-item' }, (i + 1) + '. ' + s))
       );
     }
+    const tokenEl = renderTokenUsage(data.usage);
+    if (tokenEl) lines.push(tokenEl);
     return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
   }
 
@@ -1168,14 +1219,13 @@ const AiPanel = (() => {
         }).filter(h => h.text.trim() !== '');
       }
 
-      const { provider, model } = getSelectedModel();
-      body.provider = provider;
-      body.model    = model;
-      const response = await Api.post('/v1/ai/plan', body);
+      const response = await callWithFallback('/v1/ai/plan', body);
 
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
-      if (response.mode === 'diagnose') {
+      if (response.mode === 'chat') {
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message });
+      } else if (response.mode === 'diagnose') {
         await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
       } else {
         await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });

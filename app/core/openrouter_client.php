@@ -8,10 +8,17 @@ class OpenRouterClient
 {
     private const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
+    private array $lastUsage = [];
+
     public function __construct(
         private string $apiKey,
         private string $model = 'google/gemini-2.5-flash'
     ) {}
+
+    public function getLastUsage(): array
+    {
+        return $this->lastUsage;
+    }
 
     public function generateJson(string $systemPrompt, string $userPrompt): array
     {
@@ -38,11 +45,16 @@ class OpenRouterClient
 
     private function call(array $messages): array
     {
-        $payload = json_encode([
+        // Free models have strict credit limits — cap output tokens to avoid rejection
+        $body = [
             'model'           => $this->model,
             'messages'        => $messages,
             'response_format' => ['type' => 'json_object'],
-        ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        ];
+        if (str_ends_with($this->model, ':free')) {
+            $body['max_tokens'] = 4000;
+        }
+        $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
         $ch = curl_init(self::ENDPOINT);
         curl_setopt_array($ch, [
@@ -75,6 +87,13 @@ class OpenRouterClient
 
         $envelope = json_decode($response, true);
         $text     = $envelope['choices'][0]['message']['content'] ?? null;
+
+        $raw = $envelope['usage'] ?? [];
+        $this->lastUsage = [
+            'prompt_tokens'     => (int)($raw['prompt_tokens'] ?? 0),
+            'completion_tokens' => (int)($raw['completion_tokens'] ?? 0),
+            'total_tokens'      => (int)($raw['total_tokens'] ?? 0),
+        ];
 
         if ($text === null) {
             throw new \RuntimeException('OpenRouter returned no content in response');

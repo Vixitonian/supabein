@@ -1018,3 +1018,38 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   }
   .ai-sessions.ai-sidebar-visible { transform: translateX(0); }
 }
+
+/* ── Token usage & toast ───────────────────────────────────────────────────── */
+.ai-token-usage {
+  font-size: 10px;
+  color: var(--muted, #666);
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+  letter-spacing: 0.02em;
+}
+
+.ai-toast {
+  position: absolute;
+  bottom: 72px;
+  left: 50%;
+  transform: translateX(-50%) translateY(6px);
+  background: var(--surface-2, #1a1d27);
+  border: 1px solid var(--accent, #3ecf8e);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 1200;
+  pointer-events: none;
+  max-width: calc(100% - 32px);
+  white-space: normal;
+  text-align: center;
+}
+.ai-toast.ai-toast-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
