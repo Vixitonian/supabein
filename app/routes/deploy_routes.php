@@ -139,6 +139,48 @@ function register_deploy_routes(\SupaBein\Router $router): void
         ['auth_middleware']
     );
 
+    // GET /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/download
+    $router->get(
+        '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/download',
+        function (array $req) use ($catalog, $ownProject): void {
+            $ownProject((int)$req['params']['project_id'], $req['auth']['user_id']);
+            $site = $catalog->getSiteByProjectId((int)$req['params']['project_id'], (int)$req['params']['site_id']);
+            if (!$site) abort(404, 'Site not found');
+
+            $deploy = $catalog->getDeployById((int)$req['params']['deploy_id']);
+            if (!$deploy || (int)$deploy['site_id'] !== (int)$site['id']) abort(404, 'Deploy not found');
+
+            $deployDir = rtrim($deploy['path'], '/');
+            if (!is_dir($deployDir)) abort(404, 'Deploy files not found on disk');
+
+            $zipFile = sys_get_temp_dir() . '/deploy_' . $deploy['id'] . '_' . time() . '.zip';
+            $zip = new \ZipArchive();
+            if ($zip->open($zipFile, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+                abort(500, 'Could not create zip archive');
+            }
+
+            $iter = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($deployDir, \FilesystemIterator::SKIP_DOTS));
+            foreach ($iter as $file) {
+                $realPath = $file->getRealPath();
+                $relPath  = ltrim(str_replace($deployDir, '', $realPath), '/\\');
+                $zip->addFile($realPath, $relPath);
+            }
+            $zip->close();
+
+            $label    = preg_replace('/[^a-zA-Z0-9_\-]/', '-', $deploy['version_label'] ?: 'deploy-' . $deploy['id']);
+            $filename = 'site-' . $site['subdomain'] . '-' . $label . '.zip';
+
+            header('Content-Type: application/zip');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            header('Content-Length: ' . filesize($zipFile));
+            header('Cache-Control: no-cache');
+            readfile($zipFile);
+            @unlink($zipFile);
+            exit;
+        },
+        ['auth_middleware']
+    );
+
     // GET /v1/projects/:project_id/sites/:site_id/debug  — filesystem diagnostics
     $router->get('/v1/projects/:project_id/sites/:site_id/debug', function (array $req) use ($catalog, $ownProject): void {
         $ownProject((int)$req['params']['project_id'], $req['auth']['user_id']);

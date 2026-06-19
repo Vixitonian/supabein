@@ -1456,6 +1456,22 @@ async function renderProject({ id }) {
       }
     });
 
+    // Async: fetch site to show "View Site" in header if a live deploy exists
+    Api.get(`/v1/projects/${id}/sites`).then(sites => {
+      const liveSite = Array.isArray(sites) && sites.find(s => s.current_deploy_id);
+      if (!liveSite) return;
+      const hdr = document.querySelector('.page-header');
+      if (hdr && !hdr.querySelector('#proj-view-site-btn')) {
+        hdr.appendChild(el('a', {
+          id: 'proj-view-site-btn',
+          class: 'btn btn-primary btn-sm',
+          href: `/sites/s${liveSite.id}/current/`,
+          target: '_blank',
+          rel: 'noopener'
+        }, 'View Site →'));
+      }
+    }).catch(() => {});
+
     const content = [
       el('div', { class: 'page-header' },
         el('h1', { class: 'page-title' }, project.name),
@@ -2311,6 +2327,29 @@ async function loadDeployContent(projectId, siteId) {
                   } catch (e) { alert(e.message); }
                 }
               }, 'Diff'));
+            }
+            if (d.status === 'ready') {
+              actions.appendChild(el('button', {
+                class: 'btn btn-sm btn-ghost',
+                onClick: async (e) => {
+                  e.target.disabled = true; e.target.textContent = '…';
+                  try {
+                    const res = await fetch(`/api/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/download`, {
+                      headers: { Authorization: 'Bearer ' + (Auth.getToken() || '') }
+                    });
+                    if (!res.ok) throw new Error('Download failed');
+                    const cd = res.headers.get('Content-Disposition') || '';
+                    const fnMatch = cd.match(/filename="([^"]+)"/);
+                    const filename = fnMatch ? fnMatch[1] : `deploy-${d.id}.zip`;
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = filename; a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (err) { alert(err.message); }
+                  finally { e.target.disabled = false; e.target.textContent = '↓ ZIP'; }
+                }
+              }, '↓ ZIP'));
             }
             return el('tr', {},
               el('td', {}, labelEl),
