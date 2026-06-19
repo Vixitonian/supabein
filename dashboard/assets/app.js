@@ -997,6 +997,109 @@ async function showAiProgressModal(prompt) {
   }
 }
 
+function showAiEditModal(project) {
+  const overlay = h(`
+    <div class="modal-overlay" id="ai-edit-modal">
+      <div class="modal modal-ai">
+        <div class="modal-title">✦ AI Edit</div>
+        <div class="form-group">
+          <label>Describe what you want to change</label>
+          <textarea id="ai-edit-prompt" rows="4" placeholder="e.g. Add a comments table linked to posts&#10;e.g. Add a categories feature with many-to-many tags&#10;e.g. Enable public read access on the products table&#10;e.g. Add a ratings column to the reviews table"></textarea>
+        </div>
+        <div class="ai-hint">Gemini will add tables, columns, or update policies — it won't delete existing data.</div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="ai-edit-cancel">Cancel</button>
+          <button class="btn btn-ai" id="ai-edit-submit">✦ Apply Changes</button>
+        </div>
+      </div>
+    </div>
+  `);
+
+  const modalEl = overlay.firstElementChild;
+  modalEl.querySelector('#ai-edit-cancel').addEventListener('click', () => modalEl.remove());
+  modalEl.addEventListener('click', e => { if (e.target === modalEl) modalEl.remove(); });
+
+  modalEl.querySelector('#ai-edit-submit').addEventListener('click', () => {
+    const prompt = modalEl.querySelector('#ai-edit-prompt').value.trim();
+    if (!prompt) { modalEl.querySelector('#ai-edit-prompt').focus(); return; }
+    modalEl.remove();
+    showAiEditProgressModal(project, prompt);
+  });
+
+  document.body.appendChild(modalEl);
+  setTimeout(() => modalEl.querySelector('#ai-edit-prompt').focus(), 50);
+}
+
+async function showAiEditProgressModal(project, prompt) {
+  const steps = [
+    { id: 'gemini', label: 'Generating changes with Gemini…' },
+    { id: 'apply',  label: 'Applying changes to project…' },
+  ];
+
+  const stepEls = steps.map(s =>
+    el('div', { class: 'ai-step', id: 'ai-edit-step-' + s.id },
+      el('span', { class: 'ai-step-icon' }, '○'),
+      el('span', { class: 'ai-step-label' }, s.label)
+    )
+  );
+
+  const statusMsg = el('div', { class: 'ai-status-msg text-muted' }, 'Sending your request to Gemini…');
+
+  const modal = el('div', { class: 'modal modal-ai' },
+    el('div', { class: 'modal-title' }, '✦ Editing ' + project.name),
+    el('div', { class: 'ai-steps' }, ...stepEls),
+    statusMsg
+  );
+  const overlay = el('div', { class: 'modal-overlay' }, modal);
+  document.body.appendChild(overlay);
+
+  function setStep(stepId, state) {
+    const row = document.getElementById('ai-edit-step-' + stepId);
+    if (!row) return;
+    row.className = 'ai-step ai-step-' + state;
+    row.querySelector('.ai-step-icon').textContent =
+      state === 'done' ? '✓' : state === 'error' ? '✗' : '◌';
+  }
+
+  setStep('gemini', 'active');
+
+  try {
+    const result = await Api.post('/v1/ai/edit', { project_id: project.id, prompt });
+
+    setStep('gemini', 'done');
+    setStep('apply', 'done');
+
+    const summary = [];
+    if (result.added_tables?.length)   summary.push(`${result.added_tables.length} table(s) added`);
+    if (result.added_columns?.length)  summary.push(`${result.added_columns.length} column(s) added`);
+    if (result.updated_policies?.length) summary.push(`${result.updated_policies.length} polic(ies) updated`);
+
+    statusMsg.textContent = '✓ ' + (summary.length ? summary.join(', ') + '.' : 'Done.');
+    statusMsg.style.color = 'var(--accent)';
+
+    const actions = el('div', { style: 'display:flex;gap:8px;margin-top:18px' },
+      el('button', { class: 'btn btn-primary', onClick: () => {
+        overlay.remove();
+        Router.navigate('/projects/' + project.id);
+      }}, 'Refresh Project →'),
+      el('button', { class: 'btn btn-secondary', onClick: () => overlay.remove() }, 'Close')
+    );
+    modal.appendChild(actions);
+
+  } catch (e) {
+    const activeRow = document.querySelector('#ai-edit-step-gemini.ai-step-active, #ai-edit-step-apply.ai-step-active');
+    if (activeRow) {
+      const sid = activeRow.id.replace('ai-edit-step-', '');
+      setStep(sid, 'error');
+    }
+    statusMsg.textContent = 'Error: ' + e.message;
+    statusMsg.style.color = 'var(--danger)';
+    modal.appendChild(el('button', { class: 'btn btn-secondary', style: 'margin-top:16px',
+      onClick: () => overlay.remove()
+    }, 'Close'));
+  }
+}
+
 // Project overview
 async function renderProject({ id }) {
   if (!requireAuth()) return;
@@ -1004,13 +1107,6 @@ async function renderProject({ id }) {
 
   try {
     const project = await Api.get(`/v1/projects/${id}`);
-
-    const copyAnonBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
-    copyAnonBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(project.anon_key);
-      copyAnonBtn.textContent = 'Copied!';
-      setTimeout(() => { copyAnonBtn.textContent = 'Copy'; }, 1500);
-    });
 
     const tabTables = el('div', { class: 'tab active' }, 'Tables');
     const tabUsers  = el('div', { class: 'tab' }, 'Users');
@@ -1059,28 +1155,19 @@ async function renderProject({ id }) {
       }
     });
 
+    const aiEditBtn = el('button', { class: 'btn btn-ai' }, '✦ AI Edit');
+    aiEditBtn.addEventListener('click', () => showAiEditModal(project));
+
     const content = [
       el('div', { class: 'page-header' },
-        el('h1', { class: 'page-title' }, project.name),
-        el('span', { class: 'text-muted', style: 'font-size:0.8rem' },
-          `ID ${project.id} · ${fmtDate(project.created_at)}`
-        )
-      ),
-
-      ...(project.anon_key ? [
-        el('div', { class: 'card' },
-          el('div', { class: 'card-title' }, 'Anon Key'),
-          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
-            'Use in your frontend. Subject to table policies (anon role).'
-          ),
-          el('div', { style: 'display:flex;gap:8px;align-items:center' },
-            el('code', { style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
-              project.anon_key.slice(0, 48) + '…'
-            ),
-            copyAnonBtn
+        el('div', {},
+          el('h1', { class: 'page-title' }, project.name),
+          el('span', { class: 'text-muted', style: 'font-size:0.8rem' },
+            `ID ${project.id} · ${fmtDate(project.created_at)}`
           )
-        )
-      ] : []),
+        ),
+        aiEditBtn
+      ),
 
       el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabUsers, tabApi, tabDeploy),
       paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl,

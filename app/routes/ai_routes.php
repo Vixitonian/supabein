@@ -407,4 +407,172 @@ function register_ai_routes(\SupaBein\Router $router): void
         ], 201);
 
     }, ['auth_middleware']);
+
+    // ── AI Edit: modify an existing project ────────────────────────────────────
+    $router->post('/v1/ai/edit', function (array $req): void {
+        set_time_limit(120);
+
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $pdo     = \App::get('db');
+        $userId  = (int)$req['auth']['user_id'];
+
+        $projectId = (int)($req['body']['project_id'] ?? 0);
+        $prompt    = trim($req['body']['prompt'] ?? '');
+
+        if (!$projectId) abort(422, 'project_id is required');
+        if (!$prompt || strlen($prompt) > 2000) abort(422, 'prompt is required and must be under 2000 characters');
+
+        $apiKey = $config['GEMINI_API_KEY'] ?? '';
+        if (!$apiKey) abort(503, 'AI edit is not configured on this server (missing GEMINI_API_KEY)');
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) abort(404, 'Project not found');
+
+        // Build context snapshot of existing schema
+        $existingTables = $catalog->listTables($projectId);
+        $schemaLines = [];
+        foreach ($existingTables as $tbl) {
+            $cols = array_map(fn($c) => $c['name'] . ' ' . $c['type'], $catalog->listColumns($tbl['id']));
+            $schemaLines[] = '  Table "' . $tbl['logical_name'] . '": id (INT auto), ' . implode(', ', $cols) . ', created_at (DATETIME auto)';
+        }
+        $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
+
+        $editSystemPrompt = <<<'PROMPT'
+You are a backend architect for SupaBein, a self-hosted BaaS platform.
+The user wants to MODIFY an existing project. You will be given the current schema and a change request.
+Return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text.
+
+Schema:
+{
+  "add_tables": [
+    {
+      "name": string,
+      "columns": [
+        {"name": string, "type": string, "nullable": boolean}
+      ],
+      "policies": [
+        {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
+      ]
+    }
+  ],
+  "add_columns": [
+    {
+      "table": string,
+      "columns": [
+        {"name": string, "type": string, "nullable": boolean}
+      ]
+    }
+  ],
+  "update_policies": [
+    {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
+  ]
+}
+
+Rules:
+- Do NOT include tables or columns that already exist in the current schema.
+- Do NOT drop or rename anything — only additions and policy changes.
+- column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+- table.name and column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid SQL reserved words; do NOT use "id" or "created_at"
+- If no changes of a given type are needed, return an empty array [] for that key.
+PROMPT;
+
+        $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
+
+        $gemini = new \SupaBein\GeminiClient($apiKey);
+        try {
+            $delta = $gemini->generateJson($editSystemPrompt, $userMessage);
+        } catch (\RuntimeException $e) {
+            abort(502, 'AI generation failed: ' . $e->getMessage());
+        }
+
+        $addedTables   = [];
+        $addedColumns  = [];
+        $updatedPolicies = [];
+
+        // Apply new tables
+        foreach ($delta['add_tables'] ?? [] as $tableDef) {
+            try { \SupaBein\Schema::validateIdentifier($tableDef['name'] ?? ''); }
+            catch (\InvalidArgumentException $e) { continue; }
+
+            $columns = [];
+            foreach ($tableDef['columns'] ?? [] as $col) {
+                try {
+                    $colName = \SupaBein\Schema::validateIdentifier($col['name'] ?? '');
+                    if (in_array(strtolower($colName), ['id','created_at'], true)) continue;
+                    $columns[] = [
+                        'name'     => $colName,
+                        'type'     => \SupaBein\Schema::validateDataType($col['type'] ?? 'TEXT'),
+                        'nullable' => (bool)($col['nullable'] ?? true),
+                        'default'  => null,
+                    ];
+                } catch (\InvalidArgumentException $e) { continue; }
+            }
+
+            try {
+                $table = $catalog->createTable($projectId, $tableDef['name']);
+                $ddl   = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
+                \SupaBein\Schema::applyDDL($pdo, $projectId, $ddl);
+                foreach ($columns as $col) {
+                    $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default']);
+                }
+                foreach ($tableDef['policies'] ?? [] as $p) {
+                    try {
+                        $catalog->upsertPolicy($table['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
+                    } catch (\Throwable $e) {}
+                }
+                $addedTables[] = $tableDef['name'];
+            } catch (\Throwable $e) {
+                sb_log('ai_edit', 'add_table failed: ' . $e->getMessage(), ['table' => $tableDef['name']]);
+            }
+        }
+
+        // Apply new columns to existing tables
+        foreach ($delta['add_columns'] ?? [] as $entry) {
+            $tblName = $entry['table'] ?? '';
+            $tbl = $catalog->getTable($projectId, $tblName);
+            if (!$tbl) continue;
+
+            foreach ($entry['columns'] ?? [] as $col) {
+                try {
+                    $colName = \SupaBein\Schema::validateIdentifier($col['name'] ?? '');
+                    if (in_array(strtolower($colName), ['id','created_at'], true)) continue;
+                    $colType = \SupaBein\Schema::validateDataType($col['type'] ?? 'TEXT');
+                    $nullable = (bool)($col['nullable'] ?? true);
+
+                    $physicalTable = $tbl['physical_name'];
+                    $nullSql = $nullable ? 'NULL' : 'NOT NULL';
+                    \SupaBein\Schema::applyDDL($pdo, $projectId,
+                        "ALTER TABLE `{$physicalTable}` ADD COLUMN `{$colName}` {$colType} {$nullSql}"
+                    );
+                    $catalog->addColumn($tbl['id'], $colName, $colType, $nullable, null);
+                    $addedColumns[] = $tblName . '.' . $colName;
+                } catch (\Throwable $e) {
+                    sb_log('ai_edit', 'add_column failed: ' . $e->getMessage());
+                }
+            }
+        }
+
+        // Apply policy updates
+        foreach ($delta['update_policies'] ?? [] as $p) {
+            $tblName = $p['table'] ?? '';
+            $tbl = $catalog->getTable($projectId, $tblName);
+            if (!$tbl) continue;
+            try {
+                $catalog->upsertPolicy($tbl['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
+                $updatedPolicies[] = $tblName . '.' . $p['api_role'] . '.' . $p['operation'];
+            } catch (\Throwable $e) {
+                sb_log('ai_edit', 'policy update failed: ' . $e->getMessage());
+            }
+        }
+
+        sb_log('ai_edit', 'Complete', ['project_id' => $projectId, 'added_tables' => count($addedTables)]);
+
+        json_out([
+            'added_tables'    => $addedTables,
+            'added_columns'   => $addedColumns,
+            'updated_policies' => $updatedPolicies,
+        ]);
+
+    }, ['auth_middleware']);
 }
