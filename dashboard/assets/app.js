@@ -817,9 +817,13 @@ const AiPanel = (() => {
 
   async function loadSessions() {
     try {
-      sessions = await Api.get('/v1/ai/sessions');
+      const result = await Api.get('/v1/ai/sessions');
+      sessions = Array.isArray(result) ? result : [];
       sessions.forEach(s => { s.messages = s.messages || []; });
-    } catch(e) { sessions = []; }
+    } catch(e) {
+      console.error('[AiPanel] loadSessions failed:', e);
+      sessions = [];
+    }
   }
 
   async function createSession(projectId) {
@@ -1226,8 +1230,6 @@ const AiPanel = (() => {
   async function open(options = {}) {
     if (isOpen) return;
     isOpen = true;
-
-    loadSessions();
 
     if (!panelEl) {
       panelEl = buildPanel();
