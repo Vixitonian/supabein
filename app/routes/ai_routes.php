@@ -710,7 +710,13 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         // ── Handle chat / info mode ───────────────────────────────────────────
         if ($isChat) {
-            // Build project schema context when a project is selected
+            // Always include the user's full project list
+            $allProjects    = $catalog->listProjects($userId);
+            $projectListStr = implode("\n", array_map(fn($p) => '  - ' . $p['name'] . ' (id:' . $p['id'] . ')', $allProjects));
+            $globalContext  = 'Projects (' . count($allProjects) . " total):\n"
+                . ($projectListStr ?: '  (none yet)');
+
+            // Add schema detail for the currently selected project
             $projectContext = '';
             if ($projectId) {
                 $proj = $catalog->getProjectById($projectId, $userId);
@@ -731,7 +737,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                             . ($policyStrs ? ' [policies: ' . implode(', ', $policyStrs) . ']' : '');
                     }
                     $tableCount     = count($schemaLines);
-                    $projectContext = "\n\nCurrent project: \"" . $proj['name'] . "\"\nTables (" . $tableCount . "):\n"
+                    $projectContext = "\n\nSelected project: \"" . $proj['name'] . "\"\nTables (" . $tableCount . "):\n"
                         . ($schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)');
                 }
             }
@@ -751,9 +757,7 @@ If asked about the current project (tables, columns, policies, counts), use the 
 Reply concisely and helpfully. Return ONLY valid JSON: {"message": "your reply"}
 CHAT;
 
-            $userQuestion = $projectContext
-                ? trim($projectContext) . "\n\nQuestion: " . $prompt
-                : $prompt;
+            $userQuestion = $globalContext . $projectContext . "\n\nQuestion: " . $prompt;
 
             try {
                 $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
