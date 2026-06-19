@@ -14,26 +14,38 @@ class GeminiClient
     ) {}
 
     /**
-     * Send a combined system+user prompt and return the parsed JSON object Gemini produces.
+     * Send a single-turn prompt and return parsed JSON.
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
     public function generateJson(string $systemPrompt, string $userPrompt): array
     {
+        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt);
+    }
+
+    /**
+     * Send a multi-turn conversation and return parsed JSON.
+     *
+     * $history is an array of ['role' => 'user'|'model', 'text' => string].
+     *
+     * @throws \RuntimeException on network error, HTTP error, or non-JSON response
+     */
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
+    {
         $url  = sprintf(self::ENDPOINT, urlencode($this->model));
         $url .= '?key=' . urlencode($this->apiKey);
 
+        $contents = [];
+        foreach ($history as $turn) {
+            if (!isset($turn['role'], $turn['text'])) continue;
+            $contents[] = ['role' => $turn['role'], 'parts' => [['text' => $turn['text']]]];
+        }
+        $contents[] = ['role' => 'user', 'parts' => [['text' => $userPrompt]]];
+
         $payload = json_encode([
-            'contents' => [
-                [
-                    'parts' => [
-                        ['text' => $systemPrompt . "\n\nUser request: " . $userPrompt],
-                    ],
-                ],
-            ],
-            'generationConfig' => [
-                'responseMimeType' => 'application/json',
-            ],
+            'systemInstruction' => ['parts' => [['text' => $systemPrompt]]],
+            'contents'          => $contents,
+            'generationConfig'  => ['responseMimeType' => 'application/json'],
         ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
         $ch = curl_init($url);
