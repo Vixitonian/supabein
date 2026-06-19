@@ -1301,9 +1301,10 @@ const AiPanel = (() => {
     const sidebarOverlay = el('div', { class: 'ai-sidebar-overlay', onClick: () => toggleSidebar(false) });
 
     const sessionList = el('div', { class: 'ai-session-list' });
-    const newBtn = el('button', { class: 'btn btn-sm ai-new-btn', onClick: newSession }, '+ New');
     const sidebar = el('div', { class: 'ai-sessions' },
-      el('div', { class: 'ai-sessions-header' }, newBtn),
+      el('div', { class: 'ai-sessions-header' },
+        el('span', { class: 'ai-sessions-title' }, 'History')
+      ),
       sessionList
     );
 
@@ -1340,6 +1341,7 @@ const AiPanel = (() => {
     );
 
     const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
+    const newSessionBtn = el('button', { class: 'ai-new-session-btn', title: 'New session', onClick: newSession }, '✎');
     const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
 
     // Model selector button + dropdown
@@ -1376,6 +1378,7 @@ const AiPanel = (() => {
       hamburgerBtn,
       el('span', { class: 'ai-header-title' }, '✦ SupaBein AI'),
       modelSelectorBtn,
+      newSessionBtn,
       closeBtn
     );
 
