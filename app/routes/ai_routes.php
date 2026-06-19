@@ -53,7 +53,7 @@ Field rules:
 - column.name: same rules as table name; do NOT include "id" or "created_at" (auto-generated)
 - column.type: MUST be exactly one of:
     INT, BIGINT, SMALLINT, TINYINT,
-    VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(32),
+    VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(36), VARCHAR(32),
     TEXT, MEDIUMTEXT, LONGTEXT,
     BOOLEAN, TINYINT(1),
     DECIMAL(10,2), DECIMAL(15,4),
