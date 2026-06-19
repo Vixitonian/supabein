@@ -1085,7 +1085,7 @@ const AiPanel = (() => {
     const textarea = panelEl.querySelector('#ai-textarea');
     const prompt = textarea ? textarea.value.trim() : '';
     if (!prompt) return;
-    if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; }
+    if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; const sb = panelEl.querySelector('.ai-send-btn'); if (sb) sb.disabled = true; }
 
     if (!currentSessionId || !getSession(currentSessionId)) {
       const sess = await createSession(selectedProjectId);
@@ -1172,13 +1172,21 @@ const AiPanel = (() => {
     textarea.setAttribute('rows', '1');
     textarea.addEventListener('input', () => {
       textarea.style.height = 'auto';
-      textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+      textarea.style.height = Math.min(textarea.scrollHeight, 180) + 'px';
+      sendBtn.disabled = textarea.value.trim() === '';
     });
-    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '✦');
+
+    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '↑');
+    sendBtn.disabled = true;
 
     const inputBar = el('div', { class: 'ai-input-bar' },
-      el('div', { class: 'ai-picker-row' }, projectPicker),
-      el('div', { class: 'ai-input-row' }, textarea, sendBtn)
+      el('div', { class: 'ai-input-card' },
+        textarea,
+        el('div', { class: 'ai-input-actions' },
+          projectPicker,
+          sendBtn
+        )
+      )
     );
 
     const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
