@@ -8,12 +8,10 @@ require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 
 // ─── Gemini system prompts ───────────────────────────────────────────────────
 
-const AI_BUILD_SYSTEM_PROMPT = <<<'PROMPT'
-You are a full-stack architect for SupaBein, a self-hosted BaaS platform.
-The user will describe an application in plain English.
-You must return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text.
-
-The JSON object must conform exactly to this schema:
+// ── Pass 1: schema only ──────────────────────────────────────────────────────
+const AI_BUILD_SCHEMA_PROMPT = <<<'PROMPT'
+You are a backend architect for SupaBein, a self-hosted BaaS platform.
+The user will describe an application. Return ONLY a single valid JSON object — no markdown fences, no explanation.
 
 {
   "project_name": string,
@@ -22,108 +20,201 @@ The JSON object must conform exactly to this schema:
     {
       "name": string,
       "columns": [
-        {
-          "name": string,
-          "type": string,
-          "nullable": boolean,
-          "default": string or null
-        }
+        {"name": string, "type": string, "nullable": boolean, "default": string or null}
       ],
       "policies": [
-        {
-          "api_role": string,
-          "operation": string,
-          "allowed": boolean,
-          "constraint_sql": string or null
-        }
+        {"api_role": string, "operation": string, "allowed": boolean, "constraint_sql": string or null}
       ]
     }
-  ],
-  "frontend": {
-    "files": [
-      { "path": string, "content": string }
-    ]
-  }
+  ]
 }
 
-Field rules:
-- project_name: human-readable name, 1-80 characters
-- subdomain: 3-30 lowercase alphanumeric + hyphens, no leading/trailing hyphens (e.g. "my-blog")
-- table.name: valid SQL identifier matching /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/
-  Do NOT use SQL reserved words (SELECT, INSERT, TABLE, INDEX, KEY, WHERE, FROM, etc.)
-- column.name: same rules as table name; do NOT include "id" or "created_at" (auto-generated)
-- column.type: MUST be exactly one of:
-    INT, BIGINT, SMALLINT, TINYINT,
-    VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(36), VARCHAR(32),
-    TEXT, MEDIUMTEXT, LONGTEXT,
-    BOOLEAN, TINYINT(1),
-    DECIMAL(10,2), DECIMAL(15,4),
-    FLOAT, DOUBLE,
-    DATETIME, DATE, TIMESTAMP, JSON
-- column.default: literal values only (e.g. "0", "1", "active") or null — no SQL functions
+Rules:
+- project_name: human-readable, 1-80 chars
+- subdomain: 3-30 lowercase alphanumeric + hyphens (e.g. "my-blog")
+- table.name: valid SQL identifier /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid ALL SQL reserved words
+  (SELECT, INSERT, TABLE, INDEX, KEY, WHERE, FROM, NAME, DATE, TYPE, STATUS, RANK, ROLE, etc.)
+- column.name: same rules; do NOT use "id" or "created_at" (auto-generated); avoid reserved words
+  including: name, type, status, rank, role, date, time, year, month, value, key, index, order, group
+- column.type: exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64),
+  VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2),
+  DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+- column.default: literal values only (e.g. "0", "active") or null — no SQL functions
 - policy.api_role: "anon" or "authenticated"
 - policy.operation: "SELECT", "INSERT", "UPDATE", or "DELETE"
-- policy.constraint_sql: simple WHERE-style expression or null (no subqueries, no DML)
-  IMPORTANT: use ":current_user_id" as the placeholder for the logged-in user's ID
-  (e.g. "user_id = :current_user_id"). Do NOT use "auth.uid()" — it is not supported.
+- policy.constraint_sql: WHERE-style expression or null; use ":current_user_id" for logged-in user ID
+  Do NOT use "auth.uid()" — it is not supported.
+- Always include at least one table.
+PROMPT;
 
-Frontend rules — STRUCTURE:
-- Use a Feature-Based Structure. Organise files by feature, not by type:
+// ── Pass 2: frontend given exact validated schema ────────────────────────────
+const AI_BUILD_FRONTEND_PROMPT = <<<'PROMPT'
+You are a frontend developer for SupaBein, a self-hosted BaaS platform.
+You will receive the app description and the exact validated database schema.
+Return ONLY a single valid JSON object — no markdown fences, no explanation.
+
+{"files": [{"path": string, "content": string}]}
+
+═══════════════════════════════════════════════════════
+RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
+═══════════════════════════════════════════════════════
+The schema lists every table's EXACT column names after validation and reserved-word renaming.
+You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
+template literals, form inputs, everything.
+Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
+
+═══════════════════════════════════════════════════════
+RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
+═══════════════════════════════════════════════════════
+Scripts load in order. A file cannot reference a variable from a file loaded after it.
+
+CORRECT load order in index.html:
+  <script src="core/config.js"></script>
+  <script src="core/api.js"></script>
+  <script src="core/router.js"></script>
+  <script src="features/auth/auth.js"></script>
+  <script src="features/<feature>/<feature>.js"></script>   ← all feature scripts
+  <script>
+    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
+    router.defineRoute('/', featureA.renderView);
+    router.defineRoute('/login', auth.renderAuthForms);
+    /* ... all other routes ... */
+    auth.ready.then(() => {
+      updateNav();
+      router.onHashChange();
+      window.addEventListener('hashchange', router.onHashChange);
+    });
+  </script>
+
+core/router.js must NEVER call defineRoute() itself — it only exports the router API.
+All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
+
+═══════════════════════════════════════════════════════
+RULE 3 — AUTH INITIALISATION RACE
+═══════════════════════════════════════════════════════
+features/auth/auth.js must expose a `ready` promise (the Promise returned by loadUser()).
+loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
+and every protected page shows "Access Denied" even for logged-in users.
+
+Required pattern in auth.js:
+  const auth = (() => {
+    let currentUser = null;
+    let _resolveReady;
+    const ready = new Promise(res => { _resolveReady = res; });
+
+    const loadUser = async () => {
+      // ... fetch /auth/me, set currentUser ...
+      _resolveReady(currentUser);
+      document.dispatchEvent(new CustomEvent('auth_status_change'));
+    };
+
+    loadUser(); // kick off — ready resolves when done
+
+    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
+  })();
+
+The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
+This guarantees auth state is known before any page renders.
+
+═══════════════════════════════════════════════════════
+RULE 4 — ROUTER NAVIGATION PATHS
+═══════════════════════════════════════════════════════
+router.navigate(path) sets window.location.hash = path.
+Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
+  ✓ router.navigate('/')          sets hash to #/
+  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
+
+Always use: router.navigate('/'), router.navigate('/login'), etc.
+Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
+
+═══════════════════════════════════════════════════════
+RULE 5 — NULL SAFETY ON NULLABLE FIELDS
+═══════════════════════════════════════════════════════
+The schema marks some columns nullable. Never call string/array methods on a field without guarding:
+  ✗ item.description.substring(0, 100)   — crashes if description is null
+  ✓ (item.description ?? '').substring(0, 100)
+  ✓ item.description?.substring(0, 100) ?? ''
+
+Apply this to every nullable column accessed in templates or JS logic.
+
+═══════════════════════════════════════════════════════
+RULE 6 — LOADING STATES
+═══════════════════════════════════════════════════════
+Every async render function must show a loading indicator before the fetch,
+then replace it with real content (or an error) when the fetch completes:
+  const renderSection = async () => {
+    const el = document.getElementById('section-id');
+    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
+    try {
+      const data = await api.get('table');
+      el.innerHTML = /* real content */;
+    } catch (e) {
+      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
+    }
+  };
+
+═══════════════════════════════════════════════════════
+RULE 7 — RESPONSIVE NAVIGATION
+═══════════════════════════════════════════════════════
+Always include a hamburger button for mobile. Pattern:
+  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
+  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
+    ...links...
+  </nav>
+Wire it in the inline bootstrap:
+  document.getElementById('nav-toggle').addEventListener('click', () => {
+    document.getElementById('nav-menu').classList.toggle('hidden');
+  });
+
+═══════════════════════════════════════════════════════
+STRUCTURE
+═══════════════════════════════════════════════════════
+Feature-Based Structure:
     index.html                         ← SPA entry point
     core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
     core/api.js                        ← SupaBein fetch client
-    core/router.js                     ← client-side hash router
-    features/auth/auth.js              ← login, signup, logout, current-user state
-    features/<feature>/<feature>.js    ← one subfolder per app feature (posts, todos, dashboard, etc.)
-  Every feature folder contains everything that feature needs — render function, event wiring, API calls.
-  Do NOT cram everything into one file.
+    core/router.js                     ← router API only (no defineRoute calls)
+    features/auth/auth.js              ← login, signup, logout, ready promise
+    features/<feature>/<feature>.js    ← one subfolder per app feature
+Every feature folder contains everything that feature needs. Do NOT cram everything into one file.
 
-Frontend rules — STYLING:
-- Use Tailwind CSS loaded from CDN. Add this to <head> in index.html:
+═══════════════════════════════════════════════════════
+STYLING
+═══════════════════════════════════════════════════════
+- Tailwind CSS via CDN. Add to <head> in index.html:
     <script src="https://cdn.tailwindcss.com"></script>
     <script>tailwind.config = { darkMode: 'class' }</script>
-- Add class="dark" to <html> so dark-mode utilities apply by default.
-- Do NOT write a separate CSS file. Use Tailwind utility classes exclusively.
-- Colour palette (use these Tailwind classes consistently):
-    Background:  bg-gray-950 (page)  bg-gray-900 (cards/panels)
-    Accent:      bg-emerald-500 / text-emerald-400 / border-emerald-500
-    Text:        text-gray-100 (primary)  text-gray-400 (muted)
-    Danger:      text-red-400 / bg-red-500
-    Border:      border-gray-700 / border-gray-800
-- Buttons: rounded-lg px-4 py-2 font-medium transition. Primary = bg-emerald-500 hover:bg-emerald-600 text-white. Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
-- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full focus:outline-none focus:ring-2 focus:ring-emerald-500
+- Add class="dark" to <html>. Do NOT write a separate CSS file.
+- Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
+  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger)
+- Buttons: rounded-lg px-4 py-2 font-medium transition.
+  Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
+  Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
+- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
+  focus:outline-none focus:ring-2 focus:ring-emerald-500
 
-Frontend rules — JAVASCRIPT:
-- Declare these placeholders ONLY in core/config.js (substituted at deploy time):
+═══════════════════════════════════════════════════════
+JAVASCRIPT
+═══════════════════════════════════════════════════════
+- Placeholders ONLY in core/config.js (substituted at deploy time):
     const SB_URL = '__SB_URL__';
     const SB_KEY = '__SB_ANON_KEY__';
     const SB_PID = '__SB_PID__';
   Do NOT redeclare them anywhere else — they are globals.
-- SupaBein API URL patterns (use these exactly — do NOT invent other formats):
+- API URL patterns (exact — do NOT invent other formats):
     Data list/create:        ${SB_URL}/data/${SB_PID}/${tableName}
     Data get/update/delete:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
     Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
     Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
-    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET  Authorization: Bearer {token}
-    Store the JWT in localStorage as "sb:token". Send it as Authorization: Bearer {token}.
-    If the user is not logged in, send the anon key instead.
-- index.html must load scripts with RELATIVE paths in dependency order (e.g. <script src="core/config.js"></script>).
-  NOT <script src="/core/config.js"> — absolute paths break the site.
-- Vanilla JS only — no frameworks, no npm, no build tools. Use plain <script> tags; share state via globals or IIFEs.
+    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
+    Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
+    If not logged in, send the anon key instead.
+- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
+- Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
 - The app must be fully functional — real fetch calls, real CRUD, real auth flows.
-
-Access control guidelines:
-- anon role: SELECT=true only on genuinely public tables; all else false
-- authenticated role: SELECT/INSERT/UPDATE/DELETE=true on tables the user owns or can interact with
-- If the app has user-generated content, ensure policies enforce ownership where appropriate
-- When a table has a column like "user_id" with constraint_sql "user_id = :current_user_id":
-    The INSERT frontend code MUST include that column in the POST body by decoding the JWT:
-      const payload = JSON.parse(atob(token.split('.')[1]));
-      body.user_id = parseInt(payload.sub, 10);
-    (The backend also enforces this via constraint injection, but the frontend must send it
-    so the NOT NULL constraint is satisfied even in strict DB modes.)
-
-Always include at least one table. Generate all tables the described app needs.
+- When a table has user_id with ownership constraint, decode JWT in INSERT:
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    body.user_id = parseInt(payload.sub, 10);
 PROMPT;
 
 const AI_EDIT_SYSTEM_PROMPT = <<<'PROMPT'
@@ -468,6 +559,38 @@ function ai_validate_plan(array $plan): ?string
         }
     }
     return null;
+}
+
+// ─── Schema serializer for two-pass generation ───────────────────────────────
+
+/**
+ * Convert a validated plan's tables into a human-readable schema string
+ * that is injected into the frontend prompt so the AI sees exact column names.
+ */
+function ai_schema_to_context(array $plan): string
+{
+    $lines = [];
+    foreach ($plan['tables'] as $tbl) {
+        $colParts = [];
+        foreach ($tbl['columns'] as $col) {
+            $part = $col['name'] . ' ' . $col['type'];
+            $part .= ($col['nullable'] ?? true) ? ' NULL' : ' NOT NULL';
+            if (($col['default'] ?? null) !== null) {
+                $part .= ' DEFAULT ' . $col['default'];
+            }
+            $colParts[] = $part;
+        }
+        $lines[] = 'Table "' . $tbl['name'] . '": id (INT auto), '
+                 . implode(', ', $colParts) . ', created_at (TIMESTAMP auto)';
+
+        foreach ($tbl['policies'] ?? [] as $pol) {
+            if ($pol['allowed']) {
+                $constraint = $pol['constraint_sql'] ? ' WHERE ' . $pol['constraint_sql'] : '';
+                $lines[] = '  policy: ' . $pol['api_role'] . ' ' . strtoupper($pol['operation']) . $constraint;
+            }
+        }
+    }
+    return implode("\n", $lines);
 }
 
 // ─── Execution helpers ───────────────────────────────────────────────────────
@@ -828,28 +951,50 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(422, 'prompt is required and must be under 2000 characters');
         }
 
-        // ── 2. Call AI ───────────────────────────────────────────────────────
+        // ── 2. Call AI (two passes) ──────────────────────────────────────────
         $provider = $req['body']['provider'] ?? null;
         $model    = $req['body']['model']    ?? null;
-        sb_log('ai_build', 'Calling AI', ['user_id' => $userId, 'provider' => $provider, 'model' => $model]);
+        sb_log('ai_build', 'Calling AI (pass 1: schema)', ['user_id' => $userId, 'provider' => $provider, 'model' => $model]);
         $gemini = make_ai_client($config, $provider, $model);
 
+        // Pass 1 — schema only
         try {
-            $plan = $gemini->generateJson(AI_BUILD_SYSTEM_PROMPT, $prompt);
+            $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $prompt);
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
-            sb_log('ai_build', 'AI error: ' . $msg, ['user_id' => $userId]);
+            sb_log('ai_build', 'AI error (pass 1): ' . $msg, ['user_id' => $userId]);
             if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
             abort(502, 'AI generation failed: ' . $msg);
         }
 
-        // ── 3. Validate plan ──────────────────────────────────────────────────
-        $plan = ai_sanitize_plan($plan);
-        $validationError = ai_validate_plan($plan);
+        // ── 3. Validate schema ────────────────────────────────────────────────
+        $schemaPlan['frontend'] = ['files' => []];
+        $schemaPlan = ai_sanitize_plan($schemaPlan);
+        $validationError = ai_validate_plan($schemaPlan);
         if ($validationError) {
-            sb_log('ai_build', 'Plan validation failed: ' . $validationError, ['plan_keys' => array_keys($plan)]);
-            abort(422, 'AI returned an invalid plan: ' . $validationError);
+            sb_log('ai_build', 'Schema validation failed: ' . $validationError, ['plan_keys' => array_keys($schemaPlan)]);
+            abort(422, 'AI returned an invalid schema: ' . $validationError);
         }
+
+        // Pass 2 — frontend with exact (post-sanitize) column names
+        sb_log('ai_build', 'Calling AI (pass 2: frontend)', ['user_id' => $userId]);
+        $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                     . ai_schema_to_context($schemaPlan);
+        try {
+            $frontendResult = $gemini->generateJson(AI_BUILD_FRONTEND_PROMPT, $frontendMsg);
+        } catch (\RuntimeException $e) {
+            $msg = $e->getMessage();
+            sb_log('ai_build', 'AI error (pass 2): ' . $msg, ['user_id' => $userId]);
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI frontend generation failed: ' . $msg);
+        }
+
+        $plan = $schemaPlan;
+        $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+        foreach ($plan['frontend']['files'] as &$file) {
+            $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+        }
+        unset($file);
 
         // ── 4-7. Execute build ────────────────────────────────────────────────
         $result = ai_execute_build($plan, $userId);
@@ -1028,13 +1173,27 @@ CHAT;
 
         try {
             if ($mode === 'build') {
-                $plan = $gemini->generateJsonWithHistory(AI_BUILD_SYSTEM_PROMPT, $history, $prompt);
-                $plan = ai_sanitize_plan($plan);
+                // Pass 1 — schema only (uses conversation history for context)
+                $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $prompt);
+                $schemaPlan['frontend'] = ['files' => []];
+                $schemaPlan = ai_sanitize_plan($schemaPlan);
 
-                $validationError = ai_validate_plan($plan);
+                $validationError = ai_validate_plan($schemaPlan);
                 if ($validationError) {
-                    abort(422, 'AI returned an invalid plan: ' . $validationError);
+                    abort(422, 'AI returned an invalid schema: ' . $validationError);
                 }
+
+                // Pass 2 — frontend with exact (post-sanitize) column names
+                $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                             . ai_schema_to_context($schemaPlan);
+                $frontendResult = $gemini->generateJson(AI_BUILD_FRONTEND_PROMPT, $frontendMsg);
+
+                $plan = $schemaPlan;
+                $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+                foreach ($plan['frontend']['files'] as &$file) {
+                    $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+                }
+                unset($file);
 
                 $summary = [
                     'project_name'   => $plan['project_name'],
