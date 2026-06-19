@@ -675,15 +675,22 @@ function register_ai_routes(\SupaBein\Router $router): void
             $history[] = ['role' => $role, 'text' => $text];
         }
 
-        // ── Detect conversational messages (greetings, questions, small talk) ──
-        $buildKeywords = '/\b(app|application|website|site|build|create|make|project|blog|store|shop|todo|task|track|system|tool|dashboard|tracker|manager|platform|api|database)\b/i';
-        $isChat = (
-            // Pure greeting / acknowledgement
+        // ── Detect explicit build/create requests ────────────────────────────
+        $isBuildRequest = (bool)preg_match(
+            '/\b(build|create|make)\b.{0,40}\b(app|application|website|site|system|tool|platform|dashboard|blog|store|shop|api)\b/i',
+            $prompt
+        ) || (bool)preg_match('/\bi (want|need) (a |an |to build|to create|to make)/i', $prompt);
+
+        // ── Detect conversational / info-seeking messages ─────────────────────
+        $isChat = !$isBuildRequest && (
+            // Pure greeting or acknowledgement
             preg_match('/^(hi|hello|hey|yo|sup|howdy|hiya|thanks|thank\s+you|ok|okay|sure|cool|great|nice|perfect|lol|haha)[\s!.,?]*$/i', $prompt)
-            // Short message with no project-building intent
-            || (mb_strlen($prompt) < 30 && !preg_match($buildKeywords, $prompt))
-            // Question that doesn't ask to build something
-            || (mb_strlen($prompt) < 100 && str_ends_with($prompt, '?') && !preg_match('/\b(build|create|make|add|i want|i need)\b/i', $prompt))
+            // Starts with an info-seeking opener
+            || preg_match('/^(what|how (many|do|does|can|should|is)|why|can you|could you|tell me|explain|describe|give me|show me|list (my|the|all)?|do i|does (this|my|the)|is there|are there|which|when|where)\b/i', $prompt)
+            // Any question mark
+            || str_ends_with(rtrim($prompt), '?')
+            // Short message with no build-intent keywords
+            || (mb_strlen($prompt) < 30 && !preg_match('/\b(app|application|website|site|build|create|make|blog|store|shop|todo|task|system|tool|dashboard|tracker|manager|platform|api|database)\b/i', $prompt))
         );
 
         // Auto-detect mode
@@ -701,15 +708,55 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
 
-        // Handle chat mode before the main try block
+        // ── Handle chat / info mode ───────────────────────────────────────────
         if ($isChat) {
-            $chatPrompt = <<<'CHAT'
-You are SupaBein AI, a friendly assistant for building full-stack web apps on SupaBein (a PHP+MySQL BaaS platform).
-The user sent a conversational message. Reply helpfully and briefly. If they greet you, greet back and invite them to describe an app to build.
-Return ONLY valid JSON: {"message": "your reply here"}
+            // Build project schema context when a project is selected
+            $projectContext = '';
+            if ($projectId) {
+                $proj = $catalog->getProjectById($projectId, $userId);
+                if ($proj) {
+                    $schemaLines = [];
+                    foreach ($catalog->listTables($projectId) as $tbl) {
+                        $cols = array_map(
+                            fn($c) => $c['name'] . ' (' . $c['type'] . ')',
+                            $catalog->listColumns($tbl['id'])
+                        );
+                        $policies    = $catalog->listPolicies($tbl['id']);
+                        $policyStrs  = array_map(
+                            fn($p) => $p['api_role'] . '.' . strtolower($p['operation']) . '=' . ($p['allowed'] ? 'allow' : 'deny'),
+                            $policies
+                        );
+                        $schemaLines[] = '  ' . $tbl['logical_name']
+                            . ': id, ' . implode(', ', $cols) . ', created_at'
+                            . ($policyStrs ? ' [policies: ' . implode(', ', $policyStrs) . ']' : '');
+                    }
+                    $tableCount     = count($schemaLines);
+                    $projectContext = "\n\nCurrent project: \"" . $proj['name'] . "\"\nTables (" . $tableCount . "):\n"
+                        . ($schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)');
+                }
+            }
+
+            $chatSystemPrompt = <<<'CHAT'
+You are SupaBein AI, a knowledgeable assistant for SupaBein — a self-hosted PHP+MySQL BaaS platform.
+
+Platform capabilities:
+- Auto-generates REST CRUD APIs from table schemas at /v1/data/{table}
+- JWT authentication: /v1/auth/signup, /v1/auth/login, /v1/auth/me, /v1/auth/logout
+- Row-level access policies per table and role (user/anon) with optional constraint_sql (use :current_user_id, NOT auth.uid())
+- Static frontend hosting with per-project subdomain routing
+- AI panel: natural language → schema + frontend code generation
+- Tables always have auto-managed `id` (INT auto-increment) and `created_at` (DATETIME) columns
+
+If asked about the current project (tables, columns, policies, counts), use the provided project context to answer accurately.
+Reply concisely and helpfully. Return ONLY valid JSON: {"message": "your reply"}
 CHAT;
+
+            $userQuestion = $projectContext
+                ? trim($projectContext) . "\n\nQuestion: " . $prompt
+                : $prompt;
+
             try {
-                $res = $gemini->generateJsonWithHistory($chatPrompt, $history, $prompt);
+                $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
             } catch (\RuntimeException $e) {
                 $msg = $e->getMessage();
                 if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
@@ -717,7 +764,7 @@ CHAT;
             }
             json_out([
                 'mode'    => 'chat',
-                'message' => $res['message'] ?? 'Hi! Describe the app you want to build and I\'ll set up everything.',
+                'message' => $res['message'] ?? 'Hi! How can I help you?',
                 'usage'   => $gemini->getLastUsage(),
             ]);
         }
