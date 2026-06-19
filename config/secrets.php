@@ -26,4 +26,7 @@ return [
 
     // CORS allowed origin (* for dev)
     'CORS_ORIGIN' => '*',
+
+    // Gemini AI — get a key at https://aistudio.google.com/app/apikey
+    'GEMINI_API_KEY' => '',
 ];
