@@ -1042,13 +1042,26 @@ const AiPanel = (() => {
     if (picker.value === '' && current) picker.value = '';
   }
 
-  function switchSession(id) {
+  async function loadSessionMessages(id) {
+    if (!id) return;
+    try {
+      const full = await Api.get('/v1/ai/sessions/' + id);
+      if (full && Array.isArray(full.messages)) {
+        const idx = sessions.findIndex(s => s.id === id);
+        if (idx !== -1) sessions[idx].messages = full.messages;
+      }
+    } catch(e) {}
+  }
+
+  async function switchSession(id) {
     currentSessionId = id;
     const sess = getSession(id);
     if (sess) selectedProjectId = sess.projectId;
     renderSidebar();
     renderMessages();
     renderProjectPicker();
+    await loadSessionMessages(id);
+    renderMessages();
   }
 
   async function newSession() {
@@ -1161,10 +1174,6 @@ const AiPanel = (() => {
       textarea.style.height = 'auto';
       textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
     });
-    textarea.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-    });
-
     const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '✦');
 
     const inputBar = el('div', { class: 'ai-input-bar' },
@@ -1220,6 +1229,9 @@ const AiPanel = (() => {
     renderSidebar();
     renderMessages();
     renderProjectPicker();
+
+    await loadSessionMessages(currentSessionId);
+    renderMessages();
 
     panelEl.classList.add('ai-panel-open');
 

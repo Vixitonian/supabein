@@ -750,6 +750,15 @@ PROMPT;
         json_out($catalog->createAiSession($userId, $name ?: 'New session', $projectId), 201);
     }, ['auth_middleware']);
 
+    $router->get('/v1/ai/sessions/{id}', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $sessionId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $sess = $catalog->getAiSession($sessionId, $userId);
+        if (!$sess) abort(404, 'Session not found');
+        json_out($sess);
+    }, ['auth_middleware']);
+
     $router->patch('/v1/ai/sessions/{id}', function (array $req): void {
         $userId    = (int)$req['auth']['user_id'];
         $sessionId = (int)$req['params']['id'];
