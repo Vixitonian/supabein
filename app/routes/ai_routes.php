@@ -588,8 +588,10 @@ function register_ai_routes(\SupaBein\Router $router): void
         try {
             $plan = $gemini->generateJson(AI_BUILD_SYSTEM_PROMPT, $prompt);
         } catch (\RuntimeException $e) {
-            sb_log('ai_build', 'Gemini error: ' . $e->getMessage(), ['user_id' => $userId]);
-            abort(502, 'AI generation failed: ' . $e->getMessage());
+            $msg = $e->getMessage();
+            sb_log('ai_build', 'AI error: ' . $msg, ['user_id' => $userId]);
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
         }
 
         // ── 3. Validate plan ──────────────────────────────────────────────────
@@ -637,7 +639,9 @@ function register_ai_routes(\SupaBein\Router $router): void
         try {
             $delta = $gemini->generateJson(AI_EDIT_SYSTEM_PROMPT, $userMessage);
         } catch (\RuntimeException $e) {
-            abort(502, 'AI generation failed: ' . $e->getMessage());
+            $msg = $e->getMessage();
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
         }
 
         $result = ai_execute_edit($delta, $projectId, $userId);
@@ -701,7 +705,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                     'frontend_files' => count($plan['frontend']['files'] ?? []),
                 ];
 
-                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary]);
+                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
 
             } elseif ($mode === 'edit') {
                 $project = $catalog->getProjectById($projectId, $userId);
@@ -726,7 +730,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                 // flatten add_columns
                 $summary['add_columns'] = array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? []));
 
-                json_out(['mode' => 'edit', 'plan' => array_merge($delta, ['project_id' => $projectId]), 'summary' => $summary]);
+                json_out(['mode' => 'edit', 'plan' => array_merge($delta, ['project_id' => $projectId]), 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
 
             } else { // diagnose
                 $project = $catalog->getProjectById($projectId, $userId);
@@ -757,10 +761,13 @@ PROMPT;
                     'mode'        => 'diagnose',
                     'diagnosis'   => $result['diagnosis'] ?? '',
                     'suggestions' => $result['suggestions'] ?? [],
+                    'usage'       => $gemini->getLastUsage(),
                 ]);
             }
         } catch (\RuntimeException $e) {
-            abort(502, 'AI generation failed: ' . $e->getMessage());
+            $msg = $e->getMessage();
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
         }
 
     }, ['auth_middleware']);

@@ -8,10 +8,17 @@ class GeminiClient
 {
     private const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent';
 
+    private array $lastUsage = [];
+
     public function __construct(
         private string $apiKey,
         private string $model = 'gemini-2.5-flash'
     ) {}
+
+    public function getLastUsage(): array
+    {
+        return $this->lastUsage;
+    }
 
     /**
      * Send a single-turn prompt and return parsed JSON.
@@ -75,6 +82,13 @@ class GeminiClient
 
         $envelope = json_decode($response, true);
         $text     = $envelope['candidates'][0]['content']['parts'][0]['text'] ?? null;
+
+        $meta = $envelope['usageMetadata'] ?? [];
+        $this->lastUsage = [
+            'prompt_tokens'     => (int)($meta['promptTokenCount'] ?? 0),
+            'completion_tokens' => (int)($meta['candidatesTokenCount'] ?? 0),
+            'total_tokens'      => (int)($meta['totalTokenCount'] ?? 0),
+        ];
 
         if ($text === null) {
             throw new \RuntimeException('Gemini returned no content in response');

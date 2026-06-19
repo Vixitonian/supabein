@@ -8,10 +8,17 @@ class OpenRouterClient
 {
     private const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
+    private array $lastUsage = [];
+
     public function __construct(
         private string $apiKey,
         private string $model = 'google/gemini-2.5-flash'
     ) {}
+
+    public function getLastUsage(): array
+    {
+        return $this->lastUsage;
+    }
 
     public function generateJson(string $systemPrompt, string $userPrompt): array
     {
@@ -80,6 +87,13 @@ class OpenRouterClient
 
         $envelope = json_decode($response, true);
         $text     = $envelope['choices'][0]['message']['content'] ?? null;
+
+        $raw = $envelope['usage'] ?? [];
+        $this->lastUsage = [
+            'prompt_tokens'     => (int)($raw['prompt_tokens'] ?? 0),
+            'completion_tokens' => (int)($raw['completion_tokens'] ?? 0),
+            'total_tokens'      => (int)($raw['total_tokens'] ?? 0),
+        ];
 
         if ($text === null) {
             throw new \RuntimeException('OpenRouter returned no content in response');
