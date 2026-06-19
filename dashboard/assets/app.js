@@ -129,6 +129,7 @@ function fmtDate(d) {
   return d ? new Date(d).toLocaleString() : '—';
 }
 
+
 function downloadText(filename, content) {
   const blob = new Blob([content], { type: 'text/plain' });
   const url  = URL.createObjectURL(blob);
@@ -1054,6 +1055,48 @@ const AiPanel = (() => {
         lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
           el('strong', {}, 'Frontend: '), summary.frontend_files + ' files'
         ));
+      }
+
+      // Collapsible schema detail
+      if (plan && plan.tables && plan.tables.length) {
+        const schemaDetails = el('details', { class: 'ai-plan-details' },
+          el('summary', { class: 'ai-plan-details-summary' }, 'Schema'),
+          ...plan.tables.map(t =>
+            el('div', { class: 'ai-plan-details-table' },
+              el('div', { class: 'ai-plan-details-tname' }, t.name),
+              ...(t.columns || []).map(c =>
+                el('div', { class: 'ai-plan-details-col' },
+                  el('span', { class: 'ai-plan-details-colname' }, c.name),
+                  el('span', { class: 'ai-plan-details-coltype' }, c.type),
+                  el('span', { class: 'ai-plan-details-colnull' + (c.nullable ? ' muted' : '') },
+                    c.nullable ? 'NULL' : 'NOT NULL'
+                  )
+                )
+              )
+            )
+          )
+        );
+        lines.push(schemaDetails);
+      }
+
+      // Collapsible file list
+      if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+        const filesDetails = el('details', { class: 'ai-plan-details' },
+          el('summary', { class: 'ai-plan-details-summary' }, 'Files'),
+          ...plan.frontend.files.map(f =>
+            el('div', { class: 'ai-plan-details-file' }, f.path)
+          )
+        );
+        lines.push(filesDetails);
+      }
+
+      // Download plan JSON button
+      if (plan) {
+        const dlBtn = el('button', { class: 'ai-plan-dl-btn', onClick: () => {
+          const name = (plan.subdomain || plan.project_name || 'plan').replace(/\s+/g, '-').toLowerCase();
+          downloadText(name + '.json', JSON.stringify(plan, null, 2));
+        }}, '↓ Download JSON');
+        lines.push(dlBtn);
       }
     } else if (mode === 'edit') {
       const hasChanges = (summary.add_tables && summary.add_tables.length) ||
