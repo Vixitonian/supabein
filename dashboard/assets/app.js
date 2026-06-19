@@ -1562,8 +1562,8 @@ async function loadUsersPane(projectId, container) {
       : users.map(u =>
           el('tr', {},
             el('td', {}, u.email),
-            el('td', {}, u.id),
-            el('td', {}, u.created_at),
+            el('td', {}, String(u.id)),
+            el('td', {}, String(u.created_at ?? '')),
             el('td', {}, el('button', { class: 'btn btn-sm btn-danger', onClick: () => deleteUser(u.id) }, 'Delete'))
           )
         );
