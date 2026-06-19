@@ -80,18 +80,19 @@ Frontend rules:
     const SB_PID = '__SB_PID__';
   Do NOT redeclare SB_URL/SB_KEY/SB_PID in any other file — they are globals from auth.js.
 - SupaBein API URL patterns (build your fetch calls using these — do NOT invent other formats):
-    Data list/create:  ${SB_URL}/v1/data/${SB_PID}/${tableName}
-    Data get/update/delete by id:  ${SB_URL}/v1/data/${SB_PID}/${tableName}/${id}
-    Auth signup:  ${SB_URL}/v1/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
-    Auth login:   ${SB_URL}/v1/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
-    Auth me:      ${SB_URL}/v1/projects/${SB_PID}/auth/me      → GET  Authorization: Bearer {token}
+    Data list/create:  ${SB_URL}/data/${SB_PID}/${tableName}
+    Data get/update/delete by id:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
+    Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
+    Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
+    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET  Authorization: Bearer {token}
     The token returned by login/signup is a JWT — store in localStorage as "sb:token".
     To authenticate data requests: send header  Authorization: Bearer {token}  (use anon key if not logged in).
 - index.html must load all JS and CSS files with RELATIVE paths (no leading slash):
     <link rel="stylesheet" href="css/style.css">     ← correct
     <script src="js/auth.js"></script>               ← correct
     NOT <script src="/js/auth.js">                   ← wrong — absolute paths break the site
-- Use vanilla JS only — no frameworks, no npm, no build tools
+- Use vanilla JS only — no frameworks, no npm, no build tools, no ES module import/export syntax
+  Scripts are loaded as plain <script> tags in order; use the global scope, not import/export
 - Use a dark theme with CSS variables: --bg: #0f1117; --surface: #1a1d27; --accent: #3ecf8e; --text: #e2e8f0; --muted: #8892a4; --danger: #ef4444; --border: #2d3045;
 - The app must be fully functional — real fetch calls, real CRUD, real auth flows
 
