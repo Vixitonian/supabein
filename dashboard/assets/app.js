@@ -382,18 +382,27 @@ The data API allows **600 requests per minute per project**. Excess requests get
 
 ## Deploying the Frontend
 
-### Option A — Zip upload
+> **Staging-first rule (mandatory):** Every deploy lands in **staging** first — never directly live.
+> Do NOT publish to live unless the user explicitly says so (e.g. "go live", "publish", "push to production").
+> Staging URL: \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/staging/\`
+> Live URL:    \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/current/\`
+
+### Step 1 — Upload to staging
+
+#### Option A — Zip upload
 > **Zip structure**: files must be at the **root** of the zip, not inside a subfolder.
 > ✓ correct: \`cd dist && zip -r ../deploy.zip .\`
 > ✗ wrong: \`zip -r deploy.zip dist/\` — creates a \`dist/\` subfolder inside the zip and the site will 404.
 
 \`\`\`bash
 cd dist && zip -r ../deploy.zip . && cd ..
-curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "zipfile=@./deploy.zip" -F "label=v1.0.0"
+DEPLOY=$(curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "zipfile=@./deploy.zip" -F "label=v1.0.0")
+DEPLOY_ID=$(echo $DEPLOY | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+echo "Staged at: ${siteUrl}/sites/s$SUPABEIN_SITE_ID/staging/"
 \`\`\`
 
-### Option B — File by file (CI/CD)
+#### Option B — File by file (CI/CD)
 \`\`\`bash
 DID=$(curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/open" \\
   -H "Authorization: Bearer $SUPABEIN_TOKEN" -H "Content-Type: application/json" \\
@@ -405,11 +414,17 @@ find dist -type f | while read f; do
     -H "Authorization: Bearer $SUPABEIN_TOKEN" --data-binary "@$f"
 done
 
+# Finalize moves to staging — not live yet
 curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/finalize" \\
   -H "Authorization: Bearer $SUPABEIN_TOKEN"
 \`\`\`
 
-Live site: \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/current/\`
+### Step 2 — Publish to live (only when explicitly told)
+
+\`\`\`bash
+curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DEPLOY_ID/publish" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+\`\`\`
 
 ---
 
@@ -449,6 +464,7 @@ async function sbInsert(table, data) {
 - Always create tables before inserting data.
 - Always set policies on new tables — the default is deny all.
 - Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
+- **Always deploy to staging first. Never publish to live unless the user explicitly instructs it** (e.g. "go live", "publish", "push to production"). Staging is safe to overwrite at any time.
 - The anon key is safe for frontend bundles. The PAT and service key must never be in frontend code.
 - Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
 - **Two auth tiers**: use \`/v1/projects/:id/auth/*\` for your app's end-users (project-scoped);
