@@ -513,6 +513,46 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
     ];
 }
 
+// ─── Frontend file reader ────────────────────────────────────────────────────
+
+function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId): string
+{
+    $sites = $catalog->listSites($projectId);
+    if (empty($sites)) return '';
+
+    $site = $sites[0];
+    if (!($site['current_deploy_id'] ?? null)) return '';
+
+    $sitesPath  = rtrim($config['SITES_PATH'], '/');
+    $currentDir = $sitesPath . '/s' . $site['id'] . '/current';
+    if (!is_dir($currentDir)) return '';
+
+    $textExts   = ['html', 'css', 'js', 'json'];
+    $maxTotal   = 40000;
+    $totalBytes = 0;
+    $fileLines  = [];
+
+    $iterator = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($currentDir, \RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+
+    foreach ($iterator as $file) {
+        if (!$file->isFile()) continue;
+        if (!in_array(strtolower($file->getExtension()), $textExts, true)) continue;
+        $relPath = ltrim(substr($file->getPathname(), strlen($currentDir)), '/');
+        $size    = $file->getSize();
+        if ($totalBytes + $size > $maxTotal) {
+            $fileLines[] = "--- $relPath (too large, skipped) ---";
+            continue;
+        }
+        $fileLines[]  = "--- $relPath ---\n" . file_get_contents($file->getPathname());
+        $totalBytes  += $size;
+    }
+
+    if (empty($fileLines)) return '';
+    return "\n\nFrontend files (current deploy):\n" . implode("\n\n", $fileLines);
+}
+
 // ─── AI provider factory ─────────────────────────────────────────────────────
 
 const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter'];
@@ -737,8 +777,10 @@ function register_ai_routes(\SupaBein\Router $router): void
                             . ($policyStrs ? ' [policies: ' . implode(', ', $policyStrs) . ']' : '');
                     }
                     $tableCount     = count($schemaLines);
+                    $frontendFiles  = ai_read_frontend_files($config, $catalog, $projectId);
                     $projectContext = "\n\nSelected project: \"" . $proj['name'] . "\"\nTables (" . $tableCount . "):\n"
-                        . ($schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)');
+                        . ($schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)')
+                        . $frontendFiles;
                 }
             }
 
@@ -753,7 +795,8 @@ Platform capabilities:
 - AI panel: natural language → schema + frontend code generation
 - Tables always have auto-managed `id` (INT auto-increment) and `created_at` (DATETIME) columns
 
-If asked about the current project (tables, columns, policies, counts), use the provided project context to answer accurately.
+If asked about the current project (tables, columns, policies, counts, or frontend code), use the provided project context to answer accurately.
+If frontend files are provided, you can read, explain, and suggest edits to them.
 Reply concisely and helpfully. Return ONLY valid JSON: {"message": "your reply"}
 CHAT;
 
@@ -829,8 +872,9 @@ CHAT;
                 }
                 $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
 
-                $apiBase = rtrim($config['API_BASE_URL'], '/') . '/v1';
-                $context = "Project: " . $project['name'] . "\nAPI base: " . $apiBase . "\nSchema:\n" . $schemaContext . "\n\nIssue: " . $prompt;
+                $apiBase       = rtrim($config['API_BASE_URL'], '/') . '/v1';
+                $frontendFiles = ai_read_frontend_files($config, $catalog, $projectId);
+                $context = "Project: " . $project['name'] . "\nAPI base: " . $apiBase . "\nSchema:\n" . $schemaContext . $frontendFiles . "\n\nIssue: " . $prompt;
 
                 $diagnosePrompt = <<<'PROMPT'
 You are a debugging assistant for SupaBein, a self-hosted PHP+MySQL BaaS.
