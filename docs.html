@@ -799,6 +799,7 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
 
 <!-- ── Sites ── -->
 <h2 id="sites-list">Sites &amp; Deploys</h2>
+<div class="callout" style="margin-bottom:24px"><strong>Staging-first rule:</strong> Every deploy (zip upload, file-by-file finalize) lands in <strong>staging</strong> — never directly live. Only call <a href="#deploy-publish">Publish to live</a> when explicitly instructed to do so. Staging is safe to overwrite at any time; <code>current/</code> is what end-users see.</div>
 
 <div class="endpoint">
   <div class="endpoint-head">
@@ -1016,10 +1017,10 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
   <div class="endpoint-head">
     <span class="method post">POST</span>
     <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/finalize</span>
-    <span class="desc">Finalize a pending deploy and go live</span>
+    <span class="desc">Finalize a pending deploy (moves to staging)</span>
   </div>
   <div class="endpoint-body">
-    <p>Writes the hardening <code>.htaccess</code>, copies the staging directory to <code>current/</code>, and marks the deploy <code>ready</code>. The site is immediately live after this call.</p>
+    <p>Writes the hardening <code>.htaccess</code>, moves files to the <strong>staging</strong> directory, and marks the deploy <code>ready</code>. The site is <strong>not live yet</strong> — call <a href="#deploy-publish">Publish to live</a> to promote it.</p>
     <div class="code-wrap"><pre class="code" id="c-finalize">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/7/finalize" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-finalize',this)">Copy</button></div>
