@@ -36,6 +36,8 @@ if ($fullPath !== $base && !str_starts_with($fullPath, $base . '/')) {
 }
 
 
+$ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
+
 // If file doesn't exist, try SPA fallback to index.html
 if (!file_exists($fullPath) || is_dir($fullPath)) {
     $pdo  = App::get('db');
