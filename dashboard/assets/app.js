@@ -782,6 +782,453 @@ function renderReset() {
   setApp(wrap);
 }
 
+// ─── AI Panel ────────────────────────────────────────────────────────────────
+
+const AiPanel = (() => {
+  let isOpen = false;
+  let sessions = [];
+  let currentSessionId = null;
+  let projects = [];
+  let selectedProjectId = null;
+  let panelEl = null;
+  let sidebarVisible = false;
+
+  function saveSessions() {
+    try { localStorage.setItem('sb_ai_sessions', JSON.stringify(sessions)); } catch(e) {}
+  }
+
+  function loadSessions() {
+    try { sessions = JSON.parse(localStorage.getItem('sb_ai_sessions') || '[]'); }
+    catch(e) { sessions = []; }
+  }
+
+  function getSession(id) { return sessions.find(s => s.id === id) || null; }
+  function currentSession() { return getSession(currentSessionId); }
+
+  function createSession(projectId) {
+    const id = 'sess_' + Date.now();
+    const sess = { id, name: 'New session', projectId: projectId || null, messages: [], createdAt: Date.now() };
+    sessions.unshift(sess);
+    saveSessions();
+    return sess;
+  }
+
+  function addMessage(sessionId, message) {
+    const sess = getSession(sessionId);
+    if (!sess) return;
+    sess.messages.push({ ...message, id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2) });
+    if (sess.name === 'New session' && message.role === 'user') {
+      sess.name = message.content.slice(0, 42) + (message.content.length > 42 ? '…' : '');
+    }
+    saveSessions();
+  }
+
+  async function loadProjects() {
+    try { projects = await Api.get('/v1/projects'); }
+    catch(e) { projects = []; }
+  }
+
+  function detectCurrentProject() {
+    const path = window.location.hash.replace('#', '') || '/';
+    const m = path.match(/^\/projects\/(\d+)/);
+    return m ? parseInt(m[1]) : null;
+  }
+
+  function renderSidebar() {
+    if (!panelEl) return;
+    const container = panelEl.querySelector('.ai-session-list');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!sessions.length) {
+      container.appendChild(el('div', { class: 'ai-session-empty' }, 'No sessions yet'));
+      return;
+    }
+    sessions.forEach(sess => {
+      const item = el('div', {
+        class: 'ai-session-item' + (sess.id === currentSessionId ? ' active' : ''),
+        onClick: () => {
+          switchSession(sess.id);
+          if (window.innerWidth < 768) toggleSidebar(false);
+        }
+      }, sess.name);
+      container.appendChild(item);
+    });
+  }
+
+  function renderMessages() {
+    if (!panelEl) return;
+    const container = panelEl.querySelector('.ai-messages');
+    if (!container) return;
+    container.innerHTML = '';
+    const sess = currentSession();
+    if (!sess || !sess.messages.length) {
+      container.appendChild(el('div', { class: 'ai-welcome' },
+        el('div', { class: 'ai-welcome-icon' }, '✦'),
+        el('p', {}, 'What do you want to do?'),
+        el('p', { class: 'text-muted', style: 'font-size:12px;margin-top:4px' },
+          'Build a new project, edit an existing one, or describe a problem.')
+      ));
+      return;
+    }
+    sess.messages.forEach(msg => container.appendChild(renderMessage(msg)));
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function renderMessage(msg) {
+    if (msg.role === 'user') {
+      return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
+    }
+    if (msg.type === 'thinking') {
+      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
+        el('span', { class: 'ai-thinking-dots' }, '● ● ●')
+      );
+    }
+    if (msg.type === 'plan') return renderPlanCard(msg);
+    if (msg.type === 'result') return renderResultCard(msg);
+    if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
+    if (msg.type === 'error') {
+      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ ' + msg.content);
+    }
+    return el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
+  }
+
+  function renderPlanCard(msg) {
+    const { plan, summary, mode } = msg.data;
+    const lines = [];
+
+    if (mode === 'build') {
+      lines.push(el('div', { class: 'ai-plan-row' }, el('strong', {}, 'Project: '), summary.project_name));
+      if (summary.tables && summary.tables.length) {
+        lines.push(el('div', { class: 'ai-plan-section' }, 'Tables'));
+        summary.tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
+      }
+      if (summary.frontend_files) {
+        lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
+          el('strong', {}, 'Frontend: '), summary.frontend_files + ' files'
+        ));
+      }
+    } else if (mode === 'edit') {
+      const hasChanges = (summary.add_tables && summary.add_tables.length) ||
+                         (summary.add_columns && summary.add_columns.length) ||
+                         (summary.update_policies && summary.update_policies.length);
+      if (!hasChanges) {
+        lines.push(el('div', { class: 'text-muted', style: 'font-size:13px' }, 'No changes needed for this request.'));
+      } else {
+        if (summary.add_tables && summary.add_tables.length) {
+          lines.push(el('div', { class: 'ai-plan-section' }, 'New tables'));
+          summary.add_tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
+        }
+        if (summary.add_columns && summary.add_columns.length) {
+          lines.push(el('div', { class: 'ai-plan-section' }, 'New columns'));
+          summary.add_columns.forEach(c => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + c)));
+        }
+        if (summary.update_policies && summary.update_policies.length) {
+          lines.push(el('div', { class: 'ai-plan-section' }, 'Policy changes'));
+          summary.update_policies.forEach(p => lines.push(el('div', { class: 'ai-plan-item' }, '~ ' + p)));
+        }
+      }
+    }
+
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' + (msg.settled ? ' ai-plan-settled' : '') },
+      el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
+      ...lines
+    );
+
+    if (!msg.settled) {
+      const actionsDiv = el('div', { class: 'ai-plan-actions' });
+
+      const cancelBtn = el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        msg.settled = true;
+        msg.cancelled = true;
+        saveSessions();
+        actionsDiv.innerHTML = '';
+        actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled'));
+        card.classList.add('ai-plan-settled');
+      }}, 'Cancel');
+
+      const applyBtn = el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+        msg.settled = true;
+        saveSessions();
+        actionsDiv.innerHTML = '';
+        actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Applying…'));
+        card.classList.add('ai-plan-settled');
+        await applyPlan(plan, mode);
+      }}, '✓ Apply');
+
+      actionsDiv.appendChild(cancelBtn);
+      actionsDiv.appendChild(applyBtn);
+      card.appendChild(actionsDiv);
+    } else if (msg.cancelled) {
+      card.appendChild(el('div', { class: 'ai-plan-actions' },
+        el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled')
+      ));
+    } else {
+      card.appendChild(el('div', { class: 'ai-plan-actions' },
+        el('span', { style: 'font-size:12px;color:var(--accent)' }, '✓ Applied')
+      ));
+    }
+
+    return card;
+  }
+
+  function renderResultCard(msg) {
+    const data = msg.data;
+    const lines = [];
+    if (data.project) lines.push(el('div', { class: 'ai-result-row' }, '✓ Project: ', el('strong', {}, data.project.name)));
+    if (data.tables && data.tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables: ' + data.tables.map(t => t.name || t).join(', ')));
+    if (data.added_tables && data.added_tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables added: ' + data.added_tables.join(', ')));
+    if (data.added_columns && data.added_columns.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Columns: ' + data.added_columns.join(', ')));
+    if (data.site) lines.push(el('div', { class: 'ai-result-row' }, '✓ Frontend deployed'));
+
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
+
+    if (data.project) {
+      card.appendChild(el('button', {
+        class: 'btn btn-primary btn-sm', style: 'margin-top:10px',
+        onClick: () => { close(); Router.navigate('/projects/' + data.project.id); }
+      }, 'Open Project →'));
+    }
+    return card;
+  }
+
+  function renderDiagnosisCard(msg) {
+    const data = msg.data;
+    const lines = [el('div', { class: 'ai-diagnosis-text' }, data.diagnosis)];
+    if (data.suggestions && data.suggestions.length) {
+      lines.push(el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, 'Suggestions'));
+      data.suggestions.forEach((s, i) =>
+        lines.push(el('div', { class: 'ai-plan-item' }, (i + 1) + '. ' + s))
+      );
+    }
+    return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
+  }
+
+  function renderProjectPicker() {
+    if (!panelEl) return;
+    const picker = panelEl.querySelector('#ai-project-picker');
+    if (!picker) return;
+    const current = picker.value;
+    picker.innerHTML = '';
+    picker.appendChild(el('option', { value: '' }, '✦ Platform'));
+    projects.forEach(p => picker.appendChild(el('option', { value: String(p.id) }, p.name)));
+    picker.value = selectedProjectId ? String(selectedProjectId) : '';
+    if (picker.value === '' && current) picker.value = '';
+  }
+
+  function switchSession(id) {
+    currentSessionId = id;
+    const sess = getSession(id);
+    if (sess) selectedProjectId = sess.projectId;
+    renderSidebar();
+    renderMessages();
+    renderProjectPicker();
+  }
+
+  function newSession() {
+    const sess = createSession(selectedProjectId);
+    currentSessionId = sess.id;
+    renderSidebar();
+    renderMessages();
+  }
+
+  function toggleSidebar(force) {
+    sidebarVisible = force !== undefined ? force : !sidebarVisible;
+    if (!panelEl) return;
+    const sidebar = panelEl.querySelector('.ai-sessions');
+    const overlay = panelEl.querySelector('.ai-sidebar-overlay');
+    if (sidebar) sidebar.classList.toggle('ai-sidebar-visible', sidebarVisible);
+    if (overlay) overlay.classList.toggle('ai-sidebar-overlay-visible', sidebarVisible);
+  }
+
+  async function sendMessage() {
+    if (!panelEl) return;
+    const textarea = panelEl.querySelector('#ai-textarea');
+    const prompt = textarea ? textarea.value.trim() : '';
+    if (!prompt) return;
+    if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; }
+
+    if (!currentSessionId || !getSession(currentSessionId)) {
+      const sess = createSession(selectedProjectId);
+      currentSessionId = sess.id;
+    } else {
+      const sess = currentSession();
+      if (sess) sess.projectId = selectedProjectId;
+      saveSessions();
+    }
+
+    addMessage(currentSessionId, { role: 'user', content: prompt });
+    renderSidebar();
+    renderMessages();
+
+    const thinkingId = 'thinking_' + Date.now();
+    const sess = currentSession();
+    if (sess) {
+      sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '' });
+    }
+    renderMessages();
+
+    try {
+      const body = { prompt };
+      if (selectedProjectId) body.project_id = selectedProjectId;
+      const response = await Api.post('/v1/ai/plan', body);
+
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+
+      if (response.mode === 'diagnose') {
+        addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
+      } else {
+        addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
+      }
+    } catch(e) {
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+    }
+
+    saveSessions();
+    renderSidebar();
+    renderMessages();
+  }
+
+  async function applyPlan(plan, mode) {
+    const sess = currentSession();
+    const thinkingId = 'apply_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '' });
+    renderMessages();
+
+    try {
+      const result = await Api.post('/v1/ai/apply', { mode, plan });
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+    } catch(e) {
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+    }
+
+    saveSessions();
+    renderMessages();
+  }
+
+  function buildPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'ai-panel';
+    panel.id = 'ai-panel';
+
+    const sidebarOverlay = el('div', { class: 'ai-sidebar-overlay', onClick: () => toggleSidebar(false) });
+
+    const sessionList = el('div', { class: 'ai-session-list' });
+    const newBtn = el('button', { class: 'btn btn-sm ai-new-btn', onClick: newSession }, '+ New');
+    const sidebar = el('div', { class: 'ai-sessions' },
+      el('div', { class: 'ai-sessions-header' }, newBtn),
+      sessionList
+    );
+
+    const messages = el('div', { class: 'ai-messages' });
+
+    const projectPicker = el('select', { id: 'ai-project-picker', class: 'ai-project-picker' });
+    projectPicker.addEventListener('change', () => {
+      selectedProjectId = projectPicker.value ? parseInt(projectPicker.value) : null;
+    });
+
+    const textarea = el('textarea', {
+      id: 'ai-textarea',
+      class: 'ai-textarea',
+      placeholder: 'Build, edit, or diagnose…'
+    });
+    textarea.setAttribute('rows', '1');
+    textarea.addEventListener('input', () => {
+      textarea.style.height = 'auto';
+      textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+    });
+    textarea.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    });
+
+    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '✦');
+
+    const inputBar = el('div', { class: 'ai-input-bar' },
+      el('div', { class: 'ai-picker-row' }, projectPicker),
+      el('div', { class: 'ai-input-row' }, textarea, sendBtn)
+    );
+
+    const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
+    const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
+    const header = el('div', { class: 'ai-header' },
+      hamburgerBtn,
+      el('span', { class: 'ai-header-title' }, '✦ SupaBein AI'),
+      closeBtn
+    );
+
+    const mainArea = el('div', { class: 'ai-main' }, header, messages, inputBar);
+
+    panel.appendChild(sidebarOverlay);
+    panel.appendChild(sidebar);
+    panel.appendChild(mainArea);
+
+    return panel;
+  }
+
+  async function open(options = {}) {
+    if (isOpen) return;
+    isOpen = true;
+
+    loadSessions();
+
+    if (!panelEl) {
+      panelEl = buildPanel();
+      document.body.appendChild(panelEl);
+    }
+
+    const autoProject = detectCurrentProject();
+    selectedProjectId = (options.projectId !== undefined) ? options.projectId : autoProject;
+
+    await loadProjects();
+    renderProjectPicker();
+
+    if (!currentSessionId || !getSession(currentSessionId)) {
+      if (sessions.length) {
+        currentSessionId = sessions[0].id;
+        const sess = getSession(currentSessionId);
+        if (sess) selectedProjectId = sess.projectId || selectedProjectId;
+      } else {
+        const sess = createSession(selectedProjectId);
+        currentSessionId = sess.id;
+      }
+    }
+
+    renderSidebar();
+    renderMessages();
+    renderProjectPicker();
+
+    panelEl.classList.add('ai-panel-open');
+
+    const fab = document.getElementById('ai-fab');
+    if (fab) fab.classList.add('ai-fab-hidden');
+
+    setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
+  }
+
+  function close() {
+    if (!panelEl) return;
+    panelEl.classList.remove('ai-panel-open');
+    isOpen = false;
+    sidebarVisible = false;
+    toggleSidebar(false);
+    const fab = document.getElementById('ai-fab');
+    if (fab) fab.classList.remove('ai-fab-hidden');
+  }
+
+  function toggle(options) {
+    if (isOpen) close(); else open(options);
+  }
+
+  return { open, close, toggle };
+})();
+
+function initAiFab() {
+  const fab = el('button', { class: 'ai-fab', id: 'ai-fab', onClick: () => AiPanel.toggle() }, '✦ AI');
+  document.body.appendChild(fab);
+}
+
 // Projects list
 async function renderProjects() {
   if (!requireAuth()) return;
@@ -795,7 +1242,7 @@ async function renderProjects() {
   ), el('div', { id: 'project-list' }, 'Loading...')]);
 
   document.getElementById('new-project').addEventListener('click', () => showNewProjectModal());
-  document.getElementById('ai-build').addEventListener('click', () => showAiBuildModal());
+  document.getElementById('ai-build').addEventListener('click', () => AiPanel.open());
 
   try {
     const projects = await Api.get('/v1/projects');
@@ -806,7 +1253,7 @@ async function renderProjects() {
       list.appendChild(el('div', { class: 'ai-empty-state' },
         el('p', { class: 'text-muted' }, 'No projects yet.'),
         el('div', { style: 'display:flex;gap:10px;justify-content:center;margin-top:16px' },
-          el('button', { class: 'btn btn-ai', onClick: () => showAiBuildModal() }, '✦ Build with AI'),
+          el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open() }, '✦ Build with AI'),
           el('button', { class: 'btn btn-secondary', onClick: () => showNewProjectModal() }, 'New Project')
         )
       ));
@@ -883,223 +1330,6 @@ function showNewProjectModal() {
   document.body.appendChild(modalEl);
 }
 
-function showAiBuildModal() {
-  const overlay = h(`
-    <div class="modal-overlay" id="ai-build-modal">
-      <div class="modal modal-ai">
-        <div class="modal-title">✦ Build with AI</div>
-        <div class="form-group">
-          <label>Describe your app</label>
-          <textarea id="ai-prompt" rows="4" placeholder="e.g. A blog with posts, comments and user authentication&#10;e.g. A task manager with projects, tasks and team members&#10;e.g. An e-commerce store with products, orders and reviews"></textarea>
-        </div>
-        <div class="ai-hint">Gemini will generate the project, tables, policies, and a complete frontend.</div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" id="ai-cancel">Cancel</button>
-          <button class="btn btn-ai" id="ai-submit">✦ Generate</button>
-        </div>
-      </div>
-    </div>
-  `);
-
-  const modalEl = overlay.firstElementChild;
-
-  modalEl.querySelector('#ai-cancel').addEventListener('click', () => modalEl.remove());
-  modalEl.addEventListener('click', e => { if (e.target === modalEl) modalEl.remove(); });
-
-  modalEl.querySelector('#ai-submit').addEventListener('click', () => {
-    const prompt = modalEl.querySelector('#ai-prompt').value.trim();
-    if (!prompt) { modalEl.querySelector('#ai-prompt').focus(); return; }
-    modalEl.remove();
-    showAiProgressModal(prompt);
-  });
-
-  document.body.appendChild(modalEl);
-  setTimeout(() => modalEl.querySelector('#ai-prompt').focus(), 50);
-}
-
-async function showAiProgressModal(prompt) {
-  const steps = [
-    { id: 'gemini',  label: 'Generating plan with Gemini…' },
-    { id: 'project', label: 'Creating project…' },
-    { id: 'tables',  label: 'Creating tables & policies…' },
-    { id: 'site',    label: 'Creating site…' },
-    { id: 'deploy',  label: 'Deploying frontend…' },
-  ];
-
-  const stepEls = steps.map(s =>
-    el('div', { class: 'ai-step', id: 'ai-step-' + s.id },
-      el('span', { class: 'ai-step-icon' }, '○'),
-      el('span', { class: 'ai-step-label' }, s.label)
-    )
-  );
-
-  const statusMsg = el('div', { class: 'ai-status-msg text-muted' }, 'Sending your request to Gemini…');
-
-  const modal = el('div', { class: 'modal modal-ai' },
-    el('div', { class: 'modal-title' }, '✦ Building your project'),
-    el('div', { class: 'ai-steps' }, ...stepEls),
-    statusMsg
-  );
-  const overlay = el('div', { class: 'modal-overlay', id: 'ai-progress-modal' }, modal);
-  document.body.appendChild(overlay);
-
-  function setStep(stepId, state) {
-    const row = document.getElementById('ai-step-' + stepId);
-    if (!row) return;
-    row.className = 'ai-step ai-step-' + state;
-    const icon = row.querySelector('.ai-step-icon');
-    icon.textContent = state === 'done' ? '✓' : state === 'error' ? '✗' : '◌';
-  }
-
-  setStep('gemini', 'active');
-
-  try {
-    const result = await Api.post('/v1/ai/build', { prompt });
-
-    for (const s of steps) {
-      setStep(s.id, 'done');
-      await new Promise(r => setTimeout(r, 150));
-    }
-
-    statusMsg.textContent = '✓ Done! Your project is ready.';
-    statusMsg.style.color = 'var(--accent)';
-
-    const actions = el('div', { style: 'display:flex;gap:8px;margin-top:18px;flex-wrap:wrap' },
-      el('button', { class: 'btn btn-primary', onClick: () => {
-        overlay.remove();
-        Router.navigate('/projects/' + result.project.id);
-      }}, 'Open Project →')
-    );
-
-    if (result.site && result.deploy) {
-      const config = await Api.get('/v1/projects/' + result.project.id);
-      const siteUrl = window.location.origin + '/sites/s' + result.site.id + '/current/';
-      actions.appendChild(
-        el('a', { class: 'btn btn-secondary', href: siteUrl, target: '_blank' }, 'View Live Site ↗')
-      );
-    }
-
-    modal.appendChild(actions);
-
-  } catch (e) {
-    const activeRow = document.querySelector('.ai-step-active');
-    if (activeRow) {
-      const sid = activeRow.id.replace('ai-step-', '');
-      setStep(sid, 'error');
-    }
-    statusMsg.textContent = 'Error: ' + e.message;
-    statusMsg.style.color = 'var(--danger)';
-
-    const closeBtn = el('button', { class: 'btn btn-secondary', style: 'margin-top:16px',
-      onClick: () => overlay.remove()
-    }, 'Close');
-    modal.appendChild(closeBtn);
-  }
-}
-
-function showAiEditModal(project) {
-  const overlay = h(`
-    <div class="modal-overlay" id="ai-edit-modal">
-      <div class="modal modal-ai">
-        <div class="modal-title">✦ AI Edit</div>
-        <div class="form-group">
-          <label>Describe what you want to change</label>
-          <textarea id="ai-edit-prompt" rows="4" placeholder="e.g. Add a comments table linked to posts&#10;e.g. Add a categories feature with many-to-many tags&#10;e.g. Enable public read access on the products table&#10;e.g. Add a ratings column to the reviews table"></textarea>
-        </div>
-        <div class="ai-hint">Gemini will add tables, columns, or update policies — it won't delete existing data.</div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" id="ai-edit-cancel">Cancel</button>
-          <button class="btn btn-ai" id="ai-edit-submit">✦ Apply Changes</button>
-        </div>
-      </div>
-    </div>
-  `);
-
-  const modalEl = overlay.firstElementChild;
-  modalEl.querySelector('#ai-edit-cancel').addEventListener('click', () => modalEl.remove());
-  modalEl.addEventListener('click', e => { if (e.target === modalEl) modalEl.remove(); });
-
-  modalEl.querySelector('#ai-edit-submit').addEventListener('click', () => {
-    const prompt = modalEl.querySelector('#ai-edit-prompt').value.trim();
-    if (!prompt) { modalEl.querySelector('#ai-edit-prompt').focus(); return; }
-    modalEl.remove();
-    showAiEditProgressModal(project, prompt);
-  });
-
-  document.body.appendChild(modalEl);
-  setTimeout(() => modalEl.querySelector('#ai-edit-prompt').focus(), 50);
-}
-
-async function showAiEditProgressModal(project, prompt) {
-  const steps = [
-    { id: 'gemini', label: 'Generating changes with Gemini…' },
-    { id: 'apply',  label: 'Applying changes to project…' },
-  ];
-
-  const stepEls = steps.map(s =>
-    el('div', { class: 'ai-step', id: 'ai-edit-step-' + s.id },
-      el('span', { class: 'ai-step-icon' }, '○'),
-      el('span', { class: 'ai-step-label' }, s.label)
-    )
-  );
-
-  const statusMsg = el('div', { class: 'ai-status-msg text-muted' }, 'Sending your request to Gemini…');
-
-  const modal = el('div', { class: 'modal modal-ai' },
-    el('div', { class: 'modal-title' }, '✦ Editing ' + project.name),
-    el('div', { class: 'ai-steps' }, ...stepEls),
-    statusMsg
-  );
-  const overlay = el('div', { class: 'modal-overlay' }, modal);
-  document.body.appendChild(overlay);
-
-  function setStep(stepId, state) {
-    const row = document.getElementById('ai-edit-step-' + stepId);
-    if (!row) return;
-    row.className = 'ai-step ai-step-' + state;
-    row.querySelector('.ai-step-icon').textContent =
-      state === 'done' ? '✓' : state === 'error' ? '✗' : '◌';
-  }
-
-  setStep('gemini', 'active');
-
-  try {
-    const result = await Api.post('/v1/ai/edit', { project_id: project.id, prompt });
-
-    setStep('gemini', 'done');
-    setStep('apply', 'done');
-
-    const summary = [];
-    if (result.added_tables?.length)   summary.push(`${result.added_tables.length} table(s) added`);
-    if (result.added_columns?.length)  summary.push(`${result.added_columns.length} column(s) added`);
-    if (result.updated_policies?.length) summary.push(`${result.updated_policies.length} polic(ies) updated`);
-
-    statusMsg.textContent = '✓ ' + (summary.length ? summary.join(', ') + '.' : 'Done.');
-    statusMsg.style.color = 'var(--accent)';
-
-    const actions = el('div', { style: 'display:flex;gap:8px;margin-top:18px' },
-      el('button', { class: 'btn btn-primary', onClick: () => {
-        overlay.remove();
-        Router.navigate('/projects/' + project.id);
-      }}, 'Refresh Project →'),
-      el('button', { class: 'btn btn-secondary', onClick: () => overlay.remove() }, 'Close')
-    );
-    modal.appendChild(actions);
-
-  } catch (e) {
-    const activeRow = document.querySelector('#ai-edit-step-gemini.ai-step-active, #ai-edit-step-apply.ai-step-active');
-    if (activeRow) {
-      const sid = activeRow.id.replace('ai-edit-step-', '');
-      setStep(sid, 'error');
-    }
-    statusMsg.textContent = 'Error: ' + e.message;
-    statusMsg.style.color = 'var(--danger)';
-    modal.appendChild(el('button', { class: 'btn btn-secondary', style: 'margin-top:16px',
-      onClick: () => overlay.remove()
-    }, 'Close'));
-  }
-}
-
 // Project overview
 async function renderProject({ id }) {
   if (!requireAuth()) return;
@@ -1107,6 +1337,13 @@ async function renderProject({ id }) {
 
   try {
     const project = await Api.get(`/v1/projects/${id}`);
+
+    const copyAnonBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
+    copyAnonBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(project.anon_key);
+      copyAnonBtn.textContent = 'Copied!';
+      setTimeout(() => { copyAnonBtn.textContent = 'Copy'; }, 1500);
+    });
 
     const tabTables = el('div', { class: 'tab active' }, 'Tables');
     const tabUsers  = el('div', { class: 'tab' }, 'Users');
@@ -1156,7 +1393,7 @@ async function renderProject({ id }) {
     });
 
     const aiEditBtn = el('button', { class: 'btn btn-ai' }, '✦ AI Edit');
-    aiEditBtn.addEventListener('click', () => showAiEditModal(project));
+    aiEditBtn.addEventListener('click', () => AiPanel.open({ projectId: project.id }));
 
     const content = [
       el('div', { class: 'page-header' },
@@ -1168,6 +1405,21 @@ async function renderProject({ id }) {
         ),
         aiEditBtn
       ),
+
+      ...(project.anon_key ? [
+        el('div', { class: 'card' },
+          el('div', { class: 'card-title' }, 'Anon Key'),
+          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
+            'Use in your frontend. Subject to table policies (anon role).'
+          ),
+          el('div', { style: 'display:flex;gap:8px;align-items:center' },
+            el('code', { style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
+              project.anon_key.slice(0, 48) + '…'
+            ),
+            copyAnonBtn
+          )
+        )
+      ] : []),
 
       el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabUsers, tabApi, tabDeploy),
       paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl,
@@ -2731,4 +2983,4 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
 });
 
-document.addEventListener('DOMContentLoaded', () => Router.init());
+document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); });
