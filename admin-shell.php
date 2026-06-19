@@ -22,7 +22,7 @@
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-define('SECRET_TOKEN',   'CHANGE_ME_USE_SOMETHING_LONG_AND_RANDOM');
+define('SECRET_TOKEN',   '7f3k9Xm2pQ8nR4wL6dYv1bT5eJ0hC3sA');
 define('WORKING_DIR',    __DIR__);
 define('LOG_FILE',       __DIR__ . '/admin-shell.log');
 define('TIMEOUT_SECONDS', 30);
