@@ -63,6 +63,8 @@ Field rules:
 - policy.api_role: "anon" or "authenticated"
 - policy.operation: "SELECT", "INSERT", "UPDATE", or "DELETE"
 - policy.constraint_sql: simple WHERE-style expression or null (no subqueries, no DML)
+  IMPORTANT: use ":current_user_id" as the placeholder for the logged-in user's ID
+  (e.g. "user_id = :current_user_id"). Do NOT use "auth.uid()" — it is not supported.
 
 Frontend rules:
 - Must include "index.html" as the SPA entry point
@@ -96,6 +98,12 @@ Access control guidelines:
 - anon role: SELECT=true only on genuinely public tables; all else false
 - authenticated role: SELECT/INSERT/UPDATE/DELETE=true on tables the user owns or can interact with
 - If the app has user-generated content, ensure policies enforce ownership where appropriate
+- When a table has a column like "user_id" with constraint_sql "user_id = :current_user_id":
+    The INSERT frontend code MUST include that column in the POST body by decoding the JWT:
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      body.user_id = parseInt(payload.sub, 10);
+    (The backend also enforces this via constraint injection, but the frontend must send it
+    so the NOT NULL constraint is satisfied even in strict DB modes.)
 
 Always include at least one table. Generate all tables the described app needs.
 PROMPT;
