@@ -17,7 +17,7 @@ class Schema
 
     private const ALLOWED_TYPES = [
         'INT', 'BIGINT', 'SMALLINT', 'TINYINT',
-        'VARCHAR(255)', 'VARCHAR(128)', 'VARCHAR(64)', 'VARCHAR(32)',
+        'VARCHAR(255)', 'VARCHAR(128)', 'VARCHAR(64)', 'VARCHAR(36)', 'VARCHAR(32)',
         'TEXT', 'MEDIUMTEXT', 'LONGTEXT',
         'BOOLEAN', 'TINYINT(1)',
         'DECIMAL(10,2)', 'DECIMAL(15,4)',
