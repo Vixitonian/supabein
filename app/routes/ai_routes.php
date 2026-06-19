@@ -515,7 +515,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
 
 // ─── Frontend file reader ────────────────────────────────────────────────────
 
-function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId): string
+function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId, string $prompt = ''): string
 {
     $sites = $catalog->listSites($projectId);
     if (empty($sites)) return '';
@@ -527,29 +527,68 @@ function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $
     $currentDir = $sitesPath . '/s' . $site['id'] . '/current';
     if (!is_dir($currentDir)) return '';
 
-    $textExts   = ['html', 'css', 'js', 'json'];
-    $maxTotal   = 40000;
-    $totalBytes = 0;
-    $fileLines  = [];
-
+    // Index all text files
+    $textExts = ['html', 'css', 'js', 'json'];
+    $allFiles = [];
     $iterator = new \RecursiveIteratorIterator(
         new \RecursiveDirectoryIterator($currentDir, \RecursiveDirectoryIterator::SKIP_DOTS)
     );
-
     foreach ($iterator as $file) {
         if (!$file->isFile()) continue;
         if (!in_array(strtolower($file->getExtension()), $textExts, true)) continue;
-        $relPath = ltrim(substr($file->getPathname(), strlen($currentDir)), '/');
-        $size    = $file->getSize();
+        $rel = ltrim(substr($file->getPathname(), strlen($currentDir)), '/');
+        $allFiles[$rel] = $file->getPathname();
+    }
+    if (empty($allFiles)) return '';
+
+    $listing = 'Frontend files: ' . implode(', ', array_keys($allFiles));
+
+    // Tier 1 — debug/fix signals: send everything (up to cap)
+    $lowerPrompt = strtolower($prompt);
+    $isDebug = (bool)preg_match('/\b(why|fix|broken|error|bug|issue|problem|debug|not working|failed|wrong|crash)\b/', $lowerPrompt);
+
+    // Tier 2 — extract meaningful prompt words (4+ chars) to match against file paths
+    $stopWords = ['that', 'this', 'with', 'have', 'from', 'they', 'will', 'what', 'when', 'where', 'which', 'there', 'their', 'your', 'about', 'does', 'just', 'like', 'make', 'show', 'give', 'tell'];
+    $promptWords = array_unique(array_filter(
+        preg_split('/\W+/', $lowerPrompt) ?: [],
+        fn($w) => strlen($w) >= 4 && !in_array($w, $stopWords, true)
+    ));
+
+    $targeted = [];
+    if (!$isDebug && !empty($promptWords)) {
+        foreach ($allFiles as $rel => $fullPath) {
+            $lowerRel = strtolower($rel);
+            foreach ($promptWords as $word) {
+                if (str_contains($lowerRel, $word)) {
+                    $targeted[] = $rel;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Tier 3 — no file signals at all: return listing only
+    if (!$isDebug && empty($targeted)) {
+        return "\n\n" . $listing;
+    }
+
+    // Read the relevant files up to 40KB
+    $sources    = $isDebug ? array_keys($allFiles) : $targeted;
+    $maxTotal   = 40000;
+    $totalBytes = 0;
+    $fileLines  = [$listing];
+
+    foreach ($sources as $rel) {
+        $fullPath = $allFiles[$rel];
+        $size     = filesize($fullPath);
         if ($totalBytes + $size > $maxTotal) {
-            $fileLines[] = "--- $relPath (too large, skipped) ---";
+            $fileLines[] = "--- $rel (too large, skipped) ---";
             continue;
         }
-        $fileLines[]  = "--- $relPath ---\n" . file_get_contents($file->getPathname());
+        $fileLines[]  = "--- $rel ---\n" . file_get_contents($fullPath);
         $totalBytes  += $size;
     }
 
-    if (empty($fileLines)) return '';
     return "\n\nFrontend files (current deploy):\n" . implode("\n\n", $fileLines);
 }
 
@@ -777,7 +816,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                             . ($policyStrs ? ' [policies: ' . implode(', ', $policyStrs) . ']' : '');
                     }
                     $tableCount     = count($schemaLines);
-                    $frontendFiles  = ai_read_frontend_files($config, $catalog, $projectId);
+                    $frontendFiles  = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
                     $projectContext = "\n\nSelected project: \"" . $proj['name'] . "\"\nTables (" . $tableCount . "):\n"
                         . ($schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)')
                         . $frontendFiles;
@@ -873,7 +912,7 @@ CHAT;
                 $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
 
                 $apiBase       = rtrim($config['API_BASE_URL'], '/') . '/v1';
-                $frontendFiles = ai_read_frontend_files($config, $catalog, $projectId);
+                $frontendFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
                 $context = "Project: " . $project['name'] . "\nAPI base: " . $apiBase . "\nSchema:\n" . $schemaContext . $frontendFiles . "\n\nIssue: " . $prompt;
 
                 $diagnosePrompt = <<<'PROMPT'
