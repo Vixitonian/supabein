@@ -55,22 +55,132 @@ Return ONLY a single valid JSON object — no markdown fences, no explanation.
 
 {"files": [{"path": string, "content": string}]}
 
-CRITICAL — column name consistency:
-The schema section lists every table's EXACT column names after validation and reserved-word renaming.
-You MUST use these exact names everywhere in your JS (fetch bodies, response field access, template literals).
-Do NOT guess, shorten, or rename any column. If the schema says "skill_title", use "skill_title" — not "title".
+═══════════════════════════════════════════════════════
+RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
+═══════════════════════════════════════════════════════
+The schema lists every table's EXACT column names after validation and reserved-word renaming.
+You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
+template literals, form inputs, everything.
+Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
 
-Frontend rules — STRUCTURE:
-- Feature-Based Structure:
+═══════════════════════════════════════════════════════
+RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
+═══════════════════════════════════════════════════════
+Scripts load in order. A file cannot reference a variable from a file loaded after it.
+
+CORRECT load order in index.html:
+  <script src="core/config.js"></script>
+  <script src="core/api.js"></script>
+  <script src="core/router.js"></script>
+  <script src="features/auth/auth.js"></script>
+  <script src="features/<feature>/<feature>.js"></script>   ← all feature scripts
+  <script>
+    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
+    router.defineRoute('/', featureA.renderView);
+    router.defineRoute('/login', auth.renderAuthForms);
+    /* ... all other routes ... */
+    auth.ready.then(() => {
+      updateNav();
+      router.onHashChange();
+      window.addEventListener('hashchange', router.onHashChange);
+    });
+  </script>
+
+core/router.js must NEVER call defineRoute() itself — it only exports the router API.
+All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
+
+═══════════════════════════════════════════════════════
+RULE 3 — AUTH INITIALISATION RACE
+═══════════════════════════════════════════════════════
+features/auth/auth.js must expose a `ready` promise (the Promise returned by loadUser()).
+loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
+and every protected page shows "Access Denied" even for logged-in users.
+
+Required pattern in auth.js:
+  const auth = (() => {
+    let currentUser = null;
+    let _resolveReady;
+    const ready = new Promise(res => { _resolveReady = res; });
+
+    const loadUser = async () => {
+      // ... fetch /auth/me, set currentUser ...
+      _resolveReady(currentUser);
+      document.dispatchEvent(new CustomEvent('auth_status_change'));
+    };
+
+    loadUser(); // kick off — ready resolves when done
+
+    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
+  })();
+
+The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
+This guarantees auth state is known before any page renders.
+
+═══════════════════════════════════════════════════════
+RULE 4 — ROUTER NAVIGATION PATHS
+═══════════════════════════════════════════════════════
+router.navigate(path) sets window.location.hash = path.
+Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
+  ✓ router.navigate('/')          sets hash to #/
+  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
+
+Always use: router.navigate('/'), router.navigate('/login'), etc.
+Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
+
+═══════════════════════════════════════════════════════
+RULE 5 — NULL SAFETY ON NULLABLE FIELDS
+═══════════════════════════════════════════════════════
+The schema marks some columns nullable. Never call string/array methods on a field without guarding:
+  ✗ item.description.substring(0, 100)   — crashes if description is null
+  ✓ (item.description ?? '').substring(0, 100)
+  ✓ item.description?.substring(0, 100) ?? ''
+
+Apply this to every nullable column accessed in templates or JS logic.
+
+═══════════════════════════════════════════════════════
+RULE 6 — LOADING STATES
+═══════════════════════════════════════════════════════
+Every async render function must show a loading indicator before the fetch,
+then replace it with real content (or an error) when the fetch completes:
+  const renderSection = async () => {
+    const el = document.getElementById('section-id');
+    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
+    try {
+      const data = await api.get('table');
+      el.innerHTML = /* real content */;
+    } catch (e) {
+      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
+    }
+  };
+
+═══════════════════════════════════════════════════════
+RULE 7 — RESPONSIVE NAVIGATION
+═══════════════════════════════════════════════════════
+Always include a hamburger button for mobile. Pattern:
+  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
+  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
+    ...links...
+  </nav>
+Wire it in the inline bootstrap:
+  document.getElementById('nav-toggle').addEventListener('click', () => {
+    document.getElementById('nav-menu').classList.toggle('hidden');
+  });
+
+═══════════════════════════════════════════════════════
+STRUCTURE
+═══════════════════════════════════════════════════════
+Feature-Based Structure:
     index.html                         ← SPA entry point
     core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
     core/api.js                        ← SupaBein fetch client
-    core/router.js                     ← client-side hash router
-    features/auth/auth.js              ← login, signup, logout, current-user state
+    core/router.js                     ← router API only (no defineRoute calls)
+    features/auth/auth.js              ← login, signup, logout, ready promise
     features/<feature>/<feature>.js    ← one subfolder per app feature
-  Every feature folder contains everything that feature needs. Do NOT cram everything into one file.
+Every feature folder contains everything that feature needs. Do NOT cram everything into one file.
 
-Frontend rules — STYLING:
+═══════════════════════════════════════════════════════
+STYLING
+═══════════════════════════════════════════════════════
 - Tailwind CSS via CDN. Add to <head> in index.html:
     <script src="https://cdn.tailwindcss.com"></script>
     <script>tailwind.config = { darkMode: 'class' }</script>
@@ -83,7 +193,9 @@ Frontend rules — STYLING:
 - Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
   focus:outline-none focus:ring-2 focus:ring-emerald-500
 
-Frontend rules — JAVASCRIPT:
+═══════════════════════════════════════════════════════
+JAVASCRIPT
+═══════════════════════════════════════════════════════
 - Placeholders ONLY in core/config.js (substituted at deploy time):
     const SB_URL = '__SB_URL__';
     const SB_KEY = '__SB_ANON_KEY__';
@@ -97,8 +209,7 @@ Frontend rules — JAVASCRIPT:
     Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
     Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
     If not logged in, send the anon key instead.
-- Load scripts with RELATIVE paths in dependency order (e.g. <script src="core/config.js"></script>).
-  NOT absolute paths like /core/config.js — they break the site.
+- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
 - Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
 - The app must be fully functional — real fetch calls, real CRUD, real auth flows.
 - When a table has user_id with ownership constraint, decode JWT in INSERT:
