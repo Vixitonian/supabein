@@ -63,7 +63,7 @@ class OpenRouterClient
                 'Authorization: Bearer ' . $this->apiKey,
                 'HTTP-Referer: ' . ($_SERVER['HTTP_HOST'] ?? 'supabein'),
             ],
-            CURLOPT_TIMEOUT        => 90,
+            CURLOPT_TIMEOUT        => 180,
             CURLOPT_CONNECTTIMEOUT => 10,
         ]);
 

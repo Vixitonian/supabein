@@ -859,6 +859,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-msg-thinking { color: var(--muted); }
 .ai-thinking-dots { letter-spacing: 3px; animation: ai-thinking 1.2s infinite; display: inline-block; }
 @keyframes ai-thinking { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
+.ai-thinking-label { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; min-height: 16px; }
 
 /* ─── Plan card ──────────────────────────────────────────────────────────── */
 .ai-plan-card { border: 1px solid var(--border); }
