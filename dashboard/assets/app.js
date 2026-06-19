@@ -1055,6 +1055,39 @@ const AiPanel = (() => {
           el('strong', {}, 'Frontend: '), summary.frontend_files + ' files'
         ));
       }
+
+      // Collapsible schema detail
+      if (plan && plan.tables && plan.tables.length) {
+        const schemaDetails = el('details', { class: 'ai-plan-details' },
+          el('summary', { class: 'ai-plan-details-summary' }, 'Schema'),
+          ...plan.tables.map(t =>
+            el('div', { class: 'ai-plan-details-table' },
+              el('div', { class: 'ai-plan-details-tname' }, t.name),
+              ...(t.columns || []).map(c =>
+                el('div', { class: 'ai-plan-details-col' },
+                  el('span', { class: 'ai-plan-details-colname' }, c.name),
+                  el('span', { class: 'ai-plan-details-coltype' }, c.type),
+                  el('span', { class: 'ai-plan-details-colnull' + (c.nullable ? ' muted' : '') },
+                    c.nullable ? 'NULL' : 'NOT NULL'
+                  )
+                )
+              )
+            )
+          )
+        );
+        lines.push(schemaDetails);
+      }
+
+      // Collapsible file list
+      if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+        const filesDetails = el('details', { class: 'ai-plan-details' },
+          el('summary', { class: 'ai-plan-details-summary' }, 'Files'),
+          ...plan.frontend.files.map(f =>
+            el('div', { class: 'ai-plan-details-file' }, f.path)
+          )
+        );
+        lines.push(filesDetails);
+      }
     } else if (mode === 'edit') {
       const hasChanges = (summary.add_tables && summary.add_tables.length) ||
                          (summary.add_columns && summary.add_columns.length) ||

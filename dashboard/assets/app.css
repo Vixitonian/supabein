@@ -896,6 +896,49 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-plan-row { font-size: 13px; margin-bottom: 3px; }
 .ai-plan-actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
 
+/* ─── Plan card — collapsible details ───────────────────────────────────── */
+.ai-plan-details { margin-top: 8px; }
+.ai-plan-details-summary {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.ai-plan-details-summary::before { content: '▸'; font-size: 9px; }
+details[open] > .ai-plan-details-summary::before { content: '▾'; }
+.ai-plan-details-table { margin-top: 4px; }
+.ai-plan-details-tname {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  padding: 2px 0 1px 8px;
+}
+.ai-plan-details-col {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  font-family: monospace;
+  padding: 1px 0 1px 18px;
+  color: var(--muted);
+}
+.ai-plan-details-colname { color: var(--text); min-width: 110px; }
+.ai-plan-details-coltype { color: #7dd3fc; min-width: 90px; }
+.ai-plan-details-colnull { font-size: 10px; }
+.ai-plan-details-colnull.muted { color: var(--muted); }
+.ai-plan-details-file {
+  font-size: 11px;
+  font-family: monospace;
+  color: var(--muted);
+  padding: 1px 0 1px 12px;
+}
+.ai-plan-details-file::before { content: '  '; }
+
 /* ─── Result card ────────────────────────────────────────────────────────── */
 .ai-result-card { border-left: 3px solid var(--accent); }
 .ai-result-row { font-size: 13px; margin-bottom: 3px; }
