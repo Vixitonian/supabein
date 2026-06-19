@@ -1223,7 +1223,9 @@ const AiPanel = (() => {
 
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
-      if (response.mode === 'diagnose') {
+      if (response.mode === 'chat') {
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message });
+      } else if (response.mode === 'diagnose') {
         await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
       } else {
         await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
