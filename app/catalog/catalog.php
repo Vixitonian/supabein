@@ -430,4 +430,58 @@ class Catalog
         }
         return $row ? self::castRow($row, ['id', 'user_id']) : null;
     }
+
+    // ─── AI Sessions ─────────────────────────────────────────────────────────
+
+    public function createAiSession(int $userId, string $name, ?int $projectId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO ai_sessions (user_id, project_id, name, messages) VALUES (?, ?, ?, ?)'
+        );
+        $stmt->execute([$userId, $projectId, $name, '[]']);
+        $id = (int)$this->pdo->lastInsertId();
+        return $this->getAiSession($id, $userId);
+    }
+
+    public function getAiSession(int $id, int $userId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, project_id, name, messages, created_at, updated_at
+             FROM ai_sessions WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$id, $userId]);
+        $row = $stmt->fetch() ?: null;
+        if (!$row) return null;
+        $row['messages'] = json_decode($row['messages'], true) ?? [];
+        return self::castRow($row, ['id', 'user_id', 'project_id']);
+    }
+
+    public function listAiSessions(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, project_id, name, created_at, updated_at
+             FROM ai_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 100'
+        );
+        $stmt->execute([$userId]);
+        $rows = $stmt->fetchAll() ?: [];
+        return self::castRows($rows, ['id', 'user_id', 'project_id']);
+    }
+
+    public function updateAiSession(int $id, int $userId, string $name, array $messages): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE ai_sessions SET name = ?, messages = ? WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$name, json_encode($messages, JSON_UNESCAPED_UNICODE), $id, $userId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    public function deleteAiSession(int $id, int $userId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'DELETE FROM ai_sessions WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$id, $userId]);
+        return $stmt->rowCount() > 0;
+    }
 }
