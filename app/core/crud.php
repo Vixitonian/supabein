@@ -112,18 +112,42 @@ class Crud
 
     // ─── INSERT ──────────────────────────────────────────────────────────────
 
+    /**
+     * Parse simple "col = integer" pairs out of a resolved constraint string
+     * so they can be force-injected into INSERT, preventing client spoofing.
+     */
+    private static function constraintInsertValues(?string $constraint): array
+    {
+        if ($constraint === null || $constraint === '') {
+            return [];
+        }
+        $values = [];
+        foreach (preg_split('/\s+AND\s+/i', $constraint) as $part) {
+            $part = trim($part, ' ()');
+            if (preg_match('/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(\d+)$/', $part, $m)) {
+                $values[$m[1]] = (int)$m[2];
+            } elseif (preg_match('/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\'([^\']*)\'\s*$/', $part, $m)) {
+                $values[$m[1]] = $m[2];
+            }
+        }
+        return $values;
+    }
+
     public static function handleInsert(array $req): void
     {
         $projectId = (int)$req['params']['project_id'];
         $tableName = $req['params']['table_name'];
 
-        [$table, $allowedCols, ] = self::resolve($projectId, $tableName, $req['auth'], 'INSERT');
+        [$table, $allowedCols, $policy] = self::resolve($projectId, $tableName, $req['auth'], 'INSERT');
+
+        // Constraint values override whatever the client sent — prevents user_id spoofing
+        $body = array_merge((array)$req['body'], self::constraintInsertValues($policy->constraint));
 
         try {
             [$sql, $params] = QueryBuilder::insert(
                 $table['physical_name'],
                 $allowedCols,
-                $req['body']
+                $body
             );
         } catch (\InvalidArgumentException $e) {
             abort(422, $e->getMessage());
