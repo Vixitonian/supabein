@@ -215,6 +215,8 @@ POST /api/v1/projects/:id/sites/:sid/deploys/:did/rollback
 
 Deploys follow a **two-step staging flow** — every upload lands in a staging preview first, and you explicitly promote it to live when ready.
 
+> **Rule for builders and automation:** Always deploy to staging. **Never publish to live unless the user explicitly asks** (e.g. "publish", "go live", "push to production"). Staging is safe to overwrite at any time; live is what end-users see.
+
 ### Step 1 — Upload to staging
 
 1. Build your app locally (e.g. `npm run build` → `dist/` folder).
