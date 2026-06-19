@@ -615,6 +615,17 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(422, 'prompt is required and must be under 2000 characters');
         }
 
+        // Prior conversation turns for multi-turn context (capped at 20 turns)
+        $rawHistory = $req['body']['history'] ?? [];
+        $history = [];
+        foreach (array_slice((array)$rawHistory, 0, 20) as $turn) {
+            if (!is_array($turn)) continue;
+            $role = $turn['role'] ?? '';
+            $text = trim($turn['text'] ?? '');
+            if (!in_array($role, ['user', 'model'], true) || $text === '') continue;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+
         $apiKey = $config['GEMINI_API_KEY'] ?? '';
         if (!$apiKey) {
             abort(503, 'AI is not configured on this server (missing GEMINI_API_KEY)');
@@ -637,7 +648,7 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         try {
             if ($mode === 'build') {
-                $plan = $gemini->generateJson(AI_BUILD_SYSTEM_PROMPT, $prompt);
+                $plan = $gemini->generateJsonWithHistory(AI_BUILD_SYSTEM_PROMPT, $history, $prompt);
 
                 $validationError = ai_validate_plan($plan);
                 if ($validationError) {
@@ -665,7 +676,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                 $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
 
                 $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
-                $delta = $gemini->generateJson(AI_EDIT_SYSTEM_PROMPT, $userMessage);
+                $delta = $gemini->generateJsonWithHistory(AI_EDIT_SYSTEM_PROMPT, $history, $userMessage);
 
                 $summary = [
                     'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
@@ -700,7 +711,7 @@ Analyze the project context and issue. Return ONLY valid JSON:
 { "diagnosis": "clear explanation", "suggestions": ["step 1", ...] }
 PROMPT;
 
-                $result = $gemini->generateJson($diagnosePrompt, $context);
+                $result = $gemini->generateJsonWithHistory($diagnosePrompt, $history, $context);
 
                 json_out([
                     'mode'        => 'diagnose',

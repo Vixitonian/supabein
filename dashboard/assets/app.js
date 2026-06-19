@@ -1107,6 +1107,23 @@ const AiPanel = (() => {
     try {
       const body = { prompt };
       if (selectedProjectId) body.project_id = selectedProjectId;
+
+      // Build conversation history for Gemini context (exclude current message and thinking placeholders)
+      const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking' && m.id !== thinkingId);
+      if (priorMessages.length > 0) {
+        body.history = priorMessages.slice(-20).map(m => {
+          if (m.role === 'user') return { role: 'user', text: m.content };
+          if (m.type === 'plan') {
+            const s = m.data?.summary || {};
+            return { role: 'model', text: 'I proposed a plan. Summary: ' + JSON.stringify(s) };
+          }
+          if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
+          if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
+          if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
+          return { role: 'model', text: m.content || '' };
+        }).filter(h => h.text.trim() !== '');
+      }
+
       const response = await Api.post('/v1/ai/plan', body);
 
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
