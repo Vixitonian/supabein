@@ -67,34 +67,57 @@ Field rules:
   IMPORTANT: use ":current_user_id" as the placeholder for the logged-in user's ID
   (e.g. "user_id = :current_user_id"). Do NOT use "auth.uid()" — it is not supported.
 
-Frontend rules:
-- Must include "index.html" as the SPA entry point
-- Split code across as many files as the app warrants — separate concerns properly:
-    css/style.css for all styles, js/api.js for the SupaBein fetch client,
-    js/router.js for client-side routing, js/auth.js for auth helpers,
-    js/views/home.js, js/views/login.js etc. for individual page components
-  Do NOT cram everything into one or two files. Structure it like a production project.
-- Use these exact placeholders ONLY in js/auth.js (they are substituted at deploy time):
-    const SB_URL = '__SB_URL__';   // e.g. http://example.com/api
+Frontend rules — STRUCTURE:
+- Use a Feature-Based Structure. Organise files by feature, not by type:
+    index.html                   ← SPA entry point
+    core/config.js               ← SB_URL, SB_KEY, SB_PID constants (only file with placeholders)
+    core/api.js                  ← SupaBein fetch client (depends on config.js)
+    core/router.js               ← client-side hash router
+    features/auth/auth.js        ← login, signup, logout, current-user state
+    features/<feature>/<feature>.js  ← one subfolder per app feature (posts, todos, dashboard, etc.)
+  Every feature folder contains everything that feature needs — render function, event wiring, API calls.
+  Do NOT use a flat js/ folder or a css/ folder. Do NOT cram everything into one file.
+
+Frontend rules — STYLING:
+- Use Tailwind CSS loaded from CDN. Add this to <head> in index.html:
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+- Add class="dark" to <html> so dark-mode utilities apply by default.
+- Do NOT write a separate CSS file. Use Tailwind utility classes exclusively for all layout and styling.
+- Colour palette (use these Tailwind classes consistently):
+    Background:  bg-gray-950   (page)    bg-gray-900 (cards/panels)
+    Accent:      bg-emerald-500 / text-emerald-400 / border-emerald-500
+    Text:        text-gray-100 (primary)  text-gray-400 (muted)
+    Danger:      text-red-400 / bg-red-500
+    Border:      border-gray-700 / border-gray-800
+- Buttons: use rounded-lg px-4 py-2 font-medium transition classes. Primary = bg-emerald-500 hover:bg-emerald-600 text-white. Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
+- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full focus:outline-none focus:ring-2 focus:ring-emerald-500
+
+Frontend rules — JAVASCRIPT:
+- Use these exact placeholders ONLY in core/config.js (substituted at deploy time):
+    const SB_URL = '__SB_URL__';
     const SB_KEY = '__SB_ANON_KEY__';
     const SB_PID = '__SB_PID__';
-  Do NOT redeclare SB_URL/SB_KEY/SB_PID in any other file — they are globals from auth.js.
-- SupaBein API URL patterns (build your fetch calls using these — do NOT invent other formats):
-    Data list/create:  ${SB_URL}/data/${SB_PID}/${tableName}
-    Data get/update/delete by id:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
+  Do NOT redeclare SB_URL/SB_KEY/SB_PID anywhere else — they are globals.
+- SupaBein API URL patterns (use these exactly — do NOT invent other formats):
+    Data list/create:            ${SB_URL}/data/${SB_PID}/${tableName}
+    Data get/update/delete:      ${SB_URL}/data/${SB_PID}/${tableName}/${id}
     Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
     Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
     Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET  Authorization: Bearer {token}
-    The token returned by login/signup is a JWT — store in localStorage as "sb:token".
-    To authenticate data requests: send header  Authorization: Bearer {token}  (use anon key if not logged in).
-- index.html must load all JS and CSS files with RELATIVE paths (no leading slash):
-    <link rel="stylesheet" href="css/style.css">     ← correct
-    <script src="js/auth.js"></script>               ← correct
-    NOT <script src="/js/auth.js">                   ← wrong — absolute paths break the site
-- Use vanilla JS only — no frameworks, no npm, no build tools, no ES module import/export syntax
-  Scripts are loaded as plain <script> tags in order; use the global scope, not import/export
-- Use a dark theme with CSS variables: --bg: #0f1117; --surface: #1a1d27; --accent: #3ecf8e; --text: #e2e8f0; --muted: #8892a4; --danger: #ef4444; --border: #2d3045;
-- The app must be fully functional — real fetch calls, real CRUD, real auth flows
+    Store the JWT in localStorage as "sb:token". Send it as Authorization: Bearer {token}.
+    If the user is not logged in, send the anon key instead.
+- index.html must load all scripts with RELATIVE paths and in dependency order:
+    <script src="core/config.js"></script>
+    <script src="core/api.js"></script>
+    <script src="core/router.js"></script>
+    <script src="features/auth/auth.js"></script>
+    <script src="features/<feature>/<feature>.js"></script>
+    ...
+    NOT <script src="/core/config.js"> — absolute paths break the site
+- Vanilla JS only — no frameworks, no npm, no build tools, no ES module import/export syntax.
+  Use plain <script> tags loaded in order; share state through the global scope or simple module-pattern IIFEs.
+- The app must be fully functional — real fetch calls, real CRUD, real auth flows.
 
 Access control guidelines:
 - anon role: SELECT=true only on genuinely public tables; all else false
