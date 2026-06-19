@@ -1257,14 +1257,10 @@ async function renderProjects() {
 
   renderLayout(null, '', [el('div', { class: 'page-header' },
     el('h1', { class: 'page-title' }, 'Projects'),
-    el('div', { class: 'page-header-actions' },
-      el('button', { class: 'btn btn-ai', id: 'ai-build' }, '✦ Build with AI'),
-      el('button', { class: 'btn btn-primary', id: 'new-project' }, '+')
-    )
+    el('button', { class: 'btn btn-primary', id: 'new-project' }, '+')
   ), el('div', { id: 'project-list' }, 'Loading...')]);
 
   document.getElementById('new-project').addEventListener('click', () => showNewProjectModal());
-  document.getElementById('ai-build').addEventListener('click', () => AiPanel.open());
 
   try {
     const projects = await Api.get('/v1/projects');
@@ -1274,10 +1270,7 @@ async function renderProjects() {
       list.innerHTML = '';
       list.appendChild(el('div', { class: 'ai-empty-state' },
         el('p', { class: 'text-muted' }, 'No projects yet.'),
-        el('div', { style: 'display:flex;gap:10px;justify-content:center;margin-top:16px' },
-          el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open() }, '✦ Build with AI'),
-          el('button', { class: 'btn btn-secondary', onClick: () => showNewProjectModal() }, 'New Project')
-        )
+        el('button', { class: 'btn btn-secondary', style: 'margin-top:16px', onClick: () => showNewProjectModal() }, 'New Project')
       ));
       return;
     }
@@ -1360,12 +1353,6 @@ async function renderProject({ id }) {
   try {
     const project = await Api.get(`/v1/projects/${id}`);
 
-    const copyAnonBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
-    copyAnonBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(project.anon_key);
-      copyAnonBtn.textContent = 'Copied!';
-      setTimeout(() => { copyAnonBtn.textContent = 'Copy'; }, 1500);
-    });
 
     const tabTables = el('div', { class: 'tab active' }, 'Tables');
     const tabUsers  = el('div', { class: 'tab' }, 'Users');
@@ -1414,34 +1401,14 @@ async function renderProject({ id }) {
       }
     });
 
-    const aiEditBtn = el('button', { class: 'btn btn-ai' }, '✦ AI Edit');
-    aiEditBtn.addEventListener('click', () => AiPanel.open({ projectId: project.id }));
-
     const content = [
       el('div', { class: 'page-header' },
-        el('div', {},
-          el('h1', { class: 'page-title' }, project.name),
-          el('span', { class: 'text-muted', style: 'font-size:0.8rem' },
-            `ID ${project.id} · ${fmtDate(project.created_at)}`
-          )
-        ),
-        aiEditBtn
+        el('h1', { class: 'page-title' }, project.name),
+        el('span', { class: 'text-muted', style: 'font-size:0.8rem' },
+          `ID ${project.id} · ${fmtDate(project.created_at)}`
+        )
       ),
 
-      ...(project.anon_key ? [
-        el('div', { class: 'card' },
-          el('div', { class: 'card-title' }, 'Anon Key'),
-          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
-            'Use in your frontend. Subject to table policies (anon role).'
-          ),
-          el('div', { style: 'display:flex;gap:8px;align-items:center' },
-            el('code', { style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
-              project.anon_key.slice(0, 48) + '…'
-            ),
-            copyAnonBtn
-          )
-        )
-      ] : []),
 
       el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabUsers, tabApi, tabDeploy),
       paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl,
