@@ -256,6 +256,161 @@ function ai_deploy_files(
 
 // ─── Validation helpers ──────────────────────────────────────────────────────
 
+function ai_sanitize_plan(array $plan): array
+{
+    // ── Column type normalization ─────────────────────────────────────────────
+    static $TYPE_MAP = [
+        'string'             => 'VARCHAR(255)',
+        'varchar'            => 'VARCHAR(255)',
+        'character varying'  => 'VARCHAR(255)',
+        'char'               => 'VARCHAR(255)',
+        'integer'            => 'INT',
+        'int unsigned'       => 'INT',
+        'int(11)'            => 'INT',
+        'serial'             => 'INT',
+        'bigserial'          => 'BIGINT',
+        'bool'               => 'BOOLEAN',
+        'number'             => 'DECIMAL(10,2)',
+        'numeric'            => 'DECIMAL(10,2)',
+        'decimal'            => 'DECIMAL(10,2)',
+        'money'              => 'DECIMAL(10,2)',
+        'uuid'               => 'VARCHAR(36)',
+        'real'               => 'FLOAT',
+        'long text'          => 'LONGTEXT',
+        'medium text'        => 'MEDIUMTEXT',
+    ];
+
+    // ── SQL reserved words that models use as table/column names ─────────────
+    static $SQL_RESERVED = [
+        'order','group','key','index','select','insert','update','delete',
+        'table','from','where','join','left','right','inner','outer','on',
+        'by','as','in','is','not','null','and','or','like','limit','offset',
+        'having','union','all','distinct','case','when','then','else','end',
+        'create','drop','alter','add','column','primary','foreign','references',
+        'default','check','unique','constraint','auto_increment','values','set',
+        'into','exists','between','any','some','user','value','read','write',
+        'status','rank','role','type','name','date','time','year','month',
+    ];
+
+    // ── api_role normalization ────────────────────────────────────────────────
+    static $ROLE_MAP = [
+        'user'       => 'authenticated',
+        'users'      => 'authenticated',
+        'public'     => 'anon',
+        'guest'      => 'anon',
+        'admin'      => 'authenticated',
+        'private'    => 'authenticated',
+        'logged_in'  => 'authenticated',
+        'loggedin'   => 'authenticated',
+        'member'     => 'authenticated',
+    ];
+
+    // ── operation normalization ───────────────────────────────────────────────
+    static $OP_MAP = [
+        'read'    => 'SELECT',
+        'get'     => 'SELECT',
+        'list'    => 'SELECT',
+        'fetch'   => 'SELECT',
+        'write'   => 'INSERT',
+        'create'  => 'INSERT',
+        'add'     => 'INSERT',
+        'post'    => 'INSERT',
+        'edit'    => 'UPDATE',
+        'modify'  => 'UPDATE',
+        'patch'   => 'UPDATE',
+        'put'     => 'UPDATE',
+        'change'  => 'UPDATE',
+        'remove'  => 'DELETE',
+        'destroy' => 'DELETE',
+        'erase'   => 'DELETE',
+    ];
+
+    // ── SQL function defaults that must be nulled ─────────────────────────────
+    static $FN_DEFAULTS = [
+        'now()', 'current_timestamp', 'current_date', 'current_time',
+        'sysdate()', 'getdate()', 'uuid_generate_v4()', 'gen_random_uuid()',
+        'newid()', 'uuid()',
+    ];
+
+    // ── 1. Subdomain ──────────────────────────────────────────────────────────
+    if (isset($plan['subdomain'])) {
+        $sub = strtolower((string)$plan['subdomain']);
+        $sub = preg_replace('/[^a-z0-9]+/', '-', $sub);   // non-alphanum → hyphen
+        $sub = preg_replace('/-+/', '-', $sub);             // collapse hyphens
+        $sub = trim($sub, '-');
+        $sub = substr($sub, 0, 30);
+        $sub = trim($sub, '-');
+        if (strlen($sub) < 3) $sub = 'app-' . $sub;
+        $plan['subdomain'] = $sub;
+    }
+
+    // ── 2. Tables ─────────────────────────────────────────────────────────────
+    foreach ($plan['tables'] as &$table) {
+
+        // Rename reserved table names
+        if (in_array(strtolower($table['name'] ?? ''), $SQL_RESERVED, true)) {
+            $table['name'] = $table['name'] . '_data';
+        }
+
+        // Strip auto-generated columns
+        $table['columns'] = array_values(array_filter(
+            $table['columns'] ?? [],
+            fn($col) => !in_array(strtolower($col['name'] ?? ''), ['id', 'created_at'], true)
+        ));
+
+        foreach ($table['columns'] as &$col) {
+            // Rename reserved column names
+            if (in_array(strtolower($col['name'] ?? ''), $SQL_RESERVED, true)) {
+                $col['name'] = $col['name'] . '_value';
+            }
+
+            // Normalize type
+            $typeLower = strtolower(trim($col['type'] ?? ''));
+            if (isset($TYPE_MAP[$typeLower])) {
+                $col['type'] = $TYPE_MAP[$typeLower];
+            }
+
+            // Null out SQL function defaults
+            if (isset($col['default'])) {
+                $defLower = strtolower(trim((string)$col['default']));
+                if (in_array($defLower, $FN_DEFAULTS, true)) {
+                    $col['default'] = null;
+                }
+            }
+        }
+        unset($col);
+
+        foreach ($table['policies'] ?? [] as &$policy) {
+            // Normalize api_role
+            $role = strtolower(trim($policy['api_role'] ?? ''));
+            $policy['api_role'] = $ROLE_MAP[$role] ?? $policy['api_role'];
+
+            // Normalize operation
+            $op = strtolower(trim($policy['operation'] ?? ''));
+            $policy['operation'] = strtoupper($OP_MAP[$op] ?? $policy['operation']);
+
+            // Replace auth.uid() / uid() with :current_user_id in constraint_sql
+            if (isset($policy['constraint_sql']) && is_string($policy['constraint_sql'])) {
+                $policy['constraint_sql'] = preg_replace(
+                    '/\bauth\.uid\s*\(\s*\)|\buid\s*\(\s*\)/i',
+                    ':current_user_id',
+                    $policy['constraint_sql']
+                );
+            }
+        }
+        unset($policy);
+    }
+    unset($table);
+
+    // ── 3. Frontend file paths — strip leading slashes / ./ ──────────────────
+    foreach ($plan['frontend']['files'] ?? [] as &$file) {
+        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+    }
+    unset($file);
+
+    return $plan;
+}
+
 function ai_validate_plan(array $plan): ?string
 {
     if (empty($plan['project_name']) || strlen($plan['project_name']) > 80) {
@@ -279,9 +434,7 @@ function ai_validate_plan(array $plan): ?string
             } catch (\InvalidArgumentException $e) {
                 return "tables[$i].columns[$j].name: " . $e->getMessage();
             }
-            if (in_array(strtolower($colName), ['id', 'created_at'], true)) {
-                return "tables[$i].columns[$j].name: 'id' and 'created_at' are reserved";
-            }
+
             try {
                 \SupaBein\Schema::validateDataType($col['type'] ?? '');
             } catch (\InvalidArgumentException $e) {
@@ -674,6 +827,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         }
 
         // ── 3. Validate plan ──────────────────────────────────────────────────
+        $plan = ai_sanitize_plan($plan);
         $validationError = ai_validate_plan($plan);
         if ($validationError) {
             sb_log('ai_build', 'Plan validation failed: ' . $validationError, ['plan_keys' => array_keys($plan)]);
@@ -858,6 +1012,7 @@ CHAT;
         try {
             if ($mode === 'build') {
                 $plan = $gemini->generateJsonWithHistory(AI_BUILD_SYSTEM_PROMPT, $history, $prompt);
+                $plan = ai_sanitize_plan($plan);
 
                 $validationError = ai_validate_plan($plan);
                 if ($validationError) {
@@ -951,6 +1106,7 @@ PROMPT;
         if (!is_array($plan)) abort(422, 'plan must be an array');
 
         if ($mode === 'build') {
+            $plan = ai_sanitize_plan($plan);
             $validationError = ai_validate_plan($plan);
             if ($validationError) abort(422, 'Invalid plan: ' . $validationError);
             $result = ai_execute_build($plan, $userId);
