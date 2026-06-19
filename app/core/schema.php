@@ -69,8 +69,30 @@ class Schema
         return $name;
     }
 
+    public static function normalizeDataType(string $type): string
+    {
+        // Map any VARCHAR(N) to the smallest allowed size that fits
+        if (preg_match('/^VARCHAR\((\d+)\)$/i', $type, $m)) {
+            $n = (int)$m[1];
+            if ($n <= 32)  return 'VARCHAR(32)';
+            if ($n <= 36)  return 'VARCHAR(36)';
+            if ($n <= 64)  return 'VARCHAR(64)';
+            if ($n <= 128) return 'VARCHAR(128)';
+            if ($n <= 255) return 'VARCHAR(255)';
+            return 'TEXT';
+        }
+        // Map any DECIMAL(p,s) to the closest allowed precision
+        if (preg_match('/^DECIMAL\((\d+),(\d+)\)$/i', $type, $m)) {
+            $p = (int)$m[1]; $s = (int)$m[2];
+            if ($p <= 10 && $s <= 2) return 'DECIMAL(10,2)';
+            return 'DECIMAL(15,4)';
+        }
+        return $type;
+    }
+
     public static function validateDataType(string $type): string
     {
+        $type = self::normalizeDataType($type);
         if (!in_array(strtoupper($type), array_map('strtoupper', self::ALLOWED_TYPES), true)) {
             throw new \InvalidArgumentException(
                 "Unsupported data type '$type'. Allowed: " . implode(', ', self::ALLOWED_TYPES)
