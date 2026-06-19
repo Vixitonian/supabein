@@ -926,6 +926,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 @media (max-width: 767px) {
   .ai-fab { bottom: 20px; right: 16px; padding: 11px 18px; }
 
+  .ai-panel-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    z-index: 998;
+    animation: ai-backdrop-in 0.2s ease;
+  }
+  .ai-panel-backdrop.active { display: block; }
+  @keyframes ai-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
   .ai-panel {
     bottom: 0;
     right: 0;
@@ -937,6 +948,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
     border-left: none;
     border-right: none;
     position: fixed;
+    z-index: 999;
+    transform: translateY(100%);
+    transition: transform 0.25s ease;
+  }
+  .ai-panel.ai-panel-open {
+    transform: translateY(0);
   }
 
   .ai-hamburger { display: block; }

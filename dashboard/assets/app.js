@@ -791,7 +791,18 @@ const AiPanel = (() => {
   let projects = [];
   let selectedProjectId = null;
   let panelEl = null;
+  let backdropEl = null;
   let sidebarVisible = false;
+
+  function getOrCreateBackdrop() {
+    if (!backdropEl) {
+      backdropEl = document.createElement('div');
+      backdropEl.className = 'ai-panel-backdrop';
+      backdropEl.addEventListener('click', close);
+      document.body.appendChild(backdropEl);
+    }
+    return backdropEl;
+  }
 
   function getSession(id) { return sessions.find(s => s.id === id) || null; }
   function currentSession() { return getSession(currentSessionId); }
@@ -855,7 +866,10 @@ const AiPanel = (() => {
   }
 
   async function loadProjects() {
-    try { projects = await Api.get('/v1/projects'); }
+    try {
+      const result = await Api.get('/v1/projects');
+      projects = Array.isArray(result) ? result : [];
+    }
     catch(e) { projects = []; }
   }
 
@@ -1261,6 +1275,7 @@ const AiPanel = (() => {
     renderMessages();
 
     panelEl.classList.add('ai-panel-open');
+    getOrCreateBackdrop().classList.add('active');
 
     const fab = document.getElementById('ai-fab');
     if (fab) fab.classList.add('ai-fab-hidden');
@@ -1271,6 +1286,7 @@ const AiPanel = (() => {
   function close() {
     if (!panelEl) return;
     panelEl.classList.remove('ai-panel-open');
+    if (backdropEl) backdropEl.classList.remove('active');
     isOpen = false;
     sidebarVisible = false;
     toggleSidebar(false);
