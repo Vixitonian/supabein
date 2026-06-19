@@ -733,4 +733,42 @@ PROMPT;
         }
 
     }, ['auth_middleware']);
+
+    // ── AI Sessions (DB-backed) ────────────────────────────────────────────────
+
+    $router->get('/v1/ai/sessions', function (array $req): void {
+        $userId  = (int)$req['auth']['user_id'];
+        $catalog = \SupaBein\Catalog::getInstance();
+        json_out($catalog->listAiSessions($userId));
+    }, ['auth_middleware']);
+
+    $router->post('/v1/ai/sessions', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $name      = trim($req['body']['name'] ?? 'New session');
+        $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
+        json_out($catalog->createAiSession($userId, $name ?: 'New session', $projectId), 201);
+    }, ['auth_middleware']);
+
+    $router->patch('/v1/ai/sessions/{id}', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $sessionId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $name      = trim($req['body']['name'] ?? '');
+        $messages  = $req['body']['messages'] ?? null;
+        $sess = $catalog->getAiSession($sessionId, $userId);
+        if (!$sess) abort(404, 'Session not found');
+        $newName     = $name ?: $sess['name'];
+        $newMessages = is_array($messages) ? $messages : $sess['messages'];
+        $catalog->updateAiSession($sessionId, $userId, $newName, $newMessages);
+        json_out($catalog->getAiSession($sessionId, $userId));
+    }, ['auth_middleware']);
+
+    $router->delete('/v1/ai/sessions/{id}', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $sessionId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->deleteAiSession($sessionId, $userId)) abort(404, 'Session not found');
+        json_out(['deleted' => true]);
+    }, ['auth_middleware']);
 }

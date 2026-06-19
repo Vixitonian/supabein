@@ -793,34 +793,61 @@ const AiPanel = (() => {
   let panelEl = null;
   let sidebarVisible = false;
 
-  function saveSessions() {
-    try { localStorage.setItem('sb_ai_sessions', JSON.stringify(sessions)); } catch(e) {}
-  }
-
-  function loadSessions() {
-    try { sessions = JSON.parse(localStorage.getItem('sb_ai_sessions') || '[]'); }
-    catch(e) { sessions = []; }
-  }
-
   function getSession(id) { return sessions.find(s => s.id === id) || null; }
   function currentSession() { return getSession(currentSessionId); }
 
-  function createSession(projectId) {
-    const id = 'sess_' + Date.now();
-    const sess = { id, name: 'New session', projectId: projectId || null, messages: [], createdAt: Date.now() };
+  async function persistSession(sess) {
+    if (!sess) return;
+    try {
+      if (sess._new) {
+        const created = await Api.post('/v1/ai/sessions', {
+          name: sess.name,
+          project_id: sess.projectId || undefined,
+        });
+        sess.id = created.id;
+        sess._new = false;
+      } else {
+        await Api.patch('/v1/ai/sessions/' + sess.id, {
+          name: sess.name,
+          messages: sess.messages,
+        });
+      }
+    } catch(e) { /* non-fatal — UI already updated */ }
+  }
+
+  async function loadSessions() {
+    try {
+      sessions = await Api.get('/v1/ai/sessions');
+      sessions.forEach(s => { s.messages = s.messages || []; });
+    } catch(e) { sessions = []; }
+  }
+
+  async function createSession(projectId) {
+    const sess = {
+      id: null, _new: true,
+      name: 'New session',
+      projectId: projectId || null,
+      messages: [],
+      created_at: new Date().toISOString(),
+    };
     sessions.unshift(sess);
-    saveSessions();
+    await persistSession(sess);
     return sess;
   }
 
-  function addMessage(sessionId, message) {
+  async function addMessage(sessionId, message) {
     const sess = getSession(sessionId);
     if (!sess) return;
     sess.messages.push({ ...message, id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2) });
     if (sess.name === 'New session' && message.role === 'user') {
       sess.name = message.content.slice(0, 42) + (message.content.length > 42 ? '…' : '');
     }
-    saveSessions();
+    await persistSession(sess);
+  }
+
+  function saveSessions() {
+    const sess = currentSession();
+    if (sess) persistSession(sess);
   }
 
   async function loadProjects() {
@@ -1024,8 +1051,8 @@ const AiPanel = (() => {
     renderProjectPicker();
   }
 
-  function newSession() {
-    const sess = createSession(selectedProjectId);
+  async function newSession() {
+    const sess = await createSession(selectedProjectId);
     currentSessionId = sess.id;
     renderSidebar();
     renderMessages();
@@ -1048,23 +1075,20 @@ const AiPanel = (() => {
     if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; }
 
     if (!currentSessionId || !getSession(currentSessionId)) {
-      const sess = createSession(selectedProjectId);
+      const sess = await createSession(selectedProjectId);
       currentSessionId = sess.id;
     } else {
       const sess = currentSession();
-      if (sess) sess.projectId = selectedProjectId;
-      saveSessions();
+      if (sess) { sess.projectId = selectedProjectId; persistSession(sess); }
     }
 
-    addMessage(currentSessionId, { role: 'user', content: prompt });
+    await addMessage(currentSessionId, { role: 'user', content: prompt });
     renderSidebar();
     renderMessages();
 
     const thinkingId = 'thinking_' + Date.now();
     const sess = currentSession();
-    if (sess) {
-      sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '' });
-    }
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '' });
     renderMessages();
 
     try {
@@ -1075,16 +1099,15 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
       if (response.mode === 'diagnose') {
-        addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
+        await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
       } else {
-        addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
+        await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
       }
     } catch(e) {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
     }
 
-    saveSessions();
     renderSidebar();
     renderMessages();
   }
@@ -1098,13 +1121,12 @@ const AiPanel = (() => {
     try {
       const result = await Api.post('/v1/ai/apply', { mode, plan });
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+      await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
     } catch(e) {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
     }
 
-    saveSessions();
     renderMessages();
   }
 
@@ -1181,7 +1203,7 @@ const AiPanel = (() => {
     const autoProject = detectCurrentProject();
     selectedProjectId = (options.projectId !== undefined) ? options.projectId : autoProject;
 
-    await loadProjects();
+    await Promise.all([loadSessions(), loadProjects()]);
     renderProjectPicker();
 
     if (!currentSessionId || !getSession(currentSessionId)) {
@@ -1190,7 +1212,7 @@ const AiPanel = (() => {
         const sess = getSession(currentSessionId);
         if (sess) selectedProjectId = sess.projectId || selectedProjectId;
       } else {
-        const sess = createSession(selectedProjectId);
+        const sess = await createSession(selectedProjectId);
         currentSessionId = sess.id;
       }
     }
