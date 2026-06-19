@@ -129,6 +129,25 @@ function fmtDate(d) {
   return d ? new Date(d).toLocaleString() : '—';
 }
 
+function generateSchemaSql(plan) {
+  const lines = ['-- SupaBein Schema', '-- Generated: ' + new Date().toISOString(), ''];
+  (plan.tables || []).forEach(t => {
+    lines.push('CREATE TABLE `' + t.name + '` (');
+    lines.push('  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,');
+    (t.columns || []).forEach(c => {
+      let col = '  `' + c.name + '` ' + c.type;
+      col += c.nullable ? ' NULL' : ' NOT NULL';
+      if (c.default != null) col += " DEFAULT '" + c.default + "'";
+      lines.push(col + ',');
+    });
+    lines.push('  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,');
+    lines.push('  PRIMARY KEY (`id`)');
+    lines.push(') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;');
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
 function downloadText(filename, content) {
   const blob = new Blob([content], { type: 'text/plain' });
   const url  = URL.createObjectURL(blob);
@@ -1087,6 +1106,16 @@ const AiPanel = (() => {
           )
         );
         lines.push(filesDetails);
+      }
+
+      // Download schema button
+      if (plan && plan.tables && plan.tables.length) {
+        const dlBtn = el('button', { class: 'ai-plan-dl-btn', onClick: () => {
+          const sql = generateSchemaSql(plan);
+          const name = (plan.subdomain || plan.project_name || 'schema').replace(/\s+/g, '-').toLowerCase();
+          downloadText(name + '.sql', sql);
+        }}, '↓ Download Schema');
+        lines.push(dlBtn);
       }
     } else if (mode === 'edit') {
       const hasChanges = (summary.add_tables && summary.add_tables.length) ||

@@ -938,6 +938,19 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   padding: 1px 0 1px 12px;
 }
 .ai-plan-details-file::before { content: '  '; }
+.ai-plan-dl-btn {
+  margin-top: 10px;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: inline-block;
+  transition: color 0.15s, border-color 0.15s;
+}
+.ai-plan-dl-btn:hover { color: var(--accent); border-color: var(--accent); }
 
 /* ─── Result card ────────────────────────────────────────────────────────── */
 .ai-result-card { border-left: 3px solid var(--accent); }
