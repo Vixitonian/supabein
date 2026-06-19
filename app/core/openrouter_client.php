@@ -45,15 +45,12 @@ class OpenRouterClient
 
     private function call(array $messages): array
     {
-        // Free models have strict credit limits — cap output tokens to avoid rejection
-        $body = [
+        $body    = [
             'model'           => $this->model,
             'messages'        => $messages,
             'response_format' => ['type' => 'json_object'],
+            'max_tokens'      => 16384,
         ];
-        if (str_ends_with($this->model, ':free')) {
-            $body['max_tokens'] = 4000;
-        }
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
         $ch = curl_init(self::ENDPOINT);
