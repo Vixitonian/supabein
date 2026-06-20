@@ -1841,26 +1841,42 @@ async function renderApi({ id }, container) {
       return el('div', { style: 'position:relative;margin-bottom:16px' }, pre, btn);
     };
 
+    const sk = project.service_key || '<service_key>';
+    const base = `${baseUrl}/api/v1/data/${projectId}`;
+
     const docsCard = el('div', { class: 'api-table-card' },
       el('div', { class: 'api-table-title' }, 'Data API'),
       el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-        `Base URL: `, el('code', {}, `${baseUrl}/api/v1/data/${projectId}`)
+        'Base URL: ', el('code', {}, `${base}/{table}`)
       ),
 
       el('div', { class: 'api-section-label' }, 'List rows'),
-      curlBlock(`curl ${baseUrl}/api/v1/data/${projectId}/{table}`),
+      curlBlock(`curl "${base}/{table}?limit=20&offset=0"`),
+
+      el('div', { class: 'api-section-label' }, 'List with filter + ordering'),
+      curlBlock(`curl "${base}/{table}?status=active&order=created_at.desc&limit=50"`),
+
+      el('div', { class: 'api-section-label' }, 'Get single row'),
+      curlBlock(`curl "${base}/{table}/{id}"`),
 
       el('div', { class: 'api-section-label' }, 'Insert a row'),
-      curlBlock(`curl -X POST ${baseUrl}/api/v1/data/${projectId}/{table} \\\n  -H "Content-Type: application/json" \\\n  -d '{"col": "value"}'`),
+      curlBlock(`curl -X POST "${base}/{table}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"col": "value"}'`),
 
-      el('div', { class: 'api-section-label' }, 'Authenticated request (project_user JWT or service key)'),
-      curlBlock(`curl ${baseUrl}/api/v1/data/${projectId}/{table} \\\n  -H "Authorization: Bearer <token>"`),
+      el('div', { class: 'api-section-label' }, 'Update a row'),
+      curlBlock(`curl -X PATCH "${base}/{table}/{id}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"col": "new value"}'`),
 
-      el('div', { class: 'api-section-label' }, 'Login (tables with a PASSWORD column)'),
-      curlBlock(`curl -X POST ${baseUrl}/api/v1/data/${projectId}/{table}/login \\\n  -H "Content-Type: application/json" \\\n  -d '{"email": "user@example.com", "password": "secret"}'`),
+      el('div', { class: 'api-section-label' }, 'Delete a row'),
+      curlBlock(`curl -X DELETE "${base}/{table}/{id}"`),
 
-      el('div', { class: 'api-section-label' }, 'Service key request — bypasses all policies'),
-      curlBlock(`curl ${baseUrl}/api/v1/data/${projectId}/{table} \\\n  -H "Authorization: Bearer ${project.service_key || '<service_key>'}"`)
+      el('div', { class: 'api-section-label' }, 'Login — tables with a PASSWORD column'),
+      curlBlock(`curl -X POST "${base}/{table}/login" \\\n  -H "Content-Type: application/json" \\\n  -d '{"email": "user@example.com", "password": "secret"}'`),
+
+      el('p', { class: 'text-muted', style: 'font-size:0.8rem;margin:4px 0 8px' },
+        'Returns ', el('code', {}, '{ token, user }'), '. Use token as Bearer in subsequent requests (authenticated role).'
+      ),
+
+      el('div', { class: 'api-section-label' }, 'Service key — bypasses all row-level policies'),
+      curlBlock(`curl "${base}/{table}" \\\n  -H "Authorization: Bearer ${sk}"`)
     );
 
     const nodes = [keyCard, docsCard];
