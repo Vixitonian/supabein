@@ -111,7 +111,8 @@ The root `.htaccess` automatically:
 | `supabein.yourdomain.com/` | Redirects to dashboard |
 | `supabein.yourdomain.com/dashboard/` | Dashboard SPA |
 | `supabein.yourdomain.com/api/v1/...` | REST API |
-| `supabein.yourdomain.com/sites/p{id}/current/` | Hosted static frontend |
+| `supabein.yourdomain.com/sites/s{id}/staging/` | Staged deploy (preview before going live) |
+| `supabein.yourdomain.com/sites/s{id}/current/` | Live hosted static frontend |
 
 ---
 
@@ -202,8 +203,9 @@ A policy entry is `(api_role, operation) → allowed + optional constraint`:
 GET  /api/v1/projects/:id/sites
 POST /api/v1/projects/:id/sites          { subdomain, spa_mode }
 
-POST /api/v1/projects/:id/sites/:sid/deploys        (multipart/form-data, field: zipfile)
+POST /api/v1/projects/:id/sites/:sid/deploys               (multipart/form-data, field: zipfile)
 GET  /api/v1/projects/:id/sites/:sid/deploys
+POST /api/v1/projects/:id/sites/:sid/deploys/:did/publish  (promote staging → live)
 POST /api/v1/projects/:id/sites/:sid/deploys/:did/rollback
 ```
 
@@ -211,14 +213,42 @@ POST /api/v1/projects/:id/sites/:sid/deploys/:did/rollback
 
 ## Deploying a Frontend
 
+Deploys follow a **two-step staging flow** — every upload lands in a staging preview first, and you explicitly promote it to live when ready.
+
+> **Rule for builders and automation:** Always deploy to staging. **Never publish to live unless the user explicitly asks** (e.g. "publish", "go live", "push to production"). Staging is safe to overwrite at any time; live is what end-users see.
+
+### Step 1 — Upload to staging
+
 1. Build your app locally (e.g. `npm run build` → `dist/` folder).
 2. Zip the contents of the output folder (not the folder itself):
    ```bash
    cd dist && zip -r ../deploy.zip .
    ```
-3. Upload `deploy.zip` via the dashboard **Sites → Deploy** page.
+3. Upload `deploy.zip` via the dashboard **Deploy** tab on your project page.
 
-SupaBein validates the zip, extracts it, writes a hardening `.htaccess` that disables PHP execution, and atomically swaps the live symlink. Rollback to any previous deploy is instant.
+SupaBein validates the zip, extracts it, writes a hardening `.htaccess` that disables PHP execution, and copies the files to the **staging** directory. The deploy is immediately previewable but **not yet live**.
+
+**Staging URL:** `https://supabein.yourdomain.com/sites/s<site_id>/staging/`
+
+The dashboard shows a **"View Staging →"** button in the page header so you can preview before going live.
+
+### Step 2 — Publish to live
+
+Once satisfied with the staging preview:
+- Click **"Publish to Live"** in the deploy history table, or
+- Call the API directly:
+  ```
+  POST /api/v1/projects/:id/sites/:sid/deploys/:did/publish
+  Authorization: Bearer <token>
+  ```
+
+This copies the staging directory to `current/` and sets it as the active deploy. The **live URL** becomes:
+
+`https://supabein.yourdomain.com/sites/s<site_id>/current/`
+
+### Rollback
+
+Rollback to any previous ready deploy is instant — select the deploy in the history table and click **Rollback**.
 
 To call your project's API from the deployed frontend, use:
 ```

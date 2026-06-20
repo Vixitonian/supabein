@@ -129,6 +129,7 @@ function fmtDate(d) {
   return d ? new Date(d).toLocaleString() : '—';
 }
 
+
 function downloadText(filename, content) {
   const blob = new Blob([content], { type: 'text/plain' });
   const url  = URL.createObjectURL(blob);
@@ -382,18 +383,27 @@ The data API allows **600 requests per minute per project**. Excess requests get
 
 ## Deploying the Frontend
 
-### Option A — Zip upload
+> **Staging-first rule (mandatory):** Every deploy lands in **staging** first — never directly live.
+> Do NOT publish to live unless the user explicitly says so (e.g. "go live", "publish", "push to production").
+> Staging URL: \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/staging/\`
+> Live URL:    \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/current/\`
+
+### Step 1 — Upload to staging
+
+#### Option A — Zip upload
 > **Zip structure**: files must be at the **root** of the zip, not inside a subfolder.
 > ✓ correct: \`cd dist && zip -r ../deploy.zip .\`
 > ✗ wrong: \`zip -r deploy.zip dist/\` — creates a \`dist/\` subfolder inside the zip and the site will 404.
 
 \`\`\`bash
 cd dist && zip -r ../deploy.zip . && cd ..
-curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "zipfile=@./deploy.zip" -F "label=v1.0.0"
+DEPLOY=$(curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "zipfile=@./deploy.zip" -F "label=v1.0.0")
+DEPLOY_ID=$(echo $DEPLOY | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+echo "Staged at: ${siteUrl}/sites/s$SUPABEIN_SITE_ID/staging/"
 \`\`\`
 
-### Option B — File by file (CI/CD)
+#### Option B — File by file (CI/CD)
 \`\`\`bash
 DID=$(curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/open" \\
   -H "Authorization: Bearer $SUPABEIN_TOKEN" -H "Content-Type: application/json" \\
@@ -405,11 +415,17 @@ find dist -type f | while read f; do
     -H "Authorization: Bearer $SUPABEIN_TOKEN" --data-binary "@$f"
 done
 
+# Finalize moves to staging — not live yet
 curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/finalize" \\
   -H "Authorization: Bearer $SUPABEIN_TOKEN"
 \`\`\`
 
-Live site: \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/current/\`
+### Step 2 — Publish to live (only when explicitly told)
+
+\`\`\`bash
+curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DEPLOY_ID/publish" \\
+  -H "Authorization: Bearer $SUPABEIN_TOKEN"
+\`\`\`
 
 ---
 
@@ -449,6 +465,7 @@ async function sbInsert(table, data) {
 - Always create tables before inserting data.
 - Always set policies on new tables — the default is deny all.
 - Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
+- **Always deploy to staging first. Never publish to live unless the user explicitly instructs it** (e.g. "go live", "publish", "push to production"). Staging is safe to overwrite at any time.
 - The anon key is safe for frontend bundles. The PAT and service key must never be in frontend code.
 - Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
 - **Two auth tiers**: use \`/v1/projects/:id/auth/*\` for your app's end-users (project-scoped);
@@ -766,6 +783,746 @@ function renderReset() {
   setApp(wrap);
 }
 
+// ─── AI Panel ────────────────────────────────────────────────────────────────
+
+const AiPanel = (() => {
+  let isOpen = false;
+  let sessions = [];
+  let currentSessionId = null;
+  let projects = [];
+  let selectedProjectId = null;
+  let panelEl = null;
+  let backdropEl = null;
+  let sidebarVisible = false;
+
+  const AI_MODELS = [
+    { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
+    { label: 'Gemini 2.5 Pro',       provider: 'gemini',     model: 'gemini-2.5-pro',                                    badge: 'Smart' },
+    { label: 'GPT-4o',               provider: 'openrouter', model: 'openai/gpt-4o',                                     badge: 'OpenRouter' },
+    { label: 'Claude Sonnet 4.5',    provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5',                       badge: 'OpenRouter' },
+    { label: 'Mistral Small 3.2',    provider: 'openrouter', model: 'mistralai/mistral-small-3.2-24b-instruct',          badge: 'OpenRouter' },
+    { label: 'Qwen3 Coder',          provider: 'openrouter', model: 'qwen/qwen3-coder:free',                             badge: 'Free' },
+    { label: 'Llama 3.3 70B',        provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',            badge: 'Free' },
+    { label: 'Gemma 4 31B',          provider: 'openrouter', model: 'google/gemma-4-31b-it:free',                        badge: 'Free' },
+    { label: 'Gemma 4 26B (MoE)',    provider: 'openrouter', model: 'google/gemma-4-26b-a4b-it:free',                    badge: 'Free' },
+    { label: 'GPT OSS 120B',         provider: 'openrouter', model: 'openai/gpt-oss-120b:free',                          badge: 'Free' },
+    { label: 'GPT OSS 20B',          provider: 'openrouter', model: 'openai/gpt-oss-20b:free',                           badge: 'Free' },
+    { label: 'Nemotron Ultra 550B',  provider: 'openrouter', model: 'nvidia/nemotron-3-ultra-550b-a55b:free',            badge: 'Free' },
+    { label: 'Nemotron Nano Omni',   provider: 'openrouter', model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', badge: 'Free' },
+    { label: 'OWL Alpha',            provider: 'openrouter', model: 'openrouter/owl-alpha',                              badge: 'Free' },
+    { label: 'Nex N2 Pro',           provider: 'openrouter', model: 'nex-agi/nex-n2-pro:free',                           badge: 'Free' },
+    { label: 'Laguna M.1',           provider: 'openrouter', model: 'poolside/laguna-m.1:free',                          badge: 'Free' },
+    { label: 'Laguna XS.2',          provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                         badge: 'Free' },
+  ];
+
+  function getSelectedModel() {
+    try { return JSON.parse(localStorage.getItem('sb:ai_model')) || AI_MODELS[0]; }
+    catch { return AI_MODELS[0]; }
+  }
+  function setSelectedModel(m) { localStorage.setItem('sb:ai_model', JSON.stringify(m)); }
+
+  function updateModelBtn(m) {
+    if (!panelEl) return;
+    const btn = panelEl.querySelector('.ai-model-btn');
+    if (btn) btn.textContent = m.label + ' ▾';
+  }
+
+  function showToast(message, duration = 4500) {
+    if (!panelEl) return;
+    const toast = el('div', { class: 'ai-toast' }, message);
+    panelEl.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('ai-toast-visible'));
+    setTimeout(() => {
+      toast.classList.remove('ai-toast-visible');
+      setTimeout(() => toast.remove(), 300);
+    }, duration);
+  }
+
+  const THINKING_STAGES = {
+    build:    ['Analyzing your idea…', 'Designing data schema…', 'Writing frontend code…', 'Polishing the output…', 'Almost done…'],
+    edit:     ['Reading current schema…', 'Planning the changes…', 'Generating edits…', 'Almost done…'],
+    diagnose: ['Analyzing the issue…', 'Checking schema & policies…', 'Preparing suggestions…', 'Almost done…'],
+    chat:     ['Thinking…', 'Looking up your projects…', 'Formulating reply…'],
+    default:  ['Working on it…', 'Still going…', 'Almost done…'],
+  };
+
+  let stopThinkingStages = null;
+
+  function startThinkingStages(labelEl, mode) {
+    stopThinkingStages?.();
+    const stages = THINKING_STAGES[mode] || THINKING_STAGES.default;
+    let i = 0;
+    labelEl.textContent = stages[0];
+    const timer = setInterval(() => {
+      i++;
+      if (i < stages.length) labelEl.textContent = stages[i];
+      if (i >= stages.length - 1) clearInterval(timer);
+    }, 6000);
+    stopThinkingStages = () => { clearInterval(timer); stopThinkingStages = null; };
+  }
+
+  async function callWithFallback(path, body) {
+    let selectedM = getSelectedModel();
+    const tried = new Set();
+    while (true) {
+      tried.add(selectedM.model);
+      try {
+        return await Api.post(path, { ...body, provider: selectedM.provider, model: selectedM.model });
+      } catch (e) {
+        if (e.status === 402) {
+          const nextModel = AI_MODELS.find(m => !tried.has(m.model));
+          if (nextModel) {
+            showToast(`${selectedM.label} hit its limit — switching to ${nextModel.label}`);
+            setSelectedModel(nextModel);
+            updateModelBtn(nextModel);
+            selectedM = nextModel;
+            continue;
+          }
+        }
+        throw e;
+      }
+    }
+  }
+
+  function renderTokenUsage(usage) {
+    if (!usage || !usage.total_tokens) return null;
+    return el('div', { class: 'ai-token-usage' },
+      `↑ ${usage.prompt_tokens.toLocaleString()} / ↓ ${usage.completion_tokens.toLocaleString()} tokens`
+    );
+  }
+
+  function getOrCreateBackdrop() {
+    if (!backdropEl) {
+      backdropEl = document.createElement('div');
+      backdropEl.className = 'ai-panel-backdrop';
+      backdropEl.addEventListener('click', close);
+      document.body.appendChild(backdropEl);
+    }
+    return backdropEl;
+  }
+
+  function getSession(id) { return sessions.find(s => s.id === id) || null; }
+  function currentSession() { return getSession(currentSessionId); }
+
+  async function persistSession(sess) {
+    if (!sess) return;
+    try {
+      if (sess._new) {
+        const created = await Api.post('/v1/ai/sessions', {
+          name: sess.name,
+          project_id: sess.projectId || undefined,
+        });
+        sess.id = created.id;
+        sess._new = false;
+      } else {
+        await Api.patch('/v1/ai/sessions/' + sess.id, {
+          name: sess.name,
+          messages: sess.messages,
+        });
+      }
+    } catch(e) { /* non-fatal — UI already updated */ }
+  }
+
+  async function loadSessions() {
+    try {
+      const result = await Api.get('/v1/ai/sessions');
+      sessions = Array.isArray(result) ? result : [];
+      sessions.forEach(s => { s.messages = s.messages || []; });
+    } catch(e) {
+      console.error('[AiPanel] loadSessions failed:', e);
+      sessions = [];
+    }
+  }
+
+  async function createSession(projectId) {
+    const sess = {
+      id: null, _new: true,
+      name: 'New session',
+      projectId: projectId || null,
+      messages: [],
+      created_at: new Date().toISOString(),
+    };
+    sessions.unshift(sess);
+    await persistSession(sess);
+    return sess;
+  }
+
+  async function addMessage(sessionId, message) {
+    const sess = getSession(sessionId);
+    if (!sess) return;
+    sess.messages.push({ ...message, id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2) });
+    if (sess.name === 'New session' && message.role === 'user') {
+      sess.name = message.content.slice(0, 42) + (message.content.length > 42 ? '…' : '');
+    }
+    await persistSession(sess);
+  }
+
+  function saveSessions() {
+    const sess = currentSession();
+    if (sess) persistSession(sess);
+  }
+
+  async function loadProjects() {
+    try {
+      const result = await Api.get('/v1/projects');
+      projects = Array.isArray(result) ? result : [];
+    }
+    catch(e) { projects = []; }
+  }
+
+  function detectCurrentProject() {
+    const path = window.location.hash.replace('#', '') || '/';
+    const m = path.match(/^\/projects\/(\d+)/);
+    return m ? parseInt(m[1]) : null;
+  }
+
+  function renderSidebar() {
+    if (!panelEl) return;
+    const container = panelEl.querySelector('.ai-session-list');
+    if (!container) return;
+    container.innerHTML = '';
+    if (!sessions.length) {
+      container.appendChild(el('div', { class: 'ai-session-empty' }, 'No sessions yet'));
+      return;
+    }
+    sessions.forEach(sess => {
+      const item = el('div', {
+        class: 'ai-session-item' + (sess.id === currentSessionId ? ' active' : ''),
+        onClick: () => {
+          switchSession(sess.id);
+          if (window.innerWidth < 768) toggleSidebar(false);
+        }
+      }, sess.name);
+      container.appendChild(item);
+    });
+  }
+
+  function renderMessages() {
+    if (!panelEl) return;
+    const container = panelEl.querySelector('.ai-messages');
+    if (!container) return;
+    container.innerHTML = '';
+    const sess = currentSession();
+    if (!sess || !sess.messages.length) {
+      container.appendChild(el('div', { class: 'ai-welcome' },
+        el('div', { class: 'ai-welcome-icon' }, '✦'),
+        el('p', {}, 'What do you want to do?'),
+        el('p', { class: 'text-muted', style: 'font-size:12px;margin-top:4px' },
+          'Build a new project, edit an existing one, or describe a problem.')
+      ));
+      return;
+    }
+    sess.messages.forEach(msg => container.appendChild(renderMessage(msg)));
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function renderMessage(msg) {
+    if (msg.role === 'user') {
+      return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
+    }
+    if (msg.type === 'thinking') {
+      const thinkingLabel = el('span', { class: 'ai-thinking-label' });
+      const bubble = el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
+        el('span', { class: 'ai-thinking-dots' }, '● ● ●'),
+        thinkingLabel
+      );
+      startThinkingStages(thinkingLabel, msg.stageMode || 'default');
+      return bubble;
+    }
+    if (msg.type === 'plan') return renderPlanCard(msg);
+    if (msg.type === 'result') return renderResultCard(msg);
+    if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
+    if (msg.type === 'error') {
+      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ ' + msg.content);
+    }
+    const bubble = el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
+    const tokenEl = renderTokenUsage(msg.usage);
+    if (tokenEl) bubble.appendChild(tokenEl);
+    return bubble;
+  }
+
+  function renderPlanCard(msg) {
+    const { plan, summary, mode } = msg.data;
+    const lines = [];
+
+    if (mode === 'build') {
+      lines.push(el('div', { class: 'ai-plan-row' }, el('strong', {}, 'Project: '), summary.project_name));
+      if (summary.tables && summary.tables.length) {
+        lines.push(el('div', { class: 'ai-plan-section' }, 'Tables'));
+        summary.tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
+      }
+      if (summary.frontend_files) {
+        lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
+          el('strong', {}, 'Frontend: '), summary.frontend_files + ' files'
+        ));
+      }
+
+      // Collapsible schema detail
+      if (plan && plan.tables && plan.tables.length) {
+        const schemaDetails = el('details', { class: 'ai-plan-details' },
+          el('summary', { class: 'ai-plan-details-summary' }, 'Schema'),
+          ...plan.tables.map(t =>
+            el('div', { class: 'ai-plan-details-table' },
+              el('div', { class: 'ai-plan-details-tname' }, t.name),
+              ...(t.columns || []).map(c =>
+                el('div', { class: 'ai-plan-details-col' },
+                  el('span', { class: 'ai-plan-details-colname' }, c.name),
+                  el('span', { class: 'ai-plan-details-coltype' }, c.type),
+                  el('span', { class: 'ai-plan-details-colnull' + (c.nullable ? ' muted' : '') },
+                    c.nullable ? 'NULL' : 'NOT NULL'
+                  )
+                )
+              )
+            )
+          )
+        );
+        lines.push(schemaDetails);
+      }
+
+      // Collapsible file list
+      if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+        const filesDetails = el('details', { class: 'ai-plan-details' },
+          el('summary', { class: 'ai-plan-details-summary' }, 'Files'),
+          ...plan.frontend.files.map(f =>
+            el('div', { class: 'ai-plan-details-file' }, f.path)
+          )
+        );
+        lines.push(filesDetails);
+      }
+
+      // Download plan JSON button
+      if (plan) {
+        const dlBtn = el('button', { class: 'ai-plan-dl-btn', onClick: () => {
+          const name = (plan.subdomain || plan.project_name || 'plan').replace(/\s+/g, '-').toLowerCase();
+          downloadText(name + '.json', JSON.stringify(plan, null, 2));
+        }}, '↓ Download JSON');
+        lines.push(dlBtn);
+      }
+    } else if (mode === 'edit') {
+      const hasChanges = (summary.add_tables && summary.add_tables.length) ||
+                         (summary.add_columns && summary.add_columns.length) ||
+                         (summary.update_policies && summary.update_policies.length) ||
+                         summary.frontend_files;
+      if (!hasChanges) {
+        lines.push(el('div', { class: 'text-muted', style: 'font-size:13px' }, 'No changes needed for this request.'));
+      } else {
+        if (summary.add_tables && summary.add_tables.length) {
+          lines.push(el('div', { class: 'ai-plan-section' }, 'New tables'));
+          summary.add_tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
+        }
+        if (summary.add_columns && summary.add_columns.length) {
+          lines.push(el('div', { class: 'ai-plan-section' }, 'New columns'));
+          summary.add_columns.forEach(c => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + c)));
+        }
+        if (summary.update_policies && summary.update_policies.length) {
+          lines.push(el('div', { class: 'ai-plan-section' }, 'Policy changes'));
+          summary.update_policies.forEach(p => lines.push(el('div', { class: 'ai-plan-item' }, '~ ' + p)));
+        }
+        if (summary.frontend_files) {
+          lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
+            el('strong', {}, 'Frontend: '), summary.frontend_files + ' files updated'
+          ));
+        }
+        // Collapsible file list
+        if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+          const filesDetails = el('details', { class: 'ai-plan-details' },
+            el('summary', { class: 'ai-plan-details-summary' }, 'Files'),
+            ...plan.frontend.files.map(f =>
+              el('div', { class: 'ai-plan-details-file' }, f.path)
+            )
+          );
+          lines.push(filesDetails);
+        }
+        // Download plan JSON button
+        if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+          const dlBtn = el('button', { class: 'ai-plan-dl-btn', onClick: () => {
+            const name = 'edit-' + (plan.project_id || 'plan');
+            downloadText(name + '.json', JSON.stringify(plan, null, 2));
+          }}, '↓ Download JSON');
+          lines.push(dlBtn);
+        }
+      }
+    }
+
+    const tokenEl = renderTokenUsage(msg.data?.usage || msg.usage);
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' + (msg.settled ? ' ai-plan-settled' : '') },
+      el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
+      ...lines,
+      ...(tokenEl ? [tokenEl] : [])
+    );
+
+    if (!msg.settled) {
+      const actionsDiv = el('div', { class: 'ai-plan-actions' });
+
+      const cancelBtn = el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        msg.settled = true;
+        msg.cancelled = true;
+        saveSessions();
+        actionsDiv.innerHTML = '';
+        actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled'));
+        card.classList.add('ai-plan-settled');
+      }}, 'Cancel');
+
+      const applyBtn = el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+        msg.settled = true;
+        saveSessions();
+        actionsDiv.innerHTML = '';
+        actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Applying…'));
+        card.classList.add('ai-plan-settled');
+        await applyPlan(plan, mode);
+      }}, '✓ Apply');
+
+      actionsDiv.appendChild(cancelBtn);
+      actionsDiv.appendChild(applyBtn);
+      card.appendChild(actionsDiv);
+    } else if (msg.cancelled) {
+      card.appendChild(el('div', { class: 'ai-plan-actions' },
+        el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled')
+      ));
+    } else {
+      card.appendChild(el('div', { class: 'ai-plan-actions' },
+        el('span', { style: 'font-size:12px;color:var(--accent)' }, '✓ Applied')
+      ));
+    }
+
+    return card;
+  }
+
+  function renderResultCard(msg) {
+    const data = msg.data;
+    const lines = [];
+    if (data.project) lines.push(el('div', { class: 'ai-result-row' }, '✓ Project: ', el('strong', {}, data.project.name)));
+    if (data.tables && data.tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables: ' + data.tables.map(t => t.name || t).join(', ')));
+    if (data.added_tables && data.added_tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables added: ' + data.added_tables.join(', ')));
+    if (data.added_columns && data.added_columns.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Columns: ' + data.added_columns.join(', ')));
+    if (data.site) lines.push(el('div', { class: 'ai-result-row' }, '✓ Frontend deployed'));
+
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
+
+    if (data.project) {
+      card.appendChild(el('button', {
+        class: 'btn btn-primary btn-sm', style: 'margin-top:10px',
+        onClick: () => { close(); Router.navigate('/projects/' + data.project.id); }
+      }, 'Open Project →'));
+    }
+    return card;
+  }
+
+  function renderDiagnosisCard(msg) {
+    const data = msg.data;
+    const lines = [el('div', { class: 'ai-diagnosis-text' }, data.diagnosis)];
+    if (data.suggestions && data.suggestions.length) {
+      lines.push(el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, 'Suggestions'));
+      data.suggestions.forEach((s, i) =>
+        lines.push(el('div', { class: 'ai-plan-item' }, (i + 1) + '. ' + s))
+      );
+    }
+    const tokenEl = renderTokenUsage(data?.usage || msg.usage);
+    if (tokenEl) lines.push(tokenEl);
+    return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
+  }
+
+  function renderProjectPicker() {
+    if (!panelEl) return;
+    const picker = panelEl.querySelector('#ai-project-picker');
+    if (!picker) return;
+    const current = picker.value;
+    picker.innerHTML = '';
+    picker.appendChild(el('option', { value: '' }, '✦ Platform'));
+    projects.forEach(p => picker.appendChild(el('option', { value: String(p.id) }, p.name)));
+    picker.value = selectedProjectId ? String(selectedProjectId) : '';
+    if (picker.value === '' && current) picker.value = '';
+  }
+
+  async function loadSessionMessages(id) {
+    if (!id) return;
+    try {
+      const full = await Api.get('/v1/ai/sessions/' + id);
+      if (full && Array.isArray(full.messages)) {
+        const idx = sessions.findIndex(s => s.id === id);
+        if (idx !== -1) sessions[idx].messages = full.messages;
+      }
+    } catch(e) {}
+  }
+
+  async function switchSession(id) {
+    currentSessionId = id;
+    const sess = getSession(id);
+    if (sess) selectedProjectId = sess.projectId;
+    renderSidebar();
+    renderMessages();
+    renderProjectPicker();
+    await loadSessionMessages(id);
+    renderMessages();
+  }
+
+  async function newSession() {
+    const sess = await createSession(selectedProjectId);
+    currentSessionId = sess.id;
+    renderSidebar();
+    renderMessages();
+  }
+
+  function toggleSidebar(force) {
+    sidebarVisible = force !== undefined ? force : !sidebarVisible;
+    if (!panelEl) return;
+    const sidebar = panelEl.querySelector('.ai-sessions');
+    const overlay = panelEl.querySelector('.ai-sidebar-overlay');
+    if (sidebar) sidebar.classList.toggle('ai-sidebar-visible', sidebarVisible);
+    if (overlay) overlay.classList.toggle('ai-sidebar-overlay-visible', sidebarVisible);
+  }
+
+  async function sendMessage() {
+    if (!panelEl) return;
+    const textarea = panelEl.querySelector('#ai-textarea');
+    const prompt = textarea ? textarea.value.trim() : '';
+    if (!prompt) return;
+    if (textarea) { textarea.value = ''; textarea.style.height = 'auto'; const sb = panelEl.querySelector('.ai-send-btn'); if (sb) sb.disabled = true; }
+
+    if (!currentSessionId || !getSession(currentSessionId)) {
+      const sess = await createSession(selectedProjectId);
+      currentSessionId = sess.id;
+    } else {
+      const sess = currentSession();
+      if (sess) { sess.projectId = selectedProjectId; persistSession(sess); }
+    }
+
+    await addMessage(currentSessionId, { role: 'user', content: prompt });
+    renderSidebar();
+    renderMessages();
+
+    const thinkingId = 'thinking_' + Date.now();
+    const sess = currentSession();
+    const stageMode = selectedProjectId ? 'edit' : 'build';
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+    renderMessages();
+
+    try {
+      const body = { prompt };
+      if (selectedProjectId) body.project_id = selectedProjectId;
+
+      // Build conversation history for Gemini context (exclude current message and thinking placeholders)
+      const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking' && m.id !== thinkingId);
+      if (priorMessages.length > 0) {
+        body.history = priorMessages.slice(-20).map(m => {
+          if (m.role === 'user') return { role: 'user', text: m.content };
+          if (m.type === 'plan') {
+            const s = m.data?.summary || {};
+            return { role: 'model', text: 'I proposed a plan. Summary: ' + JSON.stringify(s) };
+          }
+          if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
+          if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
+          if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
+          return { role: 'model', text: m.content || '' };
+        }).filter(h => h.text.trim() !== '');
+      }
+
+      const response = await callWithFallback('/v1/ai/plan', body);
+
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+
+      if (response.mode === 'chat') {
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
+      } else if (response.mode === 'diagnose') {
+        await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
+      } else {
+        await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
+      }
+    } catch(e) {
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+    }
+
+    renderSidebar();
+    renderMessages();
+  }
+
+  async function applyPlan(plan, mode) {
+    const sess = currentSession();
+    const thinkingId = 'apply_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
+    renderMessages();
+
+    try {
+      const { provider: aProvider, model: aModel } = getSelectedModel();
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+    } catch(e) {
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+    }
+
+    renderMessages();
+  }
+
+  function buildPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'ai-panel';
+    panel.id = 'ai-panel';
+
+    const sidebarOverlay = el('div', { class: 'ai-sidebar-overlay', onClick: () => toggleSidebar(false) });
+
+    const sessionList = el('div', { class: 'ai-session-list' });
+    const sidebar = el('div', { class: 'ai-sessions' },
+      el('div', { class: 'ai-sessions-header' },
+        el('span', { class: 'ai-sessions-title' }, 'History')
+      ),
+      sessionList
+    );
+
+    const messages = el('div', { class: 'ai-messages' });
+
+    const projectPicker = el('select', { id: 'ai-project-picker', class: 'ai-project-picker' });
+    projectPicker.addEventListener('change', () => {
+      selectedProjectId = projectPicker.value ? parseInt(projectPicker.value) : null;
+    });
+
+    const textarea = el('textarea', {
+      id: 'ai-textarea',
+      class: 'ai-textarea',
+      placeholder: 'Build, edit, or diagnose…'
+    });
+    textarea.setAttribute('rows', '1');
+    textarea.addEventListener('input', () => {
+      textarea.style.height = 'auto';
+      textarea.style.height = Math.min(textarea.scrollHeight, 180) + 'px';
+      sendBtn.disabled = textarea.value.trim() === '';
+    });
+
+    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '↑');
+    sendBtn.disabled = true;
+
+    const inputBar = el('div', { class: 'ai-input-bar' },
+      el('div', { class: 'ai-input-card' },
+        textarea,
+        el('div', { class: 'ai-input-actions' },
+          projectPicker,
+          sendBtn
+        )
+      )
+    );
+
+    const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
+    const newSessionBtn = el('button', { class: 'ai-new-session-btn', title: 'New session', onClick: newSession }, '✎');
+    const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
+
+    // Model selector button + dropdown
+    function buildModelSelector() {
+      const sel = getSelectedModel();
+      const btn = el('button', { class: 'ai-model-btn', title: 'Switch AI model' }, sel.label + ' ▾');
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const existing = header.querySelector('.ai-model-dropdown');
+        if (existing) { existing.remove(); return; }
+        const dropdown = el('div', { class: 'ai-model-dropdown' });
+        AI_MODELS.forEach(m => {
+          const cur = getSelectedModel();
+          const item = el('div', { class: 'ai-model-option' + (m.model === cur.model ? ' active' : '') },
+            el('span', {}, m.label),
+            el('span', { class: 'ai-model-badge' }, m.badge)
+          );
+          item.addEventListener('click', () => {
+            setSelectedModel(m);
+            btn.textContent = m.label + ' ▾';
+            dropdown.remove();
+          });
+          dropdown.appendChild(item);
+        });
+        header.appendChild(dropdown);
+        const onOutside = () => { dropdown.remove(); document.removeEventListener('click', onOutside); };
+        setTimeout(() => document.addEventListener('click', onOutside), 0);
+      });
+      return btn;
+    }
+    const modelSelectorBtn = buildModelSelector();
+
+    const header = el('div', { class: 'ai-header' },
+      hamburgerBtn,
+      el('span', { class: 'ai-header-title' }, '✦ SupaBein AI'),
+      modelSelectorBtn,
+      newSessionBtn,
+      closeBtn
+    );
+
+    const mainArea = el('div', { class: 'ai-main' }, header, messages, inputBar);
+
+    panel.appendChild(sidebarOverlay);
+    panel.appendChild(sidebar);
+    panel.appendChild(mainArea);
+
+    return panel;
+  }
+
+  async function open(options = {}) {
+    if (isOpen) return;
+    isOpen = true;
+
+    if (!panelEl) {
+      panelEl = buildPanel();
+      document.body.appendChild(panelEl);
+    }
+
+    const autoProject = detectCurrentProject();
+    selectedProjectId = (options.projectId !== undefined) ? options.projectId : autoProject;
+
+    await Promise.all([loadSessions(), loadProjects()]);
+    renderProjectPicker();
+
+    if (!currentSessionId || !getSession(currentSessionId)) {
+      if (sessions.length) {
+        currentSessionId = sessions[0].id;
+        const sess = getSession(currentSessionId);
+        if (sess) selectedProjectId = sess.projectId || selectedProjectId;
+      } else {
+        const sess = await createSession(selectedProjectId);
+        currentSessionId = sess.id;
+      }
+    }
+
+    renderSidebar();
+    renderMessages();
+    renderProjectPicker();
+
+    await loadSessionMessages(currentSessionId);
+    renderMessages();
+
+    panelEl.classList.add('ai-panel-open');
+    getOrCreateBackdrop().classList.add('active');
+
+    const fab = document.getElementById('ai-fab');
+    if (fab) fab.classList.add('ai-fab-hidden');
+
+    setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
+  }
+
+  function close() {
+    if (!panelEl) return;
+    panelEl.classList.remove('ai-panel-open');
+    if (backdropEl) backdropEl.classList.remove('active');
+    isOpen = false;
+    sidebarVisible = false;
+    toggleSidebar(false);
+    const fab = document.getElementById('ai-fab');
+    if (fab) fab.classList.remove('ai-fab-hidden');
+  }
+
+  function toggle(options) {
+    if (isOpen) close(); else open(options);
+  }
+
+  return { open, close, toggle };
+})();
+
+function initAiFab() {
+  const fab = el('button', { class: 'ai-fab', id: 'ai-fab', onClick: () => AiPanel.toggle() }, '✦ AI');
+  document.body.appendChild(fab);
+}
+
 // Projects list
 async function renderProjects() {
   if (!requireAuth()) return;
@@ -782,7 +1539,11 @@ async function renderProjects() {
     const list = document.getElementById('project-list');
 
     if (!projects.length) {
-      list.innerHTML = '<div class="text-muted">No projects yet. Create one to get started.</div>';
+      list.innerHTML = '';
+      list.appendChild(el('div', { class: 'ai-empty-state' },
+        el('p', { class: 'text-muted' }, 'No projects yet.'),
+        el('button', { class: 'btn btn-secondary', style: 'margin-top:16px', onClick: () => showNewProjectModal() }, 'New Project')
+      ));
       return;
     }
 
@@ -864,12 +1625,69 @@ async function renderProject({ id }) {
   try {
     const project = await Api.get(`/v1/projects/${id}`);
 
-    const copyAnonBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
-    copyAnonBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText(project.anon_key);
-      copyAnonBtn.textContent = 'Copied!';
-      setTimeout(() => { copyAnonBtn.textContent = 'Copy'; }, 1500);
+
+    const tabTables = el('div', { class: 'tab active' }, 'Tables');
+    const tabUsers  = el('div', { class: 'tab' }, 'Users');
+    const tabApi    = el('div', { class: 'tab' }, 'API');
+    const tabDeploy = el('div', { class: 'tab' }, 'Deploy');
+
+    const paneTablesEl = el('div', { id: 'pane-proj-tables' });
+    const paneUsersEl  = el('div', { id: 'pane-proj-users',  class: 'hidden' });
+    const paneApiEl    = el('div', { id: 'pane-proj-api',    class: 'hidden' });
+    const paneDeployEl = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
+
+    const allTabs  = [tabTables, tabUsers, tabApi, tabDeploy];
+    const allPanes = [paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl];
+
+    function switchProjectTab(idx) {
+      allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
+      allPanes.forEach((p, i) => p.classList.toggle('hidden', i !== idx));
+    }
+
+    tabTables.addEventListener('click', () => {
+      switchProjectTab(0);
+      if (!paneTablesEl.dataset.loaded) {
+        paneTablesEl.dataset.loaded = '1';
+        loadTablesPane(id, paneTablesEl);
+      }
     });
+    tabUsers.addEventListener('click', () => {
+      switchProjectTab(1);
+      if (!paneUsersEl.dataset.loaded) {
+        paneUsersEl.dataset.loaded = '1';
+        loadUsersPane(id, paneUsersEl);
+      }
+    });
+    tabApi.addEventListener('click', () => {
+      switchProjectTab(2);
+      if (!paneApiEl.dataset.loaded) {
+        paneApiEl.dataset.loaded = '1';
+        loadApiPane(id, paneApiEl);
+      }
+    });
+    tabDeploy.addEventListener('click', () => {
+      switchProjectTab(3);
+      if (!paneDeployEl.dataset.loaded) {
+        paneDeployEl.dataset.loaded = '1';
+        loadDeployPane(id, paneDeployEl);
+      }
+    });
+
+    // Async: fetch site to show "View Site" in header if a live deploy exists
+    Api.get(`/v1/projects/${id}/sites`).then(sites => {
+      const liveSite = Array.isArray(sites) && sites.find(s => s.current_deploy_id);
+      if (!liveSite) return;
+      const hdr = document.querySelector('.page-header');
+      if (hdr && !hdr.querySelector('#proj-view-site-btn')) {
+        hdr.appendChild(el('a', {
+          id: 'proj-view-site-btn',
+          class: 'btn btn-primary btn-sm',
+          href: `/sites/s${liveSite.id}/current/`,
+          target: '_blank',
+          rel: 'noopener'
+        }, 'View Site →'));
+      }
+    }).catch(() => {});
 
     const content = [
       el('div', { class: 'page-header' },
@@ -879,32 +1697,195 @@ async function renderProject({ id }) {
         )
       ),
 
-      el('div', { style: 'display:flex;flex-wrap:wrap;gap:10px;margin-bottom:24px' },
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/tables` }, 'Tables'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/users` }, 'Users'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/api` }, 'API'),
-        el('a', { class: 'btn btn-secondary', href: `#/projects/${id}/sites` }, 'Deploy'),
-      ),
 
-      ...(project.anon_key ? [
-        el('div', { class: 'card' },
-          el('div', { class: 'card-title' }, 'Anon Key'),
-          el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-bottom:10px' },
-            'Use in your frontend. Subject to table policies (anon role).'
-          ),
-          el('div', { style: 'display:flex;gap:8px;align-items:center' },
-            el('code', { style: 'font-size:11px;background:var(--bg);padding:6px 10px;border-radius:6px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block' },
-              project.anon_key.slice(0, 48) + '…'
-            ),
-            copyAnonBtn
-          )
-        )
-      ] : []),
+      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabUsers, tabApi, tabDeploy),
+      paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl,
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
+    // Eagerly load the default (Tables) tab
+    paneTablesEl.dataset.loaded = '1';
+    loadTablesPane(id, paneTablesEl);
   } catch (e) {
     setApp(`<div class="alert alert-danger">${e.message}</div>`);
+  }
+}
+
+async function loadTablesPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const tables = await Api.get(`/v1/projects/${projectId}/tables`);
+
+    const newTableBtn = el('button', { class: 'btn btn-primary btn-sm' }, '+ New Table');
+    newTableBtn.addEventListener('click', () => showNewTableModal(projectId));
+
+    let tableContent;
+    if (!tables.length) {
+      tableContent = el('div', { class: 'text-muted', style: 'padding:20px 0' }, 'No tables yet.');
+    } else {
+      tableContent = el('table', { class: 'data-table' },
+        el('thead', {}, el('tr', {},
+          el('th', {}, 'Name'), el('th', {}, 'Physical Name'), el('th', {}, '')
+        )),
+        el('tbody', {}, ...tables.map(t =>
+          el('tr', {},
+            el('td', {}, el('a', { href: `#/projects/${projectId}/tables/${t.table_name}` }, t.table_name)),
+            el('td', { class: 'text-muted text-sm' }, t.physical_name),
+            el('td', {},
+              el('button', {
+                class: 'btn btn-sm btn-danger',
+                onClick: async () => {
+                  if (!confirm(`Drop table "${t.table_name}"?`)) return;
+                  try {
+                    await Api.delete(`/v1/projects/${projectId}/tables/${t.table_name}`);
+                    loadTablesPane(projectId, container);
+                  } catch (e) { alert(e.message); }
+                }
+              }, 'Drop')
+            )
+          )
+        ))
+      );
+    }
+
+    container.innerHTML = '';
+    container.appendChild(el('div', { style: 'display:flex;justify-content:space-between;align-items:center;margin-bottom:16px' },
+      el('span', { class: 'text-muted', style: 'font-size:0.85rem' }, `${tables.length} table${tables.length !== 1 ? 's' : ''}`),
+      newTableBtn
+    ));
+    container.appendChild(tableContent);
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function loadUsersPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const result = await Api.get(`/v1/projects/${projectId}/users`);
+    const users = result.users || [];
+
+    async function deleteUser(uid) {
+      if (!confirm('Delete this user? This cannot be undone.')) return;
+      try {
+        await Api.delete(`/v1/projects/${projectId}/users/${uid}`);
+        loadUsersPane(projectId, container);
+      } catch (e) { alert('Failed to delete user: ' + e.message); }
+    }
+
+    const rows = users.length === 0
+      ? [el('tr', {}, el('td', { colspan: '4', style: 'text-align:center;color:var(--text-muted);padding:32px' },
+          'No end-users yet. Users appear here after they sign up via your app.'))]
+      : users.map(u =>
+          el('tr', {},
+            el('td', {}, u.email),
+            el('td', {}, String(u.id)),
+            el('td', {}, String(u.created_at ?? '')),
+            el('td', {}, el('button', { class: 'btn btn-sm btn-danger', onClick: () => deleteUser(u.id) }, 'Delete'))
+          )
+        );
+
+    container.innerHTML = '';
+    container.appendChild(el('p', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:12px' },
+      `${users.length} end-user${users.length !== 1 ? 's' : ''} registered`
+    ));
+    container.appendChild(
+      el('div', { class: 'card' },
+        el('div', { class: 'table-responsive' },
+          el('table', { class: 'table' },
+            el('thead', {}, el('tr', {},
+              el('th', {}, 'Email'), el('th', {}, 'ID'), el('th', {}, 'Joined'), el('th', {}, '')
+            )),
+            el('tbody', {}, ...rows)
+          )
+        )
+      )
+    );
+    container.appendChild(
+      el('div', { class: 'card' },
+        el('h3', { style: 'margin-top:0;font-size:0.95rem' }, 'Project User Auth API'),
+        el('p', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:0' },
+          "Your app's end-users sign up and log in via the project auth endpoints. See the ",
+          el('a', { href: `#/projects/${projectId}/api` }, 'API tab'),
+          ' for curl examples.'
+        )
+      )
+    );
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function loadApiPane(projectId, container) {
+  return renderApi({ id: projectId }, container);
+}
+
+async function loadDeployPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const sites = await Api.get(`/v1/projects/${projectId}/sites`);
+
+    if (!sites.length) {
+      container.innerHTML = '';
+      const subdomainInp = el('input', { type: 'text', class: 'input', placeholder: 'my-app' });
+      const spaModeInp   = el('input', { type: 'checkbox', id: 'dp-spa-mode' });
+      spaModeInp.checked = true;
+      const createBtn    = el('button', { class: 'btn btn-primary' }, 'Create Site');
+      createBtn.addEventListener('click', async () => {
+        const subdomain = subdomainInp.value.trim();
+        const spa_mode  = spaModeInp.checked;
+        if (!subdomain) return;
+        try {
+          await Api.post(`/v1/projects/${projectId}/sites`, { subdomain, spa_mode });
+          container.dataset.loaded = '';
+          loadDeployPane(projectId, container);
+        } catch (e) { alert(e.message); }
+      });
+      container.appendChild(el('div', { class: 'card' },
+        el('div', { class: 'card-title' }, 'Create your site'),
+        el('div', { class: 'form-group' },
+          el('label', {}, 'Subdomain'),
+          subdomainInp
+        ),
+        el('div', { class: 'form-group', style: 'display:flex;align-items:center;gap:8px' },
+          spaModeInp,
+          el('label', { for: 'dp-spa-mode' }, 'SPA Mode (React/Vue/etc — rewrites all paths to index.html)')
+        ),
+        createBtn
+      ));
+      return;
+    }
+
+    const site   = sites[0];
+    const siteId = site.id;
+
+    const menuBtn  = el('button', { class: 'btn btn-secondary btn-sm', style: 'position:relative' }, '•••');
+    const dropdown = el('div', { class: 'dropdown hidden' },
+      el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Delete Site')
+    );
+    menuBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      dropdown.classList.toggle('hidden');
+    });
+    document.addEventListener('click', () => dropdown.classList.add('hidden'));
+    dropdown.querySelector('button').addEventListener('click', async () => {
+      dropdown.classList.add('hidden');
+      if (!confirm('Delete this site and all its deploys? This cannot be undone.')) return;
+      try {
+        await Api.delete(`/v1/projects/${projectId}/sites/${siteId}`);
+        container.dataset.loaded = '';
+        loadDeployPane(projectId, container);
+      } catch (e) { alert(e.message); }
+    });
+
+    const deployContentEl = el('div', { id: 'deploy-content' }, 'Loading…');
+    container.innerHTML = '';
+    container.appendChild(el('div', { style: 'display:flex;justify-content:flex-end;margin-bottom:8px;gap:8px;position:relative' }, menuBtn, dropdown));
+    container.appendChild(deployContentEl);
+
+    await loadDeployContent(projectId, siteId);
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
@@ -1410,15 +2391,6 @@ async function loadDeployContent(projectId, siteId) {
       Api.get(`/v1/projects/${projectId}/sites/${siteId}/deploys`)
     ]);
 
-    const header = document.querySelector('.page-header');
-    const existingViewBtn = header && header.querySelector('#view-site-btn');
-    if (existingViewBtn) existingViewBtn.remove();
-    if (header && site.current_deploy_id) {
-      header.appendChild(
-        el('a', { id: 'view-site-btn', class: 'btn btn-primary btn-sm', href: `/sites/s${siteId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →')
-      );
-    }
-
     const uploadForm = h(`
       <div class="card">
         <div class="card-title">Upload Deploy (zip)</div>
@@ -1430,7 +2402,7 @@ async function loadDeployContent(projectId, siteId) {
           <label class="label">Zip file</label>
           <input type="file" id="zip-file" accept=".zip">
         </div>
-        <button class="btn btn-primary" id="deploy-btn">Deploy</button>
+        <button class="btn btn-primary" id="deploy-btn">Deploy to Staging</button>
         <div class="progress-wrap hidden" id="progress-wrap">
           <div class="progress-bar" id="progress-bar"></div>
         </div>
@@ -1475,7 +2447,7 @@ async function loadDeployContent(projectId, siteId) {
           xhr.send(fd);
         });
 
-        status.textContent = 'Deployed!';
+        status.textContent = 'Staged! Click "Publish to Live" to go live.';
         status.style.color = 'var(--accent)';
         await loadDeployContent(projectId, siteId);
       } catch (e) {
@@ -1499,16 +2471,33 @@ async function loadDeployContent(projectId, siteId) {
           el('tbody', {}, ...deploys.map((d, idx) => {
             const isCurrent = d.id === site.current_deploy_id;
             const nextReady = deploys.slice(idx + 1).find(x => x.status === 'ready');
+            const isStaging = d.id === site.staging_deploy_id;
             const labelEl = el('span', {}, d.version_label || '—');
             if (isCurrent) {
               const chip = el('span', { class: 'badge badge-green', style: 'margin-left:6px;font-size:0.7rem' }, 'live');
+              labelEl.appendChild(chip);
+            } else if (isStaging) {
+              const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'staging');
               labelEl.appendChild(chip);
             } else if (d.status === 'pending') {
               const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'pending');
               labelEl.appendChild(chip);
             }
             const actions = el('td', { style: 'white-space:nowrap' });
-            if (!isCurrent && d.status === 'ready') {
+            if (isStaging && d.status === 'ready') {
+              actions.appendChild(el('button', {
+                class: 'btn btn-sm btn-primary',
+                style: 'margin-right:6px',
+                onClick: async () => {
+                  if (!confirm('Publish this staging deploy to live?')) return;
+                  try {
+                    await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/publish`);
+                    loadDeployContent(projectId, siteId);
+                  } catch (e) { alert(e.message); }
+                }
+              }, 'Publish to Live'));
+            }
+            if (!isCurrent && !isStaging && d.status === 'ready') {
               actions.appendChild(el('button', {
                 class: 'btn btn-sm btn-secondary',
                 style: 'margin-right:6px',
@@ -1539,6 +2528,29 @@ async function loadDeployContent(projectId, siteId) {
                   } catch (e) { alert(e.message); }
                 }
               }, 'Diff'));
+            }
+            if (d.status === 'ready') {
+              actions.appendChild(el('button', {
+                class: 'btn btn-sm btn-ghost',
+                onClick: async (e) => {
+                  e.target.disabled = true; e.target.textContent = '…';
+                  try {
+                    const res = await fetch(`/api/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/download`, {
+                      headers: { Authorization: 'Bearer ' + (Auth.getToken() || '') }
+                    });
+                    if (!res.ok) throw new Error('Download failed');
+                    const cd = res.headers.get('Content-Disposition') || '';
+                    const fnMatch = cd.match(/filename="([^"]+)"/);
+                    const filename = fnMatch ? fnMatch[1] : `deploy-${d.id}.zip`;
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url; a.download = filename; a.click();
+                    URL.revokeObjectURL(url);
+                  } catch (err) { alert(err.message); }
+                  finally { e.target.disabled = false; e.target.textContent = '↓ ZIP'; }
+                }
+              }, '↓ ZIP'));
             }
             return el('tr', {},
               el('td', {}, labelEl),
@@ -1743,9 +2755,13 @@ async function renderProjectUsers({ id }) {
 
 // ─── API Reference ────────────────────────────────────────────────────────────
 
-async function renderApi({ id }) {
-  if (!requireAuth()) return;
-  renderLayout(id, 'api', [el('p', { class: 'text-muted' }, 'Loading API reference…')]);
+async function renderApi({ id }, renderTarget = null) {
+  if (!renderTarget) {
+    if (!requireAuth()) return;
+    renderLayout(id, 'api', [el('p', { class: 'text-muted' }, 'Loading API reference…')]);
+  } else {
+    renderTarget.innerHTML = '<div class="text-muted">Loading…</div>';
+  }
 
   const baseUrl = window.location.origin + '/api/v1';
   const projectId = parseInt(id);
@@ -1757,7 +2773,11 @@ async function renderApi({ id }) {
       Api.get(`/v1/projects/${id}/tables`),
     ]);
   } catch (e) {
-    renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
+    if (renderTarget) {
+      renderTarget.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    } else {
+      renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
+    }
     return;
   }
 
@@ -1959,7 +2979,17 @@ const row = await res.json();`;
     ...(emptyState ? [emptyState] : tables.map(tableCard)),
   ];
 
-  renderLayout(id, 'api', content);
+  if (renderTarget) {
+    renderTarget.innerHTML = '';
+    // skip page-header (first element) when rendering inline
+    content.slice(1).forEach(c => renderTarget.appendChild(c));
+    const docsLink = el('div', { style: 'margin-top:12px;text-align:right' },
+      el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'Full Docs ↗')
+    );
+    renderTarget.appendChild(docsLink);
+  } else {
+    renderLayout(id, 'api', content);
+  }
 }
 
 // ─── Account ──────────────────────────────────────────────────────────────────
@@ -2237,4 +3267,4 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
 });
 
-document.addEventListener('DOMContentLoaded', () => Router.init());
+document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); });

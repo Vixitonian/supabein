@@ -274,7 +274,7 @@ class Catalog
              ORDER BY s.created_at DESC'
         );
         $stmt->execute([$projectId]);
-        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
+        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'current_deploy_id', 'staging_deploy_id', 'spa_mode']);
     }
 
     public function getSiteById(int $siteId): ?array
@@ -283,7 +283,7 @@ class Catalog
             'SELECT * FROM sites WHERE id = ?'
         );
         $stmt->execute([$siteId]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'staging_deploy_id', 'spa_mode']);
     }
 
     public function getSiteByProjectId(int $projectId, int $siteId): ?array
@@ -292,13 +292,21 @@ class Catalog
             'SELECT * FROM sites WHERE id = ? AND project_id = ?'
         );
         $stmt->execute([$siteId, $projectId]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'spa_mode']);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'current_deploy_id', 'staging_deploy_id', 'spa_mode']);
     }
 
     public function updateSiteCurrentDeploy(int $siteId, int $deployId): void
     {
         $stmt = $this->pdo->prepare(
             'UPDATE sites SET current_deploy_id = ? WHERE id = ?'
+        );
+        $stmt->execute([$deployId, $siteId]);
+    }
+
+    public function updateSiteStagingDeploy(int $siteId, ?int $deployId): void
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE sites SET staging_deploy_id = ? WHERE id = ?'
         );
         $stmt->execute([$deployId, $siteId]);
     }
@@ -421,5 +429,59 @@ class Catalog
                       ->execute([$row['id']]);
         }
         return $row ? self::castRow($row, ['id', 'user_id']) : null;
+    }
+
+    // ─── AI Sessions ─────────────────────────────────────────────────────────
+
+    public function createAiSession(int $userId, string $name, ?int $projectId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO ai_sessions (user_id, project_id, name, messages) VALUES (?, ?, ?, ?)'
+        );
+        $stmt->execute([$userId, $projectId, $name, '[]']);
+        $id = (int)$this->pdo->lastInsertId();
+        return $this->getAiSession($id, $userId);
+    }
+
+    public function getAiSession(int $id, int $userId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, project_id, name, messages, created_at, updated_at
+             FROM ai_sessions WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$id, $userId]);
+        $row = $stmt->fetch() ?: null;
+        if (!$row) return null;
+        $row['messages'] = json_decode($row['messages'], true) ?? [];
+        return self::castRow($row, ['id', 'user_id', 'project_id']);
+    }
+
+    public function listAiSessions(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, project_id, name, created_at, updated_at
+             FROM ai_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 100'
+        );
+        $stmt->execute([$userId]);
+        $rows = $stmt->fetchAll() ?: [];
+        return self::castRows($rows, ['id', 'user_id', 'project_id']);
+    }
+
+    public function updateAiSession(int $id, int $userId, string $name, array $messages): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE ai_sessions SET name = ?, messages = ? WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$name, json_encode($messages, JSON_UNESCAPED_UNICODE), $id, $userId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    public function deleteAiSession(int $id, int $userId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'DELETE FROM ai_sessions WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$id, $userId]);
+        return $stmt->rowCount() > 0;
     }
 }

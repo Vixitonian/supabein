@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS `sites` (
     `subdomain`         VARCHAR(63) NOT NULL,
     `custom_domain`     VARCHAR(255) DEFAULT NULL,
     `current_deploy_id` INT UNSIGNED DEFAULT NULL,
+    `staging_deploy_id` INT UNSIGNED DEFAULT NULL,
     `spa_mode`          TINYINT(1) NOT NULL DEFAULT 0,
     `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
@@ -128,6 +129,18 @@ CREATE TABLE IF NOT EXISTS `rate_limits` (
     PRIMARY KEY (`project_id`, `window_start`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `ai_sessions` (
+    `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `user_id`    INT UNSIGNED NOT NULL,
+    `project_id` INT UNSIGNED DEFAULT NULL,
+    `name`       VARCHAR(120) NOT NULL DEFAULT 'New session',
+    `messages`   LONGTEXT NOT NULL DEFAULT '[]',
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `user_reset_tokens` (
     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `user_id`    INT UNSIGNED NOT NULL,
@@ -141,8 +154,24 @@ CREATE TABLE IF NOT EXISTS `user_reset_tokens` (
 
 SET foreign_key_checks = 1;
 
+-- ─── Migration: ai_sessions (run once on existing installs) ─────────────────
+-- CREATE TABLE IF NOT EXISTS `ai_sessions` (
+--     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `user_id`    INT UNSIGNED NOT NULL,
+--     `project_id` INT UNSIGNED DEFAULT NULL,
+--     `name`       VARCHAR(120) NOT NULL DEFAULT 'New session',
+--     `messages`   LONGTEXT NOT NULL DEFAULT '[]',
+--     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+--     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+--     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE SET NULL
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- ─── Migration SQL for existing installs ────────────────────────────────────
 -- Run these ALTER statements once if you already have the projects table:
+--
+-- ALTER TABLE `sites`
+--   ADD COLUMN `staging_deploy_id` INT UNSIGNED DEFAULT NULL AFTER `current_deploy_id`;
 --
 -- ALTER TABLE `projects`
 --   ADD COLUMN `anon_key`    TEXT DEFAULT NULL AFTER `name`,

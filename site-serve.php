@@ -35,12 +35,8 @@ if ($fullPath !== $base && !str_starts_with($fullPath, $base . '/')) {
     http_response_code(400); echo 'Bad request'; exit;
 }
 
-// Block executable extensions (belt-and-suspenders)
-$ext     = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
-$blocked = ['php','php3','php4','php5','php7','php8','phtml','phar','cgi','pl','py','rb','sh','bash'];
-if (in_array($ext, $blocked, true)) {
-    http_response_code(403); echo 'Forbidden'; exit;
-}
+
+$ext = strtolower(pathinfo($fullPath, PATHINFO_EXTENSION));
 
 // If file doesn't exist, try SPA fallback to index.html
 if (!file_exists($fullPath) || is_dir($fullPath)) {

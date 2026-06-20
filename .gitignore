@@ -1,0 +1,4 @@
+config/secrets.php
+admin-shell.php
+admin-shell.log
+.claude/

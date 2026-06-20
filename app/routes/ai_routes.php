@@ -1,0 +1,1538 @@
+<?php
+
+declare(strict_types=1);
+
+require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
+require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
+require_once SUPABEIN_ROOT . '/app/core/deploy.php';
+
+// ─── Gemini system prompts ───────────────────────────────────────────────────
+
+// ── Pass 1: schema only ──────────────────────────────────────────────────────
+const AI_BUILD_SCHEMA_PROMPT = <<<'PROMPT'
+You are a backend architect for SupaBein, a self-hosted BaaS platform.
+The user will describe an application. Return ONLY a single valid JSON object — no markdown fences, no explanation.
+
+{
+  "project_name": string,
+  "subdomain": string,
+  "tables": [
+    {
+      "name": string,
+      "columns": [
+        {"name": string, "type": string, "nullable": boolean, "default": string or null}
+      ],
+      "policies": [
+        {"api_role": string, "operation": string, "allowed": boolean, "constraint_sql": string or null}
+      ]
+    }
+  ]
+}
+
+Rules:
+- project_name: human-readable, 1-80 chars
+- subdomain: 3-30 lowercase alphanumeric + hyphens (e.g. "my-blog")
+- table.name: valid SQL identifier /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid ALL SQL reserved words
+  (SELECT, INSERT, TABLE, INDEX, KEY, WHERE, FROM, NAME, DATE, TYPE, STATUS, RANK, ROLE, etc.)
+- column.name: same rules; do NOT use "id" or "created_at" (auto-generated); avoid reserved words
+  including: name, type, status, rank, role, date, time, year, month, value, key, index, order, group
+- column.type: exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64),
+  VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2),
+  DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+- column.default: literal values only (e.g. "0", "active") or null — no SQL functions
+- policy.api_role: "anon" or "authenticated"
+- policy.operation: "SELECT", "INSERT", "UPDATE", or "DELETE"
+- policy.constraint_sql: WHERE-style expression or null; use ":current_user_id" for logged-in user ID
+  Do NOT use "auth.uid()" — it is not supported.
+- Always include at least one table.
+PROMPT;
+
+// ── Pass 2: frontend given exact validated schema ────────────────────────────
+const AI_BUILD_FRONTEND_PROMPT = <<<'PROMPT'
+You are a frontend developer for SupaBein, a self-hosted BaaS platform.
+You will receive the app description and the exact validated database schema.
+Return ONLY a single valid JSON object — no markdown fences, no explanation.
+
+{"files": [{"path": string, "content": string}]}
+
+═══════════════════════════════════════════════════════
+RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
+═══════════════════════════════════════════════════════
+The schema lists every table's EXACT column names after validation and reserved-word renaming.
+You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
+template literals, form inputs, everything.
+Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
+
+═══════════════════════════════════════════════════════
+RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
+═══════════════════════════════════════════════════════
+Scripts load in order. A file cannot reference a variable from a file loaded after it.
+
+CORRECT load order in index.html:
+  <script src="core/config.js"></script>
+  <script src="core/api.js"></script>
+  <script src="core/router.js"></script>
+  <script src="features/auth/auth.js"></script>
+  <script src="features/<feature>/<feature>.js"></script>   ← all feature scripts
+  <script>
+    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
+    router.defineRoute('/', featureA.renderView);
+    router.defineRoute('/login', auth.renderAuthForms);
+    /* ... all other routes ... */
+    auth.ready.then(() => {
+      updateNav();
+      router.onHashChange();
+      window.addEventListener('hashchange', router.onHashChange);
+    });
+  </script>
+
+core/router.js must NEVER call defineRoute() itself — it only exports the router API.
+All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
+
+═══════════════════════════════════════════════════════
+RULE 3 — AUTH INITIALISATION RACE
+═══════════════════════════════════════════════════════
+features/auth/auth.js must expose a `ready` promise (the Promise returned by loadUser()).
+loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
+and every protected page shows "Access Denied" even for logged-in users.
+
+Required pattern in auth.js:
+  const auth = (() => {
+    let currentUser = null;
+    let _resolveReady;
+    const ready = new Promise(res => { _resolveReady = res; });
+
+    const loadUser = async () => {
+      // ... fetch /auth/me, set currentUser ...
+      _resolveReady(currentUser);
+      document.dispatchEvent(new CustomEvent('auth_status_change'));
+    };
+
+    loadUser(); // kick off — ready resolves when done
+
+    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
+  })();
+
+The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
+This guarantees auth state is known before any page renders.
+
+═══════════════════════════════════════════════════════
+RULE 4 — ROUTER NAVIGATION PATHS
+═══════════════════════════════════════════════════════
+router.navigate(path) sets window.location.hash = path.
+Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
+  ✓ router.navigate('/')          sets hash to #/
+  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
+
+Always use: router.navigate('/'), router.navigate('/login'), etc.
+Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
+
+═══════════════════════════════════════════════════════
+RULE 5 — NULL SAFETY ON NULLABLE FIELDS
+═══════════════════════════════════════════════════════
+The schema marks some columns nullable. Never call string/array methods on a field without guarding:
+  ✗ item.description.substring(0, 100)   — crashes if description is null
+  ✓ (item.description ?? '').substring(0, 100)
+  ✓ item.description?.substring(0, 100) ?? ''
+
+Apply this to every nullable column accessed in templates or JS logic.
+
+═══════════════════════════════════════════════════════
+RULE 6 — LOADING STATES
+═══════════════════════════════════════════════════════
+Every async render function must show a loading indicator before the fetch,
+then replace it with real content (or an error) when the fetch completes:
+  const renderSection = async () => {
+    const el = document.getElementById('section-id');
+    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
+    try {
+      const data = await api.get('table');
+      el.innerHTML = /* real content */;
+    } catch (e) {
+      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
+    }
+  };
+
+═══════════════════════════════════════════════════════
+RULE 7 — RESPONSIVE NAVIGATION
+═══════════════════════════════════════════════════════
+Always include a hamburger button for mobile. Pattern:
+  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
+  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
+    ...links...
+  </nav>
+Wire it in the inline bootstrap:
+  document.getElementById('nav-toggle').addEventListener('click', () => {
+    document.getElementById('nav-menu').classList.toggle('hidden');
+  });
+
+═══════════════════════════════════════════════════════
+STRUCTURE
+═══════════════════════════════════════════════════════
+Feature-Based Structure:
+    index.html                         ← SPA entry point
+    core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
+    core/api.js                        ← SupaBein fetch client
+    core/router.js                     ← router API only (no defineRoute calls)
+    features/auth/auth.js              ← login, signup, logout, ready promise
+    features/<feature>/<feature>.js    ← one subfolder per app feature
+Every feature folder contains everything that feature needs. Do NOT cram everything into one file.
+
+═══════════════════════════════════════════════════════
+STYLING
+═══════════════════════════════════════════════════════
+- Tailwind CSS via CDN. Add to <head> in index.html:
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+- Add class="dark" to <html>. Do NOT write a separate CSS file.
+- Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
+  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger)
+- Buttons: rounded-lg px-4 py-2 font-medium transition.
+  Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
+  Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
+- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
+  focus:outline-none focus:ring-2 focus:ring-emerald-500
+
+═══════════════════════════════════════════════════════
+JAVASCRIPT
+═══════════════════════════════════════════════════════
+- Placeholders ONLY in core/config.js (substituted at deploy time):
+    const SB_URL = '__SB_URL__';
+    const SB_KEY = '__SB_ANON_KEY__';
+    const SB_PID = '__SB_PID__';
+  Do NOT redeclare them anywhere else — they are globals.
+- API URL patterns (exact — do NOT invent other formats):
+    Data list/create:        ${SB_URL}/data/${SB_PID}/${tableName}
+    Data get/update/delete:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
+    Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
+    Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
+    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
+    Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
+    If not logged in, send the anon key instead.
+- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
+- Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
+- The app must be fully functional — real fetch calls, real CRUD, real auth flows.
+- When a table has user_id with ownership constraint, decode JWT in INSERT:
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    body.user_id = parseInt(payload.sub, 10);
+PROMPT;
+
+const AI_EDIT_SYSTEM_PROMPT = <<<'PROMPT'
+You are a full-stack developer for SupaBein, a self-hosted BaaS platform.
+The user wants to MODIFY an existing project. You will be given the current schema, current frontend files (or a file listing), and a change request.
+Return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text.
+
+{
+  "add_tables": [
+    {
+      "name": string,
+      "columns": [
+        {"name": string, "type": string, "nullable": boolean}
+      ],
+      "policies": [
+        {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
+      ]
+    }
+  ],
+  "add_columns": [
+    {
+      "table": string,
+      "columns": [
+        {"name": string, "type": string, "nullable": boolean}
+      ]
+    }
+  ],
+  "update_policies": [
+    {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
+  ],
+  "frontend": {
+    "files": [ {"path": string, "content": string} ]
+  }
+}
+
+The "frontend" key is OPTIONAL.
+- OMIT "frontend" entirely when the prompt is a pure schema change (add column, change policy, etc.).
+- INCLUDE "frontend" when the prompt involves any UI, visual, navigation, or frontend issue
+  ("fix", "broken", "not working", "blank page", "nav", "login page", "looks wrong", etc.).
+- When included, output ALL frontend files completely — every file the site needs, not just changed ones.
+- Use the exact column names from the "Exact schema" context — do NOT invent or rename them.
+
+Schema rules:
+- Do NOT include tables or columns that already exist in the current schema.
+- Do NOT drop or rename anything — only additions and policy changes.
+- column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+- table.name and column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid SQL reserved words; do NOT use "id" or "created_at"
+- If no changes of a given type are needed, return an empty array [] for that key.
+
+═══════════════════════════════════════════════════════
+FRONTEND RULES (apply when including frontend.files)
+═══════════════════════════════════════════════════════
+
+RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
+The schema lists every table's EXACT column names after validation and reserved-word renaming.
+You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
+template literals, form inputs, everything.
+Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
+
+RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
+Scripts load in order. A file cannot reference a variable from a file loaded after it.
+
+CORRECT load order in index.html:
+  <script src="core/config.js"></script>
+  <script src="core/api.js"></script>
+  <script src="core/router.js"></script>
+  <script src="features/auth/auth.js"></script>
+  <script src="features/<feature>/<feature>.js"></script>
+  <script>
+    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
+    router.defineRoute('/', featureA.renderView);
+    router.defineRoute('/login', auth.renderAuthForms);
+    auth.ready.then(() => {
+      updateNav();
+      router.onHashChange();
+      window.addEventListener('hashchange', router.onHashChange);
+    });
+  </script>
+
+core/router.js must NEVER call defineRoute() itself — it only exports the router API.
+All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
+
+RULE 3 — AUTH INITIALISATION RACE
+features/auth/auth.js must expose a `ready` promise resolved after loadUser() completes.
+loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
+and every protected page shows "Access Denied" even for logged-in users.
+
+Required pattern in auth.js:
+  const auth = (() => {
+    let currentUser = null;
+    let _resolveReady;
+    const ready = new Promise(res => { _resolveReady = res; });
+
+    const loadUser = async () => {
+      // ... fetch /auth/me, set currentUser ...
+      _resolveReady(currentUser);
+      document.dispatchEvent(new CustomEvent('auth_status_change'));
+    };
+
+    loadUser(); // kick off — ready resolves when done
+
+    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
+  })();
+
+The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
+This guarantees auth state is known before any page renders.
+
+RULE 4 — ROUTER NAVIGATION PATHS
+router.navigate(path) sets window.location.hash = path.
+Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
+  ✓ router.navigate('/')          sets hash to #/
+  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
+
+Always use: router.navigate('/'), router.navigate('/login'), etc.
+Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
+
+RULE 5 — NULL SAFETY ON NULLABLE FIELDS
+The schema marks some columns nullable. Never call string/array methods on a field without guarding:
+  ✗ item.description.substring(0, 100)   — crashes if description is null
+  ✓ (item.description ?? '').substring(0, 100)
+  ✓ item.description?.substring(0, 100) ?? ''
+
+Apply this to every nullable column accessed in templates or JS logic.
+
+RULE 6 — LOADING STATES
+Every async render function must show a loading indicator before the fetch,
+then replace it with real content (or an error) when the fetch completes:
+  const renderSection = async () => {
+    const el = document.getElementById('section-id');
+    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
+    try {
+      const data = await api.get('table');
+      el.innerHTML = /* real content */;
+    } catch (e) {
+      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
+    }
+  };
+
+RULE 7 — RESPONSIVE NAVIGATION
+Always include a hamburger button for mobile. Pattern:
+  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
+  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
+    ...links...
+  </nav>
+Wire it in the inline bootstrap:
+  document.getElementById('nav-toggle').addEventListener('click', () => {
+    document.getElementById('nav-menu').classList.toggle('hidden');
+  });
+
+STRUCTURE
+Feature-Based Structure:
+    index.html                         ← SPA entry point
+    core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
+    core/api.js                        ← SupaBein fetch client
+    core/router.js                     ← router API only (no defineRoute calls)
+    features/auth/auth.js              ← login, signup, logout, ready promise
+    features/<feature>/<feature>.js    ← one subfolder per app feature
+Every feature folder contains everything that feature needs.
+
+STYLING
+- Tailwind CSS via CDN. Add to <head> in index.html:
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+- Add class="dark" to <html>. Do NOT write a separate CSS file.
+- Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
+  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger)
+- Buttons: rounded-lg px-4 py-2 font-medium transition.
+  Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
+  Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
+- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
+  focus:outline-none focus:ring-2 focus:ring-emerald-500
+
+JAVASCRIPT
+- Placeholders ONLY in core/config.js (substituted at deploy time):
+    const SB_URL = '__SB_URL__';
+    const SB_KEY = '__SB_ANON_KEY__';
+    const SB_PID = '__SB_PID__';
+  Do NOT redeclare them anywhere else — they are globals.
+- API URL patterns (exact — do NOT invent other formats):
+    Data list/create:        ${SB_URL}/data/${SB_PID}/${tableName}
+    Data get/update/delete:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
+    Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
+    Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
+    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
+    Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
+    If not logged in, send the anon key instead.
+- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
+- Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
+- The app must be fully functional — real fetch calls, real CRUD, real auth flows.
+- When a table has user_id with ownership constraint, decode JWT in INSERT:
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    body.user_id = parseInt(payload.sub, 10);
+PROMPT;
+
+// ─── File-level helpers (filesystem) ────────────────────────────────────────
+
+function ai_deploy_files(
+    array $config,
+    \SupaBein\Catalog $catalog,
+    int $siteId,
+    array $project,
+    array $frontendFiles
+): array {
+    $sitesPath = rtrim($config['SITES_PATH'], '/');
+    $label     = 'ai-generated-' . date('Y-m-d');
+
+    $deploy   = $catalog->createDeploy($siteId, $label, 0);
+    $deployId = (int)$deploy['id'];
+    $catalog->updateDeploy($deployId, 'processing');
+
+    $deployDir = $sitesPath . '/s' . $siteId . '/deploys/'
+               . date('Ymd_His') . '_' . $deployId;
+
+    if (!is_dir($deployDir) && !mkdir($deployDir, 0755, true)) {
+        $catalog->updateDeploy($deployId, 'failed');
+        return ['error' => 'Cannot create deploy directory', 'deploy' => null];
+    }
+
+    // Substitution map — replace placeholders with real credentials
+    $apiBase = rtrim($config['API_BASE_URL'], '/') . '/v1';
+    $replacements = [
+        '__SB_URL__'      => $apiBase,
+        '__SB_ANON_KEY__' => $project['anon_key'],
+        '__SB_PID__'      => (string)$project['id'],
+    ];
+
+    $errors = [];
+    foreach ($frontendFiles as $fileDef) {
+        $relPath = ltrim((string)($fileDef['path'] ?? ''), '/');
+        $relPath = str_replace('..', '', $relPath);
+        if ($relPath === '') continue;
+
+        $fullPath = \SupaBein\Deploy::normalizePath($deployDir . '/' . $relPath);
+        if (!str_starts_with($fullPath, $deployDir . '/')) {
+            $errors[] = 'Path traversal attempt: ' . $relPath;
+            continue;
+        }
+
+        $parentDir = dirname($fullPath);
+        if (!is_dir($parentDir)) {
+            mkdir($parentDir, 0755, true);
+        }
+
+        $content = str_replace(
+            array_keys($replacements),
+            array_values($replacements),
+            (string)($fileDef['content'] ?? '')
+        );
+
+        if (file_put_contents($fullPath, $content) === false) {
+            $errors[] = 'Cannot write file: ' . $relPath;
+        }
+    }
+
+    if ($errors) {
+        \SupaBein\Deploy::rrmdir($deployDir);
+        $catalog->updateDeploy($deployId, 'failed');
+        return ['error' => implode('; ', $errors), 'deploy' => null];
+    }
+
+    // Overwrite with hardening .htaccess (cannot be skipped)
+    $htaccess = \SupaBein\Deploy::buildHardeningHtaccess(true);
+    file_put_contents($deployDir . '/.htaccess', $htaccess);
+
+    // Calculate total size
+    $totalSize = 0;
+    $iterator  = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($deployDir, \RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+    foreach ($iterator as $f) {
+        if ($f->isFile()) $totalSize += $f->getSize();
+    }
+    \App::get('db')->prepare('UPDATE deploys SET size_bytes = ? WHERE id = ?')
+                   ->execute([$totalSize, $deployId]);
+
+    // Copy to staging/
+    $stagingDir = $sitesPath . '/s' . $siteId . '/staging';
+    if (is_dir($stagingDir))   \SupaBein\Deploy::rrmdir($stagingDir);
+    if (is_link($stagingDir))  unlink($stagingDir);
+    \SupaBein\Deploy::rcopy($deployDir, $stagingDir);
+
+    if (!is_dir($stagingDir)) {
+        $catalog->updateDeploy($deployId, 'failed', $deployDir);
+        return ['error' => 'Staging copy failed', 'deploy' => null];
+    }
+
+    $catalog->updateDeploy($deployId, 'ready', $deployDir);
+    $catalog->updateSiteStagingDeploy($siteId, $deployId);
+
+    // Auto-publish to current/ for AI builds so the site is live immediately
+    $currentDir = $sitesPath . '/s' . $siteId . '/current';
+    if (is_dir($currentDir))  \SupaBein\Deploy::rrmdir($currentDir);
+    if (is_link($currentDir)) unlink($currentDir);
+    \SupaBein\Deploy::rcopy($stagingDir, $currentDir);
+    $catalog->updateSiteCurrentDeploy($siteId, $deployId);
+    $catalog->updateSiteStagingDeploy($siteId, null);
+
+    return ['error' => null, 'deploy' => $catalog->getDeployById($deployId)];
+}
+
+// ─── Validation helpers ──────────────────────────────────────────────────────
+
+function ai_sanitize_plan(array $plan): array
+{
+    // ── Column type normalization ─────────────────────────────────────────────
+    static $TYPE_MAP = [
+        'string'             => 'VARCHAR(255)',
+        'varchar'            => 'VARCHAR(255)',
+        'character varying'  => 'VARCHAR(255)',
+        'char'               => 'VARCHAR(255)',
+        'integer'            => 'INT',
+        'int unsigned'       => 'INT',
+        'int(11)'            => 'INT',
+        'serial'             => 'INT',
+        'bigserial'          => 'BIGINT',
+        'bool'               => 'BOOLEAN',
+        'number'             => 'DECIMAL(10,2)',
+        'numeric'            => 'DECIMAL(10,2)',
+        'decimal'            => 'DECIMAL(10,2)',
+        'money'              => 'DECIMAL(10,2)',
+        'uuid'               => 'VARCHAR(36)',
+        'real'               => 'FLOAT',
+        'long text'          => 'LONGTEXT',
+        'medium text'        => 'MEDIUMTEXT',
+    ];
+
+    // ── SQL reserved words that models use as table/column names ─────────────
+    static $SQL_RESERVED = [
+        'order','group','key','index','select','insert','update','delete',
+        'table','from','where','join','left','right','inner','outer','on',
+        'by','as','in','is','not','null','and','or','like','limit','offset',
+        'having','union','all','distinct','case','when','then','else','end',
+        'create','drop','alter','add','column','primary','foreign','references',
+        'default','check','unique','constraint','auto_increment','values','set',
+        'into','exists','between','any','some','user','value','read','write',
+        'status','rank','role','type','name','date','time','year','month',
+    ];
+
+    // ── api_role normalization ────────────────────────────────────────────────
+    static $ROLE_MAP = [
+        'user'       => 'authenticated',
+        'users'      => 'authenticated',
+        'public'     => 'anon',
+        'guest'      => 'anon',
+        'admin'      => 'authenticated',
+        'private'    => 'authenticated',
+        'logged_in'  => 'authenticated',
+        'loggedin'   => 'authenticated',
+        'member'     => 'authenticated',
+    ];
+
+    // ── operation normalization ───────────────────────────────────────────────
+    static $OP_MAP = [
+        'read'    => 'SELECT',
+        'get'     => 'SELECT',
+        'list'    => 'SELECT',
+        'fetch'   => 'SELECT',
+        'write'   => 'INSERT',
+        'create'  => 'INSERT',
+        'add'     => 'INSERT',
+        'post'    => 'INSERT',
+        'edit'    => 'UPDATE',
+        'modify'  => 'UPDATE',
+        'patch'   => 'UPDATE',
+        'put'     => 'UPDATE',
+        'change'  => 'UPDATE',
+        'remove'  => 'DELETE',
+        'destroy' => 'DELETE',
+        'erase'   => 'DELETE',
+    ];
+
+    // ── SQL function defaults that must be nulled ─────────────────────────────
+    static $FN_DEFAULTS = [
+        'now()', 'current_timestamp', 'current_date', 'current_time',
+        'sysdate()', 'getdate()', 'uuid_generate_v4()', 'gen_random_uuid()',
+        'newid()', 'uuid()',
+    ];
+
+    // ── 1. Subdomain ──────────────────────────────────────────────────────────
+    if (isset($plan['subdomain'])) {
+        $sub = strtolower((string)$plan['subdomain']);
+        $sub = preg_replace('/[^a-z0-9]+/', '-', $sub);   // non-alphanum → hyphen
+        $sub = preg_replace('/-+/', '-', $sub);             // collapse hyphens
+        $sub = trim($sub, '-');
+        $sub = substr($sub, 0, 30);
+        $sub = trim($sub, '-');
+        if (strlen($sub) < 3) $sub = 'app-' . $sub;
+        $plan['subdomain'] = $sub;
+    }
+
+    // ── 2. Tables ─────────────────────────────────────────────────────────────
+    foreach ($plan['tables'] as &$table) {
+
+        // Rename reserved table names
+        if (in_array(strtolower($table['name'] ?? ''), $SQL_RESERVED, true)) {
+            $table['name'] = $table['name'] . '_data';
+        }
+
+        // Strip auto-generated columns
+        $table['columns'] = array_values(array_filter(
+            $table['columns'] ?? [],
+            fn($col) => !in_array(strtolower($col['name'] ?? ''), ['id', 'created_at'], true)
+        ));
+
+        foreach ($table['columns'] as &$col) {
+            // Rename reserved column names
+            if (in_array(strtolower($col['name'] ?? ''), $SQL_RESERVED, true)) {
+                $col['name'] = $col['name'] . '_value';
+            }
+
+            // Normalize type
+            $typeLower = strtolower(trim($col['type'] ?? ''));
+            if (isset($TYPE_MAP[$typeLower])) {
+                $col['type'] = $TYPE_MAP[$typeLower];
+            }
+
+            // Null out SQL function defaults
+            if (isset($col['default'])) {
+                $defLower = strtolower(trim((string)$col['default']));
+                if (in_array($defLower, $FN_DEFAULTS, true)) {
+                    $col['default'] = null;
+                }
+            }
+        }
+        unset($col);
+
+        foreach ($table['policies'] ?? [] as &$policy) {
+            // Normalize api_role
+            $role = strtolower(trim($policy['api_role'] ?? ''));
+            $policy['api_role'] = $ROLE_MAP[$role] ?? $policy['api_role'];
+
+            // Normalize operation
+            $op = strtolower(trim($policy['operation'] ?? ''));
+            $policy['operation'] = strtoupper($OP_MAP[$op] ?? $policy['operation']);
+
+            // Replace auth.uid() / uid() with :current_user_id in constraint_sql
+            if (isset($policy['constraint_sql']) && is_string($policy['constraint_sql'])) {
+                $policy['constraint_sql'] = preg_replace(
+                    '/\bauth\.uid\s*\(\s*\)|\buid\s*\(\s*\)/i',
+                    ':current_user_id',
+                    $policy['constraint_sql']
+                );
+            }
+        }
+        unset($policy);
+    }
+    unset($table);
+
+    // ── 3. Frontend file paths — strip leading slashes / ./ ──────────────────
+    foreach ($plan['frontend']['files'] ?? [] as &$file) {
+        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+    }
+    unset($file);
+
+    return $plan;
+}
+
+function ai_validate_plan(array $plan): ?string
+{
+    if (empty($plan['project_name']) || strlen($plan['project_name']) > 80) {
+        return 'project_name missing or too long';
+    }
+    if (!isset($plan['subdomain']) || !preg_match('/^[a-z0-9][a-z0-9\-]{1,28}[a-z0-9]$/', $plan['subdomain'])) {
+        return 'subdomain must be 3-30 lowercase alphanumeric + hyphens';
+    }
+    if (empty($plan['tables']) || !is_array($plan['tables'])) {
+        return 'tables array is required';
+    }
+    foreach ($plan['tables'] as $i => $t) {
+        try {
+            \SupaBein\Schema::validateIdentifier($t['name'] ?? '');
+        } catch (\InvalidArgumentException $e) {
+            return "tables[$i].name: " . $e->getMessage();
+        }
+        foreach ($t['columns'] ?? [] as $j => $col) {
+            try {
+                $colName = \SupaBein\Schema::validateIdentifier($col['name'] ?? '');
+            } catch (\InvalidArgumentException $e) {
+                return "tables[$i].columns[$j].name: " . $e->getMessage();
+            }
+
+            try {
+                \SupaBein\Schema::validateDataType($col['type'] ?? '');
+            } catch (\InvalidArgumentException $e) {
+                return "tables[$i].columns[$j].type: " . $e->getMessage();
+            }
+        }
+        foreach ($t['policies'] ?? [] as $k => $p) {
+            if (!in_array($p['api_role'] ?? '', ['anon', 'authenticated'], true)) {
+                return "tables[$i].policies[$k].api_role must be 'anon' or 'authenticated'";
+            }
+            if (!in_array(strtoupper($p['operation'] ?? ''), ['SELECT','INSERT','UPDATE','DELETE'], true)) {
+                return "tables[$i].policies[$k].operation must be SELECT, INSERT, UPDATE, or DELETE";
+            }
+        }
+    }
+    return null;
+}
+
+// ─── Schema serializer for two-pass generation ───────────────────────────────
+
+/**
+ * Convert a validated plan's tables into a human-readable schema string
+ * that is injected into the frontend prompt so the AI sees exact column names.
+ */
+function ai_schema_to_context(array $plan): string
+{
+    $lines = [];
+    foreach ($plan['tables'] as $tbl) {
+        $colParts = [];
+        foreach ($tbl['columns'] as $col) {
+            $part = $col['name'] . ' ' . $col['type'];
+            $part .= ($col['nullable'] ?? true) ? ' NULL' : ' NOT NULL';
+            if (($col['default'] ?? null) !== null) {
+                $part .= ' DEFAULT ' . $col['default'];
+            }
+            $colParts[] = $part;
+        }
+        $lines[] = 'Table "' . $tbl['name'] . '": id (INT auto), '
+                 . implode(', ', $colParts) . ', created_at (TIMESTAMP auto)';
+
+        foreach ($tbl['policies'] ?? [] as $pol) {
+            if ($pol['allowed']) {
+                $constraint = $pol['constraint_sql'] ? ' WHERE ' . $pol['constraint_sql'] : '';
+                $lines[] = '  policy: ' . $pol['api_role'] . ' ' . strtoupper($pol['operation']) . $constraint;
+            }
+        }
+    }
+    return implode("\n", $lines);
+}
+
+function ai_schema_from_db(int $projectId, \SupaBein\Catalog $catalog): array
+{
+    $tables = [];
+    foreach ($catalog->listTables($projectId) as $tbl) {
+        $cols = array_map(fn($c) => [
+            'name'     => $c['name'],
+            'type'     => $c['type'],
+            'nullable' => (bool)$c['nullable'],
+            'default'  => $c['default'] ?? null,
+        ], $catalog->listColumns($tbl['id']));
+        $tables[] = [
+            'name'     => $tbl['logical_name'],
+            'columns'  => $cols,
+            'policies' => $catalog->listPolicies($tbl['id']),
+        ];
+    }
+    return ['tables' => $tables];
+}
+
+// ─── Execution helpers ───────────────────────────────────────────────────────
+
+function ai_execute_build(array $plan, int $userId): array
+{
+    $config  = \App::get('config');
+    $catalog = \SupaBein\Catalog::getInstance();
+    $pdo     = \App::get('db');
+
+    $projectName = trim($plan['project_name']);
+    $partial     = ['project' => null, 'tables' => [], 'site' => null];
+
+    try {
+        $project = $catalog->createProject($userId, $projectName);
+        $partial['project'] = $project;
+        $projectId = (int)$project['id'];
+    } catch (\PDOException $e) {
+        if (str_contains($e->getMessage(), 'Duplicate')) {
+            abort(409, "A project named \"$projectName\" already exists");
+        }
+        abort(500, 'Failed to create project: ' . $e->getMessage());
+    }
+
+    foreach ($plan['tables'] as $tableDef) {
+        $tableName = $tableDef['name'];
+
+        $columns = [];
+        foreach ($tableDef['columns'] ?? [] as $col) {
+            $columns[] = [
+                'name'     => \SupaBein\Schema::validateIdentifier($col['name']),
+                'type'     => \SupaBein\Schema::validateDataType($col['type']),
+                'nullable' => (bool)($col['nullable'] ?? true),
+                'default'  => isset($col['default']) ? (string)$col['default'] : null,
+            ];
+        }
+
+        try {
+            $table = $catalog->createTable($projectId, $tableName);
+        } catch (\PDOException $e) {
+            $catalog->deleteProject($projectId, $userId);
+            abort(500, "Table creation failed for \"$tableName\": " . $e->getMessage());
+        }
+
+        try {
+            $ddl = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
+            \SupaBein\Schema::applyDDL($pdo, $projectId, $ddl);
+        } catch (\Throwable $e) {
+            $catalog->deleteTable($projectId, $tableName);
+            $catalog->deleteProject($projectId, $userId);
+            abort(500, "DDL failed for table \"$tableName\": " . $e->getMessage());
+        }
+
+        foreach ($columns as $col) {
+            $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default']);
+        }
+
+        foreach ($tableDef['policies'] ?? [] as $policy) {
+            try {
+                $catalog->upsertPolicy(
+                    $table['id'],
+                    $policy['api_role'],
+                    strtoupper($policy['operation']),
+                    (bool)$policy['allowed'],
+                    $policy['constraint_sql'] ?? null
+                );
+            } catch (\Throwable $e) {
+                sb_log('ai_build', 'Policy upsert failed (non-fatal): ' . $e->getMessage(), ['table' => $tableName]);
+            }
+        }
+
+        $partial['tables'][] = ['name' => $tableName, 'columns' => count($columns)];
+    }
+
+    $subdomain = $plan['subdomain'];
+    $site      = null;
+    $deploy    = null;
+
+    try {
+        $site = $catalog->createSite($projectId, $subdomain, true);
+        $partial['site'] = $site;
+    } catch (\PDOException $e) {
+        if (str_contains($e->getMessage(), 'Duplicate')) {
+            $subdomain = $subdomain . '-' . $projectId;
+            try {
+                $site = $catalog->createSite($projectId, $subdomain, true);
+                $partial['site'] = $site;
+            } catch (\PDOException $e2) {
+                sb_log('ai_build', 'Site creation failed (non-fatal): ' . $e2->getMessage());
+            }
+        } else {
+            sb_log('ai_build', 'Site creation failed (non-fatal): ' . $e->getMessage());
+        }
+    }
+
+    if ($site !== null && !empty($plan['frontend']['files'])) {
+        $deployResult = ai_deploy_files(
+            $config,
+            $catalog,
+            (int)$site['id'],
+            $project,
+            $plan['frontend']['files']
+        );
+        if ($deployResult['error']) {
+            sb_log('ai_build', 'Deploy failed (non-fatal): ' . $deployResult['error']);
+        } else {
+            $deploy = $deployResult['deploy'];
+        }
+    }
+
+    sb_log('ai_build', 'Complete', [
+        'project_id' => $projectId,
+        'tables'     => count($plan['tables']),
+        'site_id'    => $site['id'] ?? null,
+    ]);
+
+    return [
+        'project' => $project,
+        'tables'  => $partial['tables'],
+        'site'    => $site,
+        'deploy'  => $deploy,
+    ];
+}
+
+function ai_execute_edit(array $delta, int $projectId, int $userId): array
+{
+    $catalog = \SupaBein\Catalog::getInstance();
+    $pdo     = \App::get('db');
+
+    $addedTables     = [];
+    $addedColumns    = [];
+    $updatedPolicies = [];
+
+    foreach ($delta['add_tables'] ?? [] as $tableDef) {
+        try { \SupaBein\Schema::validateIdentifier($tableDef['name'] ?? ''); }
+        catch (\InvalidArgumentException $e) { continue; }
+
+        $columns = [];
+        foreach ($tableDef['columns'] ?? [] as $col) {
+            try {
+                $colName = \SupaBein\Schema::validateIdentifier($col['name'] ?? '');
+                if (in_array(strtolower($colName), ['id','created_at'], true)) continue;
+                $columns[] = [
+                    'name'     => $colName,
+                    'type'     => \SupaBein\Schema::validateDataType($col['type'] ?? 'TEXT'),
+                    'nullable' => (bool)($col['nullable'] ?? true),
+                    'default'  => null,
+                ];
+            } catch (\InvalidArgumentException $e) { continue; }
+        }
+
+        try {
+            $table = $catalog->createTable($projectId, $tableDef['name']);
+            $ddl   = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
+            \SupaBein\Schema::applyDDL($pdo, $projectId, $ddl);
+            foreach ($columns as $col) {
+                $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default']);
+            }
+            foreach ($tableDef['policies'] ?? [] as $p) {
+                try {
+                    $catalog->upsertPolicy($table['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
+                } catch (\Throwable $e) {}
+            }
+            $addedTables[] = $tableDef['name'];
+        } catch (\Throwable $e) {
+            sb_log('ai_edit', 'add_table failed: ' . $e->getMessage(), ['table' => $tableDef['name']]);
+        }
+    }
+
+    foreach ($delta['add_columns'] ?? [] as $entry) {
+        $tblName = $entry['table'] ?? '';
+        $tbl = $catalog->getTable($projectId, $tblName);
+        if (!$tbl) continue;
+
+        foreach ($entry['columns'] ?? [] as $col) {
+            try {
+                $colName = \SupaBein\Schema::validateIdentifier($col['name'] ?? '');
+                if (in_array(strtolower($colName), ['id','created_at'], true)) continue;
+                $colType  = \SupaBein\Schema::validateDataType($col['type'] ?? 'TEXT');
+                $nullable = (bool)($col['nullable'] ?? true);
+
+                $physicalTable = $tbl['physical_name'];
+                $nullSql = $nullable ? 'NULL' : 'NOT NULL';
+                \SupaBein\Schema::applyDDL($pdo, $projectId,
+                    "ALTER TABLE `{$physicalTable}` ADD COLUMN `{$colName}` {$colType} {$nullSql}"
+                );
+                $catalog->addColumn($tbl['id'], $colName, $colType, $nullable, null);
+                $addedColumns[] = $tblName . '.' . $colName;
+            } catch (\Throwable $e) {
+                sb_log('ai_edit', 'add_column failed: ' . $e->getMessage());
+            }
+        }
+    }
+
+    foreach ($delta['update_policies'] ?? [] as $p) {
+        $tblName = $p['table'] ?? '';
+        $tbl = $catalog->getTable($projectId, $tblName);
+        if (!$tbl) continue;
+        try {
+            $catalog->upsertPolicy($tbl['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
+            $updatedPolicies[] = $tblName . '.' . $p['api_role'] . '.' . $p['operation'];
+        } catch (\Throwable $e) {
+            sb_log('ai_edit', 'policy update failed: ' . $e->getMessage());
+        }
+    }
+
+    sb_log('ai_edit', 'Complete', ['project_id' => $projectId, 'added_tables' => count($addedTables)]);
+
+    return [
+        'added_tables'     => $addedTables,
+        'added_columns'    => $addedColumns,
+        'updated_policies' => $updatedPolicies,
+    ];
+}
+
+// ─── Frontend file reader ────────────────────────────────────────────────────
+
+function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId, string $prompt = ''): string
+{
+    $sites = $catalog->listSites($projectId);
+    if (empty($sites)) return '';
+
+    $site = $sites[0];
+    if (!($site['current_deploy_id'] ?? null)) return '';
+
+    $sitesPath  = rtrim($config['SITES_PATH'], '/');
+    $currentDir = $sitesPath . '/s' . $site['id'] . '/current';
+    if (!is_dir($currentDir)) return '';
+
+    // Index all text files
+    $textExts = ['html', 'css', 'js', 'json'];
+    $allFiles = [];
+    $iterator = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($currentDir, \RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+    foreach ($iterator as $file) {
+        if (!$file->isFile()) continue;
+        if (!in_array(strtolower($file->getExtension()), $textExts, true)) continue;
+        $rel = ltrim(substr($file->getPathname(), strlen($currentDir)), '/');
+        $allFiles[$rel] = $file->getPathname();
+    }
+    if (empty($allFiles)) return '';
+
+    $listing = 'Frontend files: ' . implode(', ', array_keys($allFiles));
+
+    // Tier 1 — debug/fix signals: send everything (up to cap)
+    $lowerPrompt = strtolower($prompt);
+    $isDebug = (bool)preg_match('/\b(why|fix|broken|error|bug|issue|problem|debug|not working|failed|wrong|crash)\b/', $lowerPrompt);
+
+    // Tier 2 — extract meaningful prompt words (4+ chars) to match against file paths
+    $stopWords = ['that', 'this', 'with', 'have', 'from', 'they', 'will', 'what', 'when', 'where', 'which', 'there', 'their', 'your', 'about', 'does', 'just', 'like', 'make', 'show', 'give', 'tell'];
+    $promptWords = array_unique(array_filter(
+        preg_split('/\W+/', $lowerPrompt) ?: [],
+        fn($w) => strlen($w) >= 4 && !in_array($w, $stopWords, true)
+    ));
+
+    $targeted = [];
+    if (!$isDebug && !empty($promptWords)) {
+        foreach ($allFiles as $rel => $fullPath) {
+            $lowerRel = strtolower($rel);
+            foreach ($promptWords as $word) {
+                if (str_contains($lowerRel, $word)) {
+                    $targeted[] = $rel;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Tier 3 — no file signals at all: return listing only
+    if (!$isDebug && empty($targeted)) {
+        return "\n\n" . $listing;
+    }
+
+    // Read the relevant files up to 40KB
+    $sources    = $isDebug ? array_keys($allFiles) : $targeted;
+    $maxTotal   = 40000;
+    $totalBytes = 0;
+    $fileLines  = [$listing];
+
+    foreach ($sources as $rel) {
+        $fullPath = $allFiles[$rel];
+        $size     = filesize($fullPath);
+        if ($totalBytes + $size > $maxTotal) {
+            $fileLines[] = "--- $rel (too large, skipped) ---";
+            continue;
+        }
+        $fileLines[]  = "--- $rel ---\n" . file_get_contents($fullPath);
+        $totalBytes  += $size;
+    }
+
+    return "\n\nFrontend files (current deploy):\n" . implode("\n\n", $fileLines);
+}
+
+// ─── AI provider factory ─────────────────────────────────────────────────────
+
+const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter'];
+const AI_ALLOWED_MODELS = [
+    'gemini' => [
+        'gemini-2.5-flash',
+        'gemini-2.5-pro',
+        'gemini-2.0-flash',
+    ],
+    'openrouter' => [
+        'openai/gpt-4o',
+        'anthropic/claude-sonnet-4-5',
+        'mistralai/mistral-small-3.2-24b-instruct',
+        'qwen/qwen3-coder:free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'google/gemma-4-31b-it:free',
+        'google/gemma-4-26b-a4b-it:free',
+        'openai/gpt-oss-120b:free',
+        'openai/gpt-oss-20b:free',
+        'nvidia/nemotron-3-ultra-550b-a55b:free',
+        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+        'openrouter/owl-alpha',
+        'nex-agi/nex-n2-pro:free',
+        'poolside/laguna-m.1:free',
+        'poolside/laguna-xs.2:free',
+    ],
+];
+
+function make_ai_client(array $config, ?string $provider, ?string $model): object
+{
+    $provider = in_array($provider, AI_ALLOWED_PROVIDERS, true)
+        ? $provider
+        : ($config['AI_PROVIDER'] ?? 'gemini');
+
+    if ($provider === 'openrouter') {
+        $key = $config['OPENROUTER_API_KEY'] ?? '';
+        if (!$key) abort(503, 'OpenRouter API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['openrouter'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\OpenRouterClient($key, $model);
+    }
+
+    // Default: Gemini
+    $key = $config['GEMINI_API_KEY'] ?? '';
+    if (!$key) abort(503, 'AI build is not configured on this server (missing GEMINI_API_KEY)');
+    $allowed = AI_ALLOWED_MODELS['gemini'];
+    $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+    return new \SupaBein\GeminiClient($key, $model);
+}
+
+// ─── Route registration ──────────────────────────────────────────────────────
+
+function register_ai_routes(\SupaBein\Router $router): void
+{
+    $router->post('/v1/ai/build', function (array $req): void {
+        set_time_limit(240);
+
+        $config  = \App::get('config');
+        $userId  = (int)$req['auth']['user_id'];
+
+        // ── 1. Validate inputs ────────────────────────────────────────────────
+        $prompt = trim($req['body']['prompt'] ?? '');
+        if (!$prompt || strlen($prompt) > 2000) {
+            abort(422, 'prompt is required and must be under 2000 characters');
+        }
+
+        // ── 2. Call AI (two passes) ──────────────────────────────────────────
+        $provider = $req['body']['provider'] ?? null;
+        $model    = $req['body']['model']    ?? null;
+        sb_log('ai_build', 'Calling AI (pass 1: schema)', ['user_id' => $userId, 'provider' => $provider, 'model' => $model]);
+        $gemini = make_ai_client($config, $provider, $model);
+
+        // Pass 1 — schema only
+        try {
+            $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $prompt);
+        } catch (\RuntimeException $e) {
+            $msg = $e->getMessage();
+            sb_log('ai_build', 'AI error (pass 1): ' . $msg, ['user_id' => $userId]);
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
+        }
+
+        // ── 3. Validate schema ────────────────────────────────────────────────
+        $schemaPlan['frontend'] = ['files' => []];
+        $schemaPlan = ai_sanitize_plan($schemaPlan);
+        $validationError = ai_validate_plan($schemaPlan);
+        if ($validationError) {
+            sb_log('ai_build', 'Schema validation failed: ' . $validationError, ['plan_keys' => array_keys($schemaPlan)]);
+            abort(422, 'AI returned an invalid schema: ' . $validationError);
+        }
+
+        // Pass 2 — frontend with exact (post-sanitize) column names
+        sb_log('ai_build', 'Calling AI (pass 2: frontend)', ['user_id' => $userId]);
+        $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                     . ai_schema_to_context($schemaPlan);
+        try {
+            $frontendResult = $gemini->generateJson(AI_BUILD_FRONTEND_PROMPT, $frontendMsg);
+        } catch (\RuntimeException $e) {
+            $msg = $e->getMessage();
+            sb_log('ai_build', 'AI error (pass 2): ' . $msg, ['user_id' => $userId]);
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI frontend generation failed: ' . $msg);
+        }
+
+        $plan = $schemaPlan;
+        $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+        foreach ($plan['frontend']['files'] as &$file) {
+            $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+        }
+        unset($file);
+
+        // ── 4-7. Execute build ────────────────────────────────────────────────
+        $result = ai_execute_build($plan, $userId);
+        json_out($result, 201);
+
+    }, ['auth_middleware']);
+
+    // ── AI Edit: modify an existing project ────────────────────────────────────
+    $router->post('/v1/ai/edit', function (array $req): void {
+        set_time_limit(240);
+
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+
+        $projectId = (int)($req['body']['project_id'] ?? 0);
+        $prompt    = trim($req['body']['prompt'] ?? '');
+
+        if (!$projectId) abort(422, 'project_id is required');
+        if (!$prompt || strlen($prompt) > 2000) abort(422, 'prompt is required and must be under 2000 characters');
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) abort(404, 'Project not found');
+
+        // Build context snapshot of existing schema
+        $existingTables = $catalog->listTables($projectId);
+        $schemaLines = [];
+        foreach ($existingTables as $tbl) {
+            $cols = array_map(fn($c) => $c['name'] . ' ' . $c['type'], $catalog->listColumns($tbl['id']));
+            $schemaLines[] = '  Table "' . $tbl['logical_name'] . '": id (INT auto), ' . implode(', ', $cols) . ', created_at (DATETIME auto)';
+        }
+        $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
+
+        $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
+
+        $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        try {
+            $delta = $gemini->generateJson(AI_EDIT_SYSTEM_PROMPT, $userMessage);
+        } catch (\RuntimeException $e) {
+            $msg = $e->getMessage();
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
+        }
+
+        $result = ai_execute_edit($delta, $projectId, $userId);
+        json_out($result);
+
+    }, ['auth_middleware']);
+
+    // ── AI Plan: generate a plan without executing ─────────────────────────────
+    $router->post('/v1/ai/plan', function (array $req): void {
+        set_time_limit(240);
+
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+
+        $prompt    = trim($req['body']['prompt'] ?? '');
+        $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
+
+        if (!$prompt || strlen($prompt) > 2000) {
+            abort(422, 'prompt is required and must be under 2000 characters');
+        }
+
+        // Prior conversation turns for multi-turn context (capped at 20 turns)
+        $rawHistory = $req['body']['history'] ?? [];
+        $history = [];
+        foreach (array_slice((array)$rawHistory, 0, 20) as $turn) {
+            if (!is_array($turn)) continue;
+            $role = $turn['role'] ?? '';
+            $text = trim($turn['text'] ?? '');
+            if (!in_array($role, ['user', 'model'], true) || $text === '') continue;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+
+        // ── Detect explicit build/create requests ────────────────────────────
+        $isBuildRequest = (bool)preg_match(
+            '/\b(build|create|make)\b.{0,40}\b(app|application|website|site|system|tool|platform|dashboard|blog|store|shop|api)\b/i',
+            $prompt
+        ) || (bool)preg_match('/\bi (want|need) (a |an |to build|to create|to make)/i', $prompt);
+
+        // ── Detect conversational / info-seeking messages ─────────────────────
+        $isChat = !$isBuildRequest && (
+            // Pure greeting or acknowledgement
+            preg_match('/^(hi|hello|hey|yo|sup|howdy|hiya|thanks|thank\s+you|ok|okay|sure|cool|great|nice|perfect|lol|haha)[\s!.,?]*$/i', $prompt)
+            // Starts with an info-seeking opener
+            || preg_match('/^(what|how (many|do|does|can|should|is)|why|can you|could you|tell me|explain|describe|give me|show me|list (my|the|all)?|do i|does (this|my|the)|is there|are there|which|when|where)\b/i', $prompt)
+            // Any question mark
+            || str_ends_with(rtrim($prompt), '?')
+            // Short message with no build-intent keywords
+            || (mb_strlen($prompt) < 30 && !preg_match('/\b(app|application|website|site|build|create|make|blog|store|shop|todo|task|system|tool|dashboard|tracker|manager|platform|api|database)\b/i', $prompt))
+        );
+
+        // Auto-detect mode
+        $diagnoseKeywords = ['why', 'error', 'failing', 'broken', 'wrong', 'issue', 'problem', 'debug', 'not working', 'failed'];
+        if ($projectId === null) {
+            $mode = 'build';
+        } else {
+            $lowerPrompt = strtolower($prompt);
+            $isDiagnose = false;
+            foreach ($diagnoseKeywords as $kw) {
+                if (str_contains($lowerPrompt, $kw)) { $isDiagnose = true; break; }
+            }
+            $mode = $isDiagnose ? 'diagnose' : 'edit';
+        }
+
+        $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+
+        // ── Handle chat / info mode ───────────────────────────────────────────
+        if ($isChat) {
+            // Always include the user's full project list
+            $allProjects    = $catalog->listProjects($userId);
+            $projectListStr = implode("\n", array_map(fn($p) => '  - ' . $p['name'] . ' (id:' . $p['id'] . ')', $allProjects));
+            $globalContext  = 'Projects (' . count($allProjects) . " total):\n"
+                . ($projectListStr ?: '  (none yet)');
+
+            // Add schema detail for the currently selected project
+            $projectContext = '';
+            if ($projectId) {
+                $proj = $catalog->getProjectById($projectId, $userId);
+                if ($proj) {
+                    $schemaLines = [];
+                    foreach ($catalog->listTables($projectId) as $tbl) {
+                        $cols = array_map(
+                            fn($c) => $c['name'] . ' (' . $c['type'] . ')',
+                            $catalog->listColumns($tbl['id'])
+                        );
+                        $policies    = $catalog->listPolicies($tbl['id']);
+                        $policyStrs  = array_map(
+                            fn($p) => $p['api_role'] . '.' . strtolower($p['operation']) . '=' . ($p['allowed'] ? 'allow' : 'deny'),
+                            $policies
+                        );
+                        $schemaLines[] = '  ' . $tbl['logical_name']
+                            . ': id, ' . implode(', ', $cols) . ', created_at'
+                            . ($policyStrs ? ' [policies: ' . implode(', ', $policyStrs) . ']' : '');
+                    }
+                    $tableCount     = count($schemaLines);
+                    $frontendFiles  = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+                    $projectContext = "\n\nSelected project: \"" . $proj['name'] . "\"\nTables (" . $tableCount . "):\n"
+                        . ($schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)')
+                        . $frontendFiles;
+                }
+            }
+
+            $chatSystemPrompt = <<<'CHAT'
+You are SupaBein AI, a knowledgeable assistant for SupaBein — a self-hosted PHP+MySQL BaaS platform.
+
+Platform capabilities:
+- Auto-generates REST CRUD APIs from table schemas at /v1/data/{table}
+- JWT authentication: /v1/auth/signup, /v1/auth/login, /v1/auth/me, /v1/auth/logout
+- Row-level access policies per table and role (user/anon) with optional constraint_sql (use :current_user_id, NOT auth.uid())
+- Static frontend hosting with per-project subdomain routing
+- AI panel: natural language → schema + frontend code generation
+- Tables always have auto-managed `id` (INT auto-increment) and `created_at` (DATETIME) columns
+
+If asked about the current project (tables, columns, policies, counts, or frontend code), use the provided project context to answer accurately.
+If frontend files are provided, you can read, explain, and suggest edits to them.
+Reply concisely and helpfully. Return ONLY valid JSON: {"message": "your reply"}
+CHAT;
+
+            $userQuestion = $globalContext . $projectContext . "\n\nQuestion: " . $prompt;
+
+            try {
+                $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
+            } catch (\RuntimeException $e) {
+                $msg = $e->getMessage();
+                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+                abort(502, 'AI generation failed: ' . $msg);
+            }
+            json_out([
+                'mode'    => 'chat',
+                'message' => $res['message'] ?? 'Hi! How can I help you?',
+                'usage'   => $gemini->getLastUsage(),
+            ]);
+        }
+
+        try {
+            if ($mode === 'build') {
+                // Pass 1 — schema only (uses conversation history for context)
+                $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $prompt);
+                $schemaPlan['frontend'] = ['files' => []];
+                $schemaPlan = ai_sanitize_plan($schemaPlan);
+
+                $validationError = ai_validate_plan($schemaPlan);
+                if ($validationError) {
+                    abort(422, 'AI returned an invalid schema: ' . $validationError);
+                }
+
+                // Pass 2 — frontend with exact (post-sanitize) column names
+                $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                             . ai_schema_to_context($schemaPlan);
+                $frontendResult = $gemini->generateJson(AI_BUILD_FRONTEND_PROMPT, $frontendMsg);
+
+                $plan = $schemaPlan;
+                $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+                foreach ($plan['frontend']['files'] as &$file) {
+                    $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+                }
+                unset($file);
+
+                $summary = [
+                    'project_name'   => $plan['project_name'],
+                    'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
+                    'frontend_files' => count($plan['frontend']['files'] ?? []),
+                ];
+
+                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+
+            } elseif ($mode === 'edit') {
+                $project = $catalog->getProjectById($projectId, $userId);
+                if (!$project) abort(404, 'Project not found');
+
+                $schemaCtx    = ai_schema_to_context(ai_schema_from_db($projectId, $catalog));
+                $currentFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+                $userMessage  = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
+                $delta = $gemini->generateJsonWithHistory(AI_EDIT_SYSTEM_PROMPT, $history, $userMessage);
+
+                // Normalise file paths if the AI returned frontend files
+                if (!empty($delta['frontend']['files'])) {
+                    foreach ($delta['frontend']['files'] as &$file) {
+                        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+                    }
+                    unset($file);
+                }
+
+                $summary = [
+                    'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
+                    'add_columns'     => array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? [])),
+                    'update_policies' => array_map(fn($p) => $p['table'] . ' ' . $p['api_role'] . ' ' . $p['operation'], $delta['update_policies'] ?? []),
+                ];
+                if (!empty($delta['frontend']['files'])) {
+                    $summary['frontend_files'] = count($delta['frontend']['files']);
+                }
+
+                $editPlan = array_merge($delta, ['project_id' => $projectId]);
+                json_out(['mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+
+            } else { // diagnose
+                $project = $catalog->getProjectById($projectId, $userId);
+                if (!$project) abort(404, 'Project not found');
+
+                $existingTables = $catalog->listTables($projectId);
+                $schemaLines = [];
+                foreach ($existingTables as $tbl) {
+                    $cols = array_map(fn($c) => $c['name'] . ' ' . $c['type'], $catalog->listColumns($tbl['id']));
+                    $policies = $catalog->listPolicies($tbl['id']);
+                    $policyStrs = array_map(fn($p) => $p['api_role'] . '.' . $p['operation'] . '=' . ($p['allowed'] ? 'allow' : 'deny'), $policies);
+                    $schemaLines[] = '  Table "' . $tbl['logical_name'] . '": cols=[' . implode(', ', $cols) . '], policies=[' . implode(', ', $policyStrs) . ']';
+                }
+                $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
+
+                $apiBase       = rtrim($config['API_BASE_URL'], '/') . '/v1';
+                $frontendFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+                $context = "Project: " . $project['name'] . "\nAPI base: " . $apiBase . "\nSchema:\n" . $schemaContext . $frontendFiles . "\n\nIssue: " . $prompt;
+
+                $diagnosePrompt = <<<'PROMPT'
+You are a debugging assistant for SupaBein, a self-hosted PHP+MySQL BaaS.
+Analyze the project context and issue. Return ONLY valid JSON:
+{ "diagnosis": "clear explanation", "suggestions": ["step 1", ...] }
+PROMPT;
+
+                $result = $gemini->generateJsonWithHistory($diagnosePrompt, $history, $context);
+
+                json_out([
+                    'mode'        => 'diagnose',
+                    'diagnosis'   => $result['diagnosis'] ?? '',
+                    'suggestions' => $result['suggestions'] ?? [],
+                    'usage'       => $gemini->getLastUsage(),
+                ]);
+            }
+        } catch (\RuntimeException $e) {
+            $msg = $e->getMessage();
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
+        }
+
+    }, ['auth_middleware']);
+
+    // ── AI Apply: execute a previously generated plan ──────────────────────────
+    $router->post('/v1/ai/apply', function (array $req): void {
+        set_time_limit(240);
+
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+
+        $mode = $req['body']['mode'] ?? '';
+        $plan = $req['body']['plan'] ?? [];
+
+        if (!is_array($plan)) abort(422, 'plan must be an array');
+
+        if ($mode === 'build') {
+            $plan = ai_sanitize_plan($plan);
+            $validationError = ai_validate_plan($plan);
+            if ($validationError) abort(422, 'Invalid plan: ' . $validationError);
+            $result = ai_execute_build($plan, $userId);
+            json_out($result, 201);
+
+        } elseif ($mode === 'edit') {
+            $projectId = (int)($plan['project_id'] ?? 0);
+            if (!$projectId) abort(422, 'plan.project_id is required for edit mode');
+            $project = $catalog->getProjectById($projectId, $userId);
+            if (!$project) abort(404, 'Project not found');
+            $result = ai_execute_edit($plan, $projectId, $userId);
+            if (!empty($plan['frontend']['files'])) {
+                $editConfig = \App::get('config');
+                $editSites  = $catalog->listSites($projectId);
+                if ($editSites) {
+                    $deployResult = ai_deploy_files($editConfig, $catalog, (int)$editSites[0]['id'],
+                                                    $project, $plan['frontend']['files']);
+                    if (!empty($deployResult['deploy'])) {
+                        $result['deploy'] = $deployResult['deploy'];
+                    }
+                }
+            }
+            json_out($result);
+
+        } else {
+            abort(422, 'mode must be build or edit');
+        }
+
+    }, ['auth_middleware']);
+
+    // ── AI Sessions (DB-backed) ────────────────────────────────────────────────
+
+    $router->get('/v1/ai/sessions', function (array $req): void {
+        $userId  = (int)$req['auth']['user_id'];
+        $catalog = \SupaBein\Catalog::getInstance();
+        json_out($catalog->listAiSessions($userId));
+    }, ['auth_middleware']);
+
+    $router->post('/v1/ai/sessions', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $name      = trim($req['body']['name'] ?? 'New session');
+        $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
+        json_out($catalog->createAiSession($userId, $name ?: 'New session', $projectId), 201);
+    }, ['auth_middleware']);
+
+    $router->get('/v1/ai/sessions/:id', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $sessionId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $sess = $catalog->getAiSession($sessionId, $userId);
+        if (!$sess) abort(404, 'Session not found');
+        json_out($sess);
+    }, ['auth_middleware']);
+
+    $router->patch('/v1/ai/sessions/:id', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $sessionId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $name      = trim($req['body']['name'] ?? '');
+        $messages  = $req['body']['messages'] ?? null;
+        $sess = $catalog->getAiSession($sessionId, $userId);
+        if (!$sess) abort(404, 'Session not found');
+        $newName     = $name ?: $sess['name'];
+        $newMessages = is_array($messages) ? $messages : $sess['messages'];
+        $catalog->updateAiSession($sessionId, $userId, $newName, $newMessages);
+        json_out($catalog->getAiSession($sessionId, $userId));
+    }, ['auth_middleware']);
+
+    $router->delete('/v1/ai/sessions/:id', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $sessionId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->deleteAiSession($sessionId, $userId)) abort(404, 'Session not found');
+        json_out(['deleted' => true]);
+    }, ['auth_middleware']);
+}

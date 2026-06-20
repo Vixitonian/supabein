@@ -17,7 +17,7 @@ class Schema
 
     private const ALLOWED_TYPES = [
         'INT', 'BIGINT', 'SMALLINT', 'TINYINT',
-        'VARCHAR(255)', 'VARCHAR(128)', 'VARCHAR(64)', 'VARCHAR(32)',
+        'VARCHAR(255)', 'VARCHAR(128)', 'VARCHAR(64)', 'VARCHAR(36)', 'VARCHAR(32)',
         'TEXT', 'MEDIUMTEXT', 'LONGTEXT',
         'BOOLEAN', 'TINYINT(1)',
         'DECIMAL(10,2)', 'DECIMAL(15,4)',
@@ -69,8 +69,30 @@ class Schema
         return $name;
     }
 
+    public static function normalizeDataType(string $type): string
+    {
+        // Map any VARCHAR(N) to the smallest allowed size that fits
+        if (preg_match('/^VARCHAR\((\d+)\)$/i', $type, $m)) {
+            $n = (int)$m[1];
+            if ($n <= 32)  return 'VARCHAR(32)';
+            if ($n <= 36)  return 'VARCHAR(36)';
+            if ($n <= 64)  return 'VARCHAR(64)';
+            if ($n <= 128) return 'VARCHAR(128)';
+            if ($n <= 255) return 'VARCHAR(255)';
+            return 'TEXT';
+        }
+        // Map any DECIMAL(p,s) to the closest allowed precision
+        if (preg_match('/^DECIMAL\((\d+),(\d+)\)$/i', $type, $m)) {
+            $p = (int)$m[1]; $s = (int)$m[2];
+            if ($p <= 10 && $s <= 2) return 'DECIMAL(10,2)';
+            return 'DECIMAL(15,4)';
+        }
+        return $type;
+    }
+
     public static function validateDataType(string $type): string
     {
+        $type = self::normalizeDataType($type);
         if (!in_array(strtoupper($type), array_map('strtoupper', self::ALLOWED_TYPES), true)) {
             throw new \InvalidArgumentException(
                 "Unsupported data type '$type'. Allowed: " . implode(', ', self::ALLOWED_TYPES)
@@ -177,11 +199,18 @@ class Schema
         $def .= $nullable ? ' NULL' : ' NOT NULL';
 
         if ($default !== null) {
-            // Only allow safe literal defaults (no function calls)
-            if (!preg_match('/^[a-zA-Z0-9_.\-]+$/', (string)$default)) {
+            $default = (string)$default;
+            // Only allow safe literal defaults (no function calls or special chars)
+            if (!preg_match('/^[a-zA-Z0-9_.\-]+$/', $default)) {
                 throw new \InvalidArgumentException("Unsafe default value for column '$name'");
             }
-            $def .= ' DEFAULT ' . $default;
+            // Quote string defaults; leave bare numerics and SQL keywords unquoted
+            $sqlKeywords = ['CURRENT_TIMESTAMP', 'NULL', 'TRUE', 'FALSE'];
+            if (is_numeric($default) || in_array(strtoupper($default), $sqlKeywords, true)) {
+                $def .= ' DEFAULT ' . $default;
+            } else {
+                $def .= " DEFAULT '" . $default . "'";
+            }
         }
 
         return $def;
