@@ -482,7 +482,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
       <tr><td>name</td><td>string</td><td>Column name</td></tr>
       <tr><td>type</td><td>string</td><td>One of the supported data types</td></tr>
       <tr><td>nullable</td><td>bool</td><td>Allow NULL values (default: true)</td></tr>
-      <tr><td>default</td><td>string</td><td>Optional default value</td></tr>
+      <tr><td>default</td><td>string | bool</td><td>Optional default value. For <code>BOOLEAN</code> columns, <code>true</code>/<code>false</code> are accepted and coerced to <code>1</code>/<code>0</code> automatically.</td></tr>
     </table>
     <div class="code-wrap"><pre class="code" id="c-col">curl -X POST "https://your-domain/api/v1/projects/1/tables/users/columns" \
   -H "Authorization: Bearer YOUR_TOKEN" \
@@ -789,7 +789,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -H "Content-Type: application/json" \
   -d '{"subdomain": "myapp", "spa_mode": false}'</pre>
     <button class="copy-btn" onclick="copyEl('c-site',this)">Copy</button></div>
-    <p>Set <code>spa_mode: true</code> for single-page apps — unknown paths will serve <code>index.html</code> instead of 404.</p>
+    <p><code>subdomain</code> must be 2–63 lowercase alphanumeric characters or hyphens (e.g. <code>"my-app"</code>). <code>name</code> is accepted as an alias for <code>subdomain</code>. Set <code>spa_mode: true</code> for single-page apps — unknown paths will serve <code>index.html</code> instead of 404. Each project supports one site.</p>
   </div>
 </div>
 
