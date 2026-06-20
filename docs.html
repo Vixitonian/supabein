@@ -169,21 +169,11 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#reset">POST /auth/reset</a>
   </div>
   <div class="sb-group">
-    <span class="sb-label">Project User Auth</span>
-    <a class="sb-link" href="#proj-signup">POST /projects/:id/auth/signup</a>
-    <a class="sb-link" href="#proj-login">POST /projects/:id/auth/login</a>
-    <a class="sb-link" href="#proj-me">GET /projects/:id/auth/me</a>
-    <a class="sb-link" href="#proj-refresh">POST /projects/:id/auth/refresh</a>
-    <a class="sb-link" href="#proj-forgot">POST /projects/:id/auth/forgot</a>
-    <a class="sb-link" href="#proj-reset">POST /projects/:id/auth/reset</a>
-    <a class="sb-link" href="#proj-users-list">GET /projects/:id/users</a>
-    <a class="sb-link" href="#proj-users-delete">DELETE /projects/:id/users/:uid</a>
-  </div>
-  <div class="sb-group">
     <span class="sb-label">Projects</span>
     <a class="sb-link" href="#projects-list">GET /projects</a>
     <a class="sb-link" href="#projects-create">POST /projects</a>
     <a class="sb-link" href="#projects-delete">DELETE /projects/:id</a>
+    <a class="sb-link" href="#rotate-service-key">POST rotate-service-key</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Tables</span>
@@ -199,6 +189,7 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#data-get">GET (single row)</a>
     <a class="sb-link" href="#data-update">PATCH (update row)</a>
     <a class="sb-link" href="#data-delete">DELETE (delete row)</a>
+    <a class="sb-link" href="#data-login">POST (login)</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">File Storage</span>
@@ -242,8 +233,8 @@ tr:last-child td{border-bottom:none}
 <p>Three steps to your first API call:</p>
 <ol style="color:var(--muted);padding-left:20px;line-height:2">
   <li>Sign up → get a JWT token</li>
-  <li>Create a project → note the <code>anon_key</code></li>
-  <li>Create a table → call the data API with your anon key</li>
+  <li>Create a project → note the <code>service_key</code></li>
+  <li>Create a table → call the data API (no auth needed for public/anon access)</li>
 </ol>
 
 <div class="code-wrap">
@@ -258,28 +249,28 @@ curl -X POST "https://your-domain/api/v1/projects" \
   -H "Authorization: Bearer eyJ..." \
   -H "Content-Type: application/json" \
   -d '{"name": "My App"}'
-# → {"id": 1, "name": "My App", "anon_key": "eyJ...", "service_key": "eyJ..."}
+# → {"id": 1, "name": "My App", "service_key": "eyJ..."}
 
-# 3. Query your table with the anon key
-curl "https://your-domain/api/v1/data/1/users" \
-  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+# 3. Query your table (no auth header = anon role; subject to table policies)
+curl "https://your-domain/api/v1/data/1/users"</pre>
 <button class="copy-btn" onclick="copyEl('qs-code',this)">Copy</button>
 </div>
 
 <!-- ── API Keys ── -->
 <h2 id="keys">API Keys</h2>
-<p>Each project has two pre-generated keys, visible in the dashboard's <strong>API tab</strong>.</p>
+<p>Each project has a <strong>service_key</strong>, visible in the dashboard's <strong>API tab</strong>. Unauthenticated (anon) requests are made without any auth header at all — they are subject to the table's row-level security policies.</p>
 <table>
-  <tr><th>Key</th><th>Use when</th><th>Policies</th></tr>
-  <tr><td>anon_key</td><td>Frontend code, public clients</td><td>Enforced (anon role)</td></tr>
+  <tr><th>Key / token</th><th>Use when</th><th>Policies</th></tr>
   <tr><td>service_key</td><td>Trusted server-side code only</td><td>Bypassed entirely</td></tr>
+  <tr><td>(no header)</td><td>Public/anonymous frontend access</td><td>Enforced (anon role)</td></tr>
+  <tr><td>user JWT / PAT</td><td>Authenticated platform operators</td><td>Enforced (authenticated role)</td></tr>
 </table>
-<div class="callout warn">⚠ Never expose the <strong>service_key</strong> in client-side or publicly accessible code.</div>
+<div class="callout warn">⚠ Never expose the <strong>service_key</strong> in client-side or publicly accessible code. Rotate it via <a href="#rotate-service-key">POST /v1/projects/:id/rotate-service-key</a> if compromised.</div>
 <p>A <strong>Personal Access Token</strong> (PAT) acts as your login credential for the control plane (managing projects, tables, etc.) — useful in CI/CD. Create them in <a href="/dashboard/#/account">Account</a>.</p>
 
 <!-- ── Auth ── -->
 <h2 id="signup">Platform Authentication</h2>
-<p>These endpoints are for <strong>SupaBein operators</strong> (developers who manage projects, tables, and deployments). To authenticate your app's own end-users, see <a href="#proj-signup">Project User Auth</a> below.</p>
+<p>These endpoints are for <strong>SupaBein operators</strong> (developers who manage projects, tables, and deployments). To authenticate your app's own end-users within a project table, use the <a href="#data-login">data API login endpoint</a>.</p>
 
 <div class="endpoint" id="signup">
   <div class="endpoint-head">
@@ -383,134 +374,6 @@ curl "https://your-domain/api/v1/data/1/users" \
   </div>
 </div>
 
-<!-- ── Project User Auth ── -->
-<h2 id="proj-signup">Project User Auth</h2>
-<p>
-  These endpoints manage <strong>end-users of apps built on SupaBein</strong> — not SupaBein
-  platform operators. Each project maintains its own user table (<code>project_users</code>).
-  Tokens carry a <code>pid</code> claim and are rejected by other projects' data endpoints.
-</p>
-
-<div class="endpoint" id="proj-signup">
-  <div class="endpoint-head">
-    <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/auth/signup</span>
-    <span class="desc">Register an end-user in the project</span>
-  </div>
-  <div class="endpoint-body">
-    <table><tr><th>Body field</th><th>Type</th><th>Description</th></tr>
-      <tr><td>email</td><td>string</td><td>Valid email address</td></tr>
-      <tr><td>password</td><td>string</td><td>Minimum 8 characters</td></tr>
-    </table>
-    <div class="code-wrap"><pre class="code" id="c-proj-signup">curl -X POST "https://your-domain/api/v1/projects/5/auth/signup" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
-    <button class="copy-btn" onclick="copyEl('c-proj-signup',this)">Copy</button></div>
-    <p>Returns <code>{"token": "eyJ..."}</code> — a project-scoped JWT (role: <code>authenticated</code>).</p>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-login">
-  <div class="endpoint-head">
-    <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/auth/login</span>
-    <span class="desc">Sign in a project end-user</span>
-  </div>
-  <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-proj-login">curl -X POST "https://your-domain/api/v1/projects/5/auth/login" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
-    <button class="copy-btn" onclick="copyEl('c-proj-login',this)">Copy</button></div>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-me">
-  <div class="endpoint-head">
-    <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/auth/me</span>
-    <span class="desc">Get the current project user's profile</span>
-  </div>
-  <div class="endpoint-body">
-    <p>Requires a project-scoped JWT (obtained from signup/login above).</p>
-    <div class="code-wrap"><pre class="code" id="c-proj-me">curl "https://your-domain/api/v1/projects/5/auth/me" \
-  -H "Authorization: Bearer USER_TOKEN"</pre>
-    <button class="copy-btn" onclick="copyEl('c-proj-me',this)">Copy</button></div>
-    <p>Returns <code>{"id": 1, "project_id": 5, "email": "...", "created_at": "..."}</code>.</p>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-refresh">
-  <div class="endpoint-head">
-    <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/auth/refresh</span>
-    <span class="desc">Refresh a project-user JWT</span>
-  </div>
-  <div class="endpoint-body">
-    <p>Supply the existing project-scoped JWT. Returns a new token with a fresh expiry.</p>
-    <div class="code-wrap"><pre class="code" id="c-proj-refresh">curl -X POST "https://your-domain/api/v1/projects/5/auth/refresh" \
-  -H "Authorization: Bearer USER_TOKEN"</pre>
-    <button class="copy-btn" onclick="copyEl('c-proj-refresh',this)">Copy</button></div>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-forgot">
-  <div class="endpoint-head">
-    <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/auth/forgot</span>
-    <span class="desc">Generate a password-reset token for a project end-user</span>
-  </div>
-  <div class="endpoint-body">
-    <p>Returns a raw token. You (the developer) are responsible for delivering it to the user — email it, display it, or pass it through your own notification system. Token expires in 1 hour.</p>
-    <div class="code-wrap"><pre class="code" id="c-pforgot">curl -X POST "https://your-domain/api/v1/projects/5/auth/forgot" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user@example.com"}'</pre>
-    <button class="copy-btn" onclick="copyEl('c-pforgot',this)">Copy</button></div>
-    <p>Response: <code>{"token": "abc123...", "expires_in": 3600}</code></p>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-reset">
-  <div class="endpoint-head">
-    <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/auth/reset</span>
-    <span class="desc">Reset a project end-user's password</span>
-  </div>
-  <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-preset">curl -X POST "https://your-domain/api/v1/projects/5/auth/reset" \
-  -H "Content-Type: application/json" \
-  -d '{"token": "abc123...", "password": "new-password"}'</pre>
-    <button class="copy-btn" onclick="copyEl('c-preset',this)">Copy</button></div>
-    <p>Returns a fresh project-scoped JWT on success.</p>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-users-list">
-  <div class="endpoint-head">
-    <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/users</span>
-    <span class="desc">List all end-users registered in a project (owner auth required)</span>
-  </div>
-  <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-pusers">curl "https://your-domain/api/v1/projects/5/users" \
-  -H "Authorization: Bearer YOUR_TOKEN"</pre>
-    <button class="copy-btn" onclick="copyEl('c-pusers',this)">Copy</button></div>
-    <p>Response: <code>{"users": [{id, project_id, email, created_at}, ...], "count": N}</code></p>
-  </div>
-</div>
-
-<div class="endpoint" id="proj-users-delete">
-  <div class="endpoint-head">
-    <span class="method delete">DELETE</span>
-    <span class="path">/v1/projects/:id/users/:uid</span>
-    <span class="desc">Delete a project end-user (owner auth required)</span>
-  </div>
-  <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-puserdel">curl -X DELETE "https://your-domain/api/v1/projects/5/users/42" \
-  -H "Authorization: Bearer YOUR_TOKEN"</pre>
-    <button class="copy-btn" onclick="copyEl('c-puserdel',this)">Copy</button></div>
-  </div>
-</div>
-
 <!-- ── Projects ── -->
 <h2 id="projects-list">Projects</h2>
 
@@ -539,7 +402,7 @@ curl "https://your-domain/api/v1/data/1/users" \
   -H "Content-Type: application/json" \
   -d '{"name": "My App"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-pcreate',this)">Copy</button></div>
-    <p>Response includes <code>anon_key</code> and <code>service_key</code> for the new project.</p>
+    <p>Response includes the new project's <code>id</code>, <code>name</code>, and <code>service_key</code>.</p>
   </div>
 </div>
 
@@ -550,9 +413,25 @@ curl "https://your-domain/api/v1/data/1/users" \
     <span class="desc">Delete a project and all its data</span>
   </div>
   <div class="endpoint-body">
+    <p>Drops all physical MySQL tables, removes all site directories and storage files from disk, then deletes the project row (cascades to all catalog rows).</p>
     <div class="code-wrap"><pre class="code" id="c-pdel">curl -X DELETE "https://your-domain/api/v1/projects/1" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-pdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="rotate-service-key">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/rotate-service-key</span>
+    <span class="desc">Issue a new service key (invalidates old one immediately)</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Generates a new service_key JWT and stores it in the database. The previous service_key stops working as soon as this is called — update any consumers before rotating.</p>
+    <div class="code-wrap"><pre class="code" id="c-rotate">curl -X POST "https://your-domain/api/v1/projects/1/rotate-service-key" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-rotate',this)">Copy</button></div>
+    <p>Returns <code>{"service_key": "eyJ..."}</code>.</p>
   </div>
 </div>
 
@@ -589,7 +468,8 @@ curl "https://your-domain/api/v1/data/1/users" \
 </div>
 
 <h3 id="columns">Columns</h3>
-<p>Supported data types: <code>INT</code> <code>BIGINT</code> <code>VARCHAR(255)</code> <code>TEXT</code> <code>BOOLEAN</code> <code>DECIMAL(10,2)</code> <code>DATETIME</code> <code>DATE</code> <code>TIMESTAMP</code> <code>JSON</code> <code>FLOAT</code></p>
+<p>Supported data types: <code>INT</code> <code>BIGINT</code> <code>VARCHAR(255)</code> <code>TEXT</code> <code>BOOLEAN</code> <code>DECIMAL(10,2)</code> <code>DATETIME</code> <code>DATE</code> <code>TIMESTAMP</code> <code>JSON</code> <code>FLOAT</code> <code>PASSWORD</code></p>
+<p><code>PASSWORD</code> columns are stored as bcrypt hashes. On read the value is always returned as <code>null</code>. Write a plaintext value and it is hashed automatically before saving. Use the <a href="#data-login">data login endpoint</a> to verify credentials.</p>
 
 <div class="endpoint">
   <div class="endpoint-head">
@@ -615,9 +495,10 @@ curl "https://your-domain/api/v1/data/1/users" \
 <h3 id="policies">Policies (Row-Level Security)</h3>
 <p>Policies control which API roles can perform which operations on a table.</p>
 <ul>
-  <li><span class="role">anon</span> — unauthenticated requests (no token, or anon_key)</li>
-  <li><span class="role">authenticated</span> — requests with a valid user JWT or PAT</li>
-  <li>Project owner always bypasses policies regardless</li>
+  <li><span class="role">anon</span> — unauthenticated requests (no Authorization header)</li>
+  <li><span class="role">authenticated</span> — requests with a valid user JWT, PAT, or project_user JWT</li>
+  <li><span class="role">service_role</span> — service_key bypasses all policies entirely</li>
+  <li>Project owner JWT also bypasses policies regardless of role</li>
 </ul>
 
 <div class="endpoint">
@@ -651,8 +532,8 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
 
 <!-- ── Data API ── -->
 <h2 id="data-list">Data API</h2>
-<p>The data API lets you read and write rows in your tables. Use your project's <strong>anon_key</strong> for frontend calls. Operations are subject to the table's policies.</p>
-<div class="callout">The project owner's JWT always bypasses policies. Service key also bypasses all policies.</div>
+<p>The data API lets you read and write rows in your tables. Requests with no Authorization header are treated as <strong>anon</strong> role. Operations are subject to the table's row-level security policies.</p>
+<div class="callout">The project owner's JWT and the <strong>service_key</strong> both bypass all policies. Use the service_key only in trusted server-side code.</div>
 
 <div class="endpoint">
   <div class="endpoint-head">
@@ -669,8 +550,12 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
       <tr><td>order=col.dir</td><td>id DESC</td><td>Sort by column: <code>?order=name.asc</code> or multiple: <code>?order=age.desc,name.asc</code></td></tr>
     </table>
     <p><strong>IDs in responses are numbers</strong> (integers), not strings.</p>
-    <div class="code-wrap"><pre class="code" id="c-dlist">curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
-  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+    <div class="code-wrap"><pre class="code" id="c-dlist"># Anonymous (no auth header — subject to anon policy)
+curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active"
+
+# Authenticated (service_key bypasses all policies)
+curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
+  -H "Authorization: Bearer &lt;service_key&gt;"</pre>
     <button class="copy-btn" onclick="copyEl('c-dlist',this)">Copy</button></div>
   </div>
 </div>
@@ -683,7 +568,6 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
   </div>
   <div class="endpoint-body">
     <div class="code-wrap"><pre class="code" id="c-dins">curl -X POST "https://your-domain/api/v1/data/1/users" \
-  -H "Authorization: Bearer &lt;anon_key&gt;" \
   -H "Content-Type: application/json" \
   -d '{"name": "Alice", "email": "alice@example.com"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-dins',this)">Copy</button></div>
@@ -698,8 +582,7 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
     <span class="desc">Get a single row by primary key</span>
   </div>
   <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-dget">curl "https://your-domain/api/v1/data/1/users/42" \
-  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+    <div class="code-wrap"><pre class="code" id="c-dget">curl "https://your-domain/api/v1/data/1/users/42"</pre>
     <button class="copy-btn" onclick="copyEl('c-dget',this)">Copy</button></div>
   </div>
 </div>
@@ -712,7 +595,7 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
   </div>
   <div class="endpoint-body">
     <div class="code-wrap"><pre class="code" id="c-dupd">curl -X PATCH "https://your-domain/api/v1/data/1/users/42" \
-  -H "Authorization: Bearer &lt;anon_key&gt;" \
+  -H "Authorization: Bearer &lt;service_key&gt;" \
   -H "Content-Type: application/json" \
   -d '{"name": "Alice Smith"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-dupd',this)">Copy</button></div>
@@ -727,8 +610,28 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
   </div>
   <div class="endpoint-body">
     <div class="code-wrap"><pre class="code" id="c-ddel">curl -X DELETE "https://your-domain/api/v1/data/1/users/42" \
-  -H "Authorization: Bearer &lt;anon_key&gt;"</pre>
+  -H "Authorization: Bearer &lt;service_key&gt;"</pre>
     <button class="copy-btn" onclick="copyEl('c-ddel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="data-login">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/data/:project_id/:table/login</span>
+    <span class="desc">Authenticate a row via a PASSWORD column</span>
+  </div>
+  <div class="endpoint-body">
+    <p>The table must have exactly one <code>PASSWORD</code>-type column. Provide a column that identifies the user (e.g. <code>email</code>) and the plaintext <code>password</code>. If the credentials match, a <strong>project_user JWT</strong> (role: <code>authenticated</code>) is returned and can be passed as <code>Authorization: Bearer</code> in subsequent data API calls.</p>
+    <table><tr><th>Body field</th><th>Description</th></tr>
+      <tr><td>&lt;identifier_col&gt;</td><td>Any non-PASSWORD column to look up the row (e.g. <code>email</code>)</td></tr>
+      <tr><td>password</td><td>Plaintext password to verify against the stored hash</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-dlogin">curl -X POST "https://your-domain/api/v1/data/1/users/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-dlogin',this)">Copy</button></div>
+    <p>Returns <code>{"token": "eyJ...", "row": {...}}</code> — the JWT carries <code>sub</code> (row id), <code>pid</code> (project id), and <code>type: "project_user"</code>. Use it as Bearer auth in subsequent data API calls to get the <code>authenticated</code> role.</p>
   </div>
 </div>
 
