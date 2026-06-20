@@ -24,9 +24,12 @@ function register_deploy_routes(\SupaBein\Router $router): void
     // POST /v1/projects/:id/sites
     $router->post('/v1/projects/:id/sites', function (array $req) use ($catalog, $ownProject): void {
         $project   = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $subdomain = trim($req['body']['subdomain'] ?? '');
+        $subdomain = trim($req['body']['subdomain'] ?? $req['body']['name'] ?? '');
         $spaMode   = (bool)($req['body']['spa_mode'] ?? false);
 
+        if ($subdomain === '') {
+            abort(422, 'subdomain is required. Send {"subdomain":"my-app"} (2-63 lowercase alphanumeric or hyphens).');
+        }
         if (!preg_match('/^[a-z0-9][a-z0-9\-]{0,61}[a-z0-9]$/', $subdomain)) {
             abort(422, 'Invalid subdomain. Use 2-63 lowercase alphanumeric or hyphen characters.');
         }
