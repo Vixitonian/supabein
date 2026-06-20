@@ -34,8 +34,10 @@ Rules:
 - subdomain: 3-30 lowercase alphanumeric + hyphens (e.g. "my-blog")
 - table.name: valid SQL identifier /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid ALL SQL reserved words
   (SELECT, INSERT, TABLE, INDEX, KEY, WHERE, FROM, NAME, DATE, TYPE, STATUS, RANK, ROLE, etc.)
-- column.name: same rules; do NOT use "id" or "created_at" (auto-generated); avoid reserved words
-  including: name, type, status, rank, role, date, time, year, month, value, key, index, order, group
+- column.name: same rules; NEVER include "id" or "created_at" — SupaBein adds these automatically to
+  every table (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, created_at TIMESTAMP DEFAULT NOW()).
+  Including them causes a MySQL "Duplicate column name" DDL failure. Omit them entirely.
+  Also avoid reserved words: name, type, status, rank, role, date, time, year, month, value, key, index, order, group
 - column.type: exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64),
   VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2),
   DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON, PASSWORD
@@ -281,8 +283,8 @@ Schema rules:
 - column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128),
   VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1),
   DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON, PASSWORD
-- table.name / column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid reserved
-  words; do NOT use "id" or "created_at".
+- table.name / column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid reserved words
+- NEVER include "id" or "created_at" as columns — they are auto-added to every table by SupaBein and will cause a DDL failure if duplicated
 - If no changes of a given type are needed, return an empty array [] for that key.
 
 The FRONTEND RULES below apply whenever you include frontend.files:
