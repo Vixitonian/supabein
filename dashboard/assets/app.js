@@ -1345,6 +1345,27 @@ const AiPanel = (() => {
     renderMessages();
   }
 
+  function buildApplySummary(result, mode) {
+    const lines = [];
+    if (mode === 'build') {
+      if (result.project) lines.push(`**${result.project.name}** is ready.`);
+      if (result.tables?.length) {
+        const names = result.tables.map(t => `${t.name} (${t.columns} col${t.columns !== 1 ? 's' : ''})`).join(', ');
+        lines.push(`Created ${result.tables.length} table${result.tables.length !== 1 ? 's' : ''}: ${names}.`);
+      }
+      if (result.site && result.deploy) lines.push('Frontend deployed and live.');
+      else if (result.site)             lines.push('Site created — no frontend files were generated.');
+    }
+    if (mode === 'edit') {
+      if (result.added_tables?.length)     lines.push(`Added ${result.added_tables.length} new table${result.added_tables.length !== 1 ? 's' : ''}: ${result.added_tables.join(', ')}.`);
+      if (result.added_columns?.length)    lines.push(`Added ${result.added_columns.length} column${result.added_columns.length !== 1 ? 's' : ''}.`);
+      if (result.updated_policies?.length) lines.push(`Updated ${result.updated_policies.length} polic${result.updated_policies.length !== 1 ? 'ies' : 'y'}.`);
+      if (result.deploy)                   lines.push('Frontend redeployed.');
+      if (!lines.length)                   lines.push('No changes were needed.');
+    }
+    return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
+  }
+
   async function applyPlan(plan, mode) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
@@ -1357,10 +1378,12 @@ const AiPanel = (() => {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
     }
 
     renderMessages();
