@@ -17,8 +17,6 @@ CREATE TABLE IF NOT EXISTS `projects` (
     `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `owner_user_id` INT UNSIGNED NOT NULL,
     `name`          VARCHAR(128) NOT NULL,
-    `anon_key`      TEXT DEFAULT NULL,
-    `service_key`   TEXT DEFAULT NULL,
     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_owner_name` (`owner_user_id`, `name`)
@@ -90,15 +88,6 @@ CREATE TABLE IF NOT EXISTS `deploys` (
     FOREIGN KEY (`site_id`) REFERENCES `sites`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS `project_users` (
-    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    `project_id`    INT UNSIGNED NOT NULL,
-    `email`         VARCHAR(255) NOT NULL,
-    `password_hash` VARCHAR(255) NOT NULL,
-    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
-    UNIQUE KEY `uq_project_email` (`project_id`, `email`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
     `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -111,16 +100,6 @@ CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
     UNIQUE KEY `uq_token_hash` (`token_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-CREATE TABLE IF NOT EXISTS `password_reset_tokens` (
-    `id`              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    `project_user_id` INT UNSIGNED NOT NULL,
-    `token_hash`      VARCHAR(64) NOT NULL,
-    `expires_at`      DATETIME NOT NULL,
-    `used_at`         DATETIME NULL DEFAULT NULL,
-    `created_at`      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (`project_user_id`) REFERENCES `project_users`(`id`) ON DELETE CASCADE,
-    UNIQUE KEY `uq_token_hash` (`token_hash`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `rate_limits` (
     `project_id`   INT UNSIGNED NOT NULL,

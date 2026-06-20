@@ -38,7 +38,7 @@ Rules:
   including: name, type, status, rank, role, date, time, year, month, value, key, index, order, group
 - column.type: exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64),
   VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2),
-  DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+  DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON, PASSWORD
 - column.default: literal values only (e.g. "0", "active") or null — no SQL functions
 - policy.api_role: "anon" or "authenticated"
 - policy.operation: "SELECT", "INSERT", "UPDATE", or "DELETE"
@@ -106,7 +106,13 @@ Required pattern in auth.js (defined ONCE, in this file only):
     let _resolveReady;
     const ready = new Promise(res => { _resolveReady = res; });
     const loadUser = async () => {
-      // ... fetch /auth/me, set currentUser ...
+      const t = localStorage.getItem('sb:token');
+      if (!t) { _resolveReady(null); document.dispatchEvent(new CustomEvent('auth_status_change')); return; }
+      try {
+        const payload = JSON.parse(atob(t.split('.')[1]));
+        // Optionally fetch full user row: currentUser = await api.get('{table_name}', payload.sub);
+        currentUser = { id: payload.sub };
+      } catch { localStorage.removeItem('sb:token'); }
       _resolveReady(currentUser);
       document.dispatchEvent(new CustomEvent('auth_status_change'));
     };
@@ -140,7 +146,7 @@ do not change the signatures — this is what keeps every build consistent):
   const api = (() => {
     const authHeader = () => {
       const t = localStorage.getItem('sb:token');
-      return { 'Authorization': 'Bearer ' + (t || SB_KEY) };
+      return t ? { 'Authorization': 'Bearer ' + t } : {};
     };
     const base = (table) => `${SB_URL}/data/${SB_PID}/${table}`;
     // Tolerate either a bare array OR a wrapped envelope from the data API.
@@ -184,6 +190,7 @@ STRUCTURE (define each name once, in its own file)
     core/api.js                        ← the exact api client from RULE 6
     core/router.js                     ← router API only (no defineRoute calls)
     features/auth/auth.js              ← login, signup, logout, ready promise
+                                       (ONLY include when schema has a PASSWORD column)
     features/<feature>/<feature>.js    ← one subfolder per feature
 Load with RELATIVE paths in dependency order (config → api → router → auth → features → bootstrap).
 Absolute paths like /core/config.js break the site. No frameworks, no npm, no build tools.
@@ -207,19 +214,22 @@ PLACEHOLDERS + OWNERSHIP
 ═══════════════════════════════════════════════════════
 - Placeholders ONLY in core/config.js (substituted at deploy time):
     const SB_URL = '__SB_URL__';
-    const SB_KEY = '__SB_ANON_KEY__';
     const SB_PID = '__SB_PID__';
-  Declared once. Never redeclare anywhere.
-- Auth endpoints:
-    signup: ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
-    login:  ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
-    me:     ${SB_URL}/projects/${SB_PID}/auth/me       → GET  Authorization: Bearer {token}
-  Store JWT as "sb:token" in localStorage.
-- When a table has user_id with an ownership constraint, set it on INSERT:
+  Declared once. Never redeclare anywhere. No SB_KEY — public requests need no auth token.
+- Auth (ONLY when the schema has a table with a PASSWORD column):
+    signup: POST ${SB_URL}/data/${SB_PID}/{table_name}        {field: "...", password: "..."}
+            → server auto-hashes the password; returns the new user row (password field is null)
+    login:  POST ${SB_URL}/data/${SB_PID}/{table_name}/login  {field: "...", password: "..."}
+            → returns {token, user} where user.password is null
+  Replace {table_name} with the actual table name from the schema (e.g. "users").
+  Store the JWT as "sb:token" in localStorage.
+  Include features/auth/auth.js ONLY when the project has a PASSWORD column.
+  If no PASSWORD column exists, omit auth.js and any /login route.
+- When a table has user_id for ownership, set it on INSERT from the stored token:
     const payload = JSON.parse(atob(localStorage.getItem('sb:token').split('.')[1]));
     data.user_id = parseInt(payload.sub, 10);
 
-The app must be fully functional — real api calls, real CRUD, real auth flows.
+The app must be fully functional — real api calls, real CRUD, real auth flows where auth exists.
 RULES;
 
 // ── Pass 2: frontend given exact validated schema ────────────────────────────
@@ -270,7 +280,7 @@ Schema rules:
   changes only.
 - column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128),
   VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1),
-  DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+  DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON, PASSWORD
 - table.name / column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid reserved
   words; do NOT use "id" or "created_at".
 - If no changes of a given type are needed, return an empty array [] for that key.
@@ -320,7 +330,6 @@ function ai_deploy_files(
     $apiBase = rtrim($config['API_BASE_URL'], '/') . '/v1';
     $replacements = [
         '__SB_URL__'      => $apiBase,
-        '__SB_ANON_KEY__' => $project['anon_key'],
         '__SB_PID__'      => (string)$project['id'],
     ];
 

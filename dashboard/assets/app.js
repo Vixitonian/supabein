@@ -157,9 +157,8 @@ function makeCollapsible(card, open = false) {
   });
 }
 
-function generateClaudeMd(baseUrl, projectId, anonKey, pat) {
+function generateClaudeMd(baseUrl, projectId, pat) {
   const pid  = projectId || 'YOUR_PROJECT_ID';
-  const anon = anonKey   || 'YOUR_ANON_KEY';
   const token = pat      || 'sb_pat_xxxx          # create one above in Personal Access Tokens';
   const siteUrl = baseUrl;
 
@@ -176,12 +175,10 @@ Read this file before writing any backend code — all data and hosting goes thr
 SUPABEIN_URL=${siteUrl}
 SUPABEIN_TOKEN=${token}
 SUPABEIN_PROJECT_ID=${pid}
-SUPABEIN_ANON_KEY=${anon}
 SUPABEIN_SITE_ID=YOUR_SITE_ID       # Fill in after creating a site (from Deploy tab)
 \`\`\`
 
 > The PAT authenticates as the project owner and can create tables, set policies, and deploy.
-> The anon key is safe to use in frontend code — it respects table policies.
 
 ---
 
@@ -195,10 +192,7 @@ PROJECT=$(curl -s -X POST "${siteUrl}/api/v1/projects" \\
   -d '{"name":"my-app"}')
 
 PROJECT_ID=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-ANON_KEY=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['anon_key'])")
-
 echo "Project ID: $PROJECT_ID"
-echo "Anon key:   $ANON_KEY"
 \`\`\`
 
 ### 2. Create a site (for frontend hosting)
@@ -232,7 +226,7 @@ curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables" \\
 \`\`\`
 
 ### Allowed column types
-\`INT\` \`BIGINT\` \`VARCHAR(255)\` \`TEXT\` \`BOOLEAN\` \`DATETIME\` \`DECIMAL(10,2)\` \`FLOAT\`
+\`INT\` \`BIGINT\` \`VARCHAR(255)\` \`TEXT\` \`BOOLEAN\` \`DATETIME\` \`DECIMAL(10,2)\` \`FLOAT\` \`PASSWORD\`
 
 ### List / delete tables
 \`\`\`bash
@@ -269,7 +263,7 @@ curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/pol
   -d '{ "api_role": "anon", "operation": "SELECT", "allowed": true }'
 \`\`\`
 
-Roles: \`anon\` (no token), \`authenticated\` (valid user JWT), \`service_role\` (service key, bypasses all).
+Roles: \`anon\` (no token / public), \`authenticated\` (valid project-user JWT from /login).
 Operations: \`SELECT\` \`INSERT\` \`UPDATE\` \`DELETE\`
 
 ---
@@ -294,62 +288,47 @@ Use the **anon key** for frontend calls. Use the **PAT or service key** for trus
 Filter examples: \`?age=gte.18\` \`?name=like.Alice%25\` \`?status=neq.archived\`
 
 \`\`\`bash
-# List rows (with filter + pagination)
-curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=20&offset=0&status=active" \\
-  -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+# List rows (public table — no auth needed)
+curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=20&offset=0&status=active"
 
-# Insert
+# Insert (authenticated table — pass user JWT from /login)
 curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
-  -H "Authorization: Bearer $SUPABEIN_ANON_KEY" \\
+  -H "Authorization: Bearer $USER_JWT" \\
   -H "Content-Type: application/json" \\
   -d '{"title":"Hello","body":"World","user_id":1}'
 
 # Get / Update / Delete
-curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
-curl -s -X PATCH "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_ANON_KEY" -H "Content-Type: application/json" -d '{"title":"Updated"}'
-curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_ANON_KEY"
+curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1"
+curl -s -X PATCH "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $USER_JWT" -H "Content-Type: application/json" -d '{"title":"Updated"}'
+curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $USER_JWT"
 \`\`\`
 
 ---
 
-## User Auth (project-scoped, for your app's end-users)
+## Auth (optional — only when project has a PASSWORD column)
 
-Each project has its own user table. Tokens are scoped to the project (pid claim)
-and will be rejected by other projects' data endpoints.
+When any project table has a column of type \`PASSWORD\`, passwords are auto-hashed on write
+and never returned on read. Use the data API login endpoint for authentication.
 
 \`\`\`bash
-# Sign up  → returns { token: "eyJ..." }
-curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/signup" \\
+# Sign up — password is auto-hashed server-side
+curl -s -X POST "${siteUrl}/api/v1/data/${pid}/users" \\
+  -H "Content-Type: application/json" \\
+  -d '{"email":"user@example.com","password":"secret123"}'
+# → returns the new user row (password field is null)
+
+# Log in  → returns { token: "eyJ...", user: {...} }
+curl -s -X POST "${siteUrl}/api/v1/data/${pid}/users/login" \\
   -H "Content-Type: application/json" \\
   -d '{"email":"user@example.com","password":"secret123"}'
 
-# Log in  → returns { token: "eyJ..." }
-curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/login" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email":"user@example.com","password":"secret123"}'
-
-# Get current user
-curl -s "${siteUrl}/api/v1/projects/${pid}/auth/me" \\
+# Use the token for authenticated requests
+curl -s "${siteUrl}/api/v1/data/${pid}/posts" \\
   -H "Authorization: Bearer $USER_TOKEN"
-
-# Refresh token (returns new token with fresh expiry)
-curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/refresh" \\
-  -H "Authorization: Bearer $USER_TOKEN"
-
-# Password reset (you deliver the token to the user)
-curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/forgot" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email":"user@example.com"}'
-# returns { token: "abc123...", expires_in: 3600 }
-
-curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/auth/reset" \\
-  -H "Content-Type: application/json" \\
-  -d '{"token":"abc123...","password":"new-password"}'
-
-# List / delete end-users (owner auth)
-curl -s "${siteUrl}/api/v1/projects/${pid}/users" -H "Authorization: Bearer $SUPABEIN_TOKEN"
-curl -s -X DELETE "${siteUrl}/api/v1/projects/${pid}/users/42" -H "Authorization: Bearer $SUPABEIN_TOKEN"
 \`\`\`
+
+Tokens contain \`sub\` (user row id), \`pid\` (project id), \`type: "project_user"\`.
+Store as \`sb:token\` in localStorage. Policy \`api_role: "authenticated"\` matches these tokens.
 
 ---
 
@@ -429,17 +408,21 @@ curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_S
 
 ---
 
-## Using the anon key in frontend JS
+## Data API in frontend JS
 
 \`\`\`js
 const SB_URL = '${siteUrl}/api/v1';
-const SB_KEY = '${anon}';
 const SB_PID = ${pid};
+
+const authHeaders = () => {
+  const t = localStorage.getItem('sb:token');
+  return t ? { Authorization: \`Bearer \${t}\` } : {};
+};
 
 async function sbQuery(table, params = {}) {
   const qs  = new URLSearchParams(params).toString();
   const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`, {
-    headers: { Authorization: \`Bearer \${SB_KEY}\` }
+    headers: authHeaders()
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -448,7 +431,7 @@ async function sbQuery(table, params = {}) {
 async function sbInsert(table, data) {
   const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}\`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: \`Bearer \${SB_KEY}\` },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error(await res.text());
@@ -466,11 +449,10 @@ async function sbInsert(table, data) {
 - Always set policies on new tables — the default is deny all.
 - Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
 - **Always deploy to staging first. Never publish to live unless the user explicitly instructs it** (e.g. "go live", "publish", "push to production"). Staging is safe to overwrite at any time.
-- The anon key is safe for frontend bundles. The PAT and service key must never be in frontend code.
+- Never expose your PAT in client-side code — it gives owner access to all your projects.
+- Project user JWTs (from /data/{pid}/{table}/login) are scoped to that project.
 - Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
-- **Two auth tiers**: use \`/v1/projects/:id/auth/*\` for your app's end-users (project-scoped);
-  use \`/v1/auth/*\` only for SupaBein platform management (operators/CI), not for app users.
-- Project-user JWTs are scoped to their project — do not share them across projects.
+- Use \`/v1/auth/*\` only for SupaBein platform management (dashboard login, CI), never for app end-users.
 `;
 }
 
@@ -519,10 +501,7 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
         el('span', { class: 'sb-icon' }, '⟨⟩'),
         'API'
       ),
-      el('a', { href: `#/projects/${projectId}/users`, class: 'sb-link' + isOn('users') },
-        el('span', { class: 'sb-icon' }, '◎'),
-        'Users'
-      )
+
     )
   ] : [];
 
@@ -2211,7 +2190,7 @@ async function renderPoliciesTab(projectId, tableName) {
       <div class="card">
         <div class="card-title">Add / Update Policy</div>
         <div class="flex gap-2" style="flex-wrap:wrap">
-          <div class="form-group" style="width:180px"><label>API Role</label><input type="text" id="p-role" placeholder="anon / authenticated"></div>
+          <div class="form-group" style="width:180px"><label>API Role</label><input type="text" id="p-role" placeholder="anon / authenticated" list="role-options"><datalist id="role-options"><option value="anon"><option value="authenticated"></datalist></div>
           <div class="form-group" style="width:140px"><label>Operation</label><select id="p-op">${OPERATIONS.map(o=>`<option>${o}</option>`).join('')}</select></div>
           <div class="form-group" style="display:flex;align-items:center;gap:8px;padding-top:22px">
             <input type="checkbox" id="p-allowed"> <label for="p-allowed">Allowed</label>
@@ -2679,319 +2658,6 @@ function render404() {
   setApp('<div style="padding:48px;text-align:center"><h1 style="font-size:48px;color:var(--muted)">404</h1><p class="text-muted">Page not found</p><a href="#/projects">Go home</a></div>');
 }
 
-// ─── Project Users ───────────────────────────────────────────────────────────
-
-async function renderProjectUsers({ id }) {
-  if (!requireAuth()) return;
-  renderLayout(id, 'users', [el('p', { class: 'text-muted' }, 'Loading users…')]);
-
-  let users = [];
-  try {
-    const result = await Api.get(`/v1/projects/${id}/users`);
-    users = result.users || [];
-  } catch (e) {
-    renderLayout(id, 'users', [el('div', { class: 'alert alert-danger' }, e.message)]);
-    return;
-  }
-
-  async function deleteUser(uid) {
-    if (!confirm('Delete this user? This cannot be undone.')) return;
-    try {
-      await Api.delete(`/v1/projects/${id}/users/${uid}`);
-      renderProjectUsers({ id });
-    } catch (e) {
-      alert('Failed to delete user: ' + e.message);
-    }
-  }
-
-  const rows = users.length === 0
-    ? [el('tr', {}, el('td', { colspan: '3', style: 'text-align:center;color:var(--text-muted);padding:32px' }, 'No end-users yet. Users appear here after they sign up via your app.'))]
-    : users.map(u =>
-        el('tr', {},
-          el('td', {}, u.email),
-          el('td', {}, u.id),
-          el('td', {}, u.created_at),
-          el('td', {},
-            el('button', { class: 'btn btn-sm btn-danger', onclick: () => deleteUser(u.id) }, 'Delete')
-          )
-        )
-      );
-
-  const content = [
-    el('div', { class: 'page-header' },
-      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
-      el('div', {},
-        el('h2', { style: 'margin:0' }, 'Project Users'),
-        el('p', { class: 'text-muted', style: 'margin:2px 0 0' }, `${users.length} end-user${users.length !== 1 ? 's' : ''} registered`)
-      )
-    ),
-    el('div', { class: 'card' },
-      el('div', { class: 'table-responsive' },
-        el('table', { class: 'table' },
-          el('thead', {},
-            el('tr', {},
-              el('th', {}, 'Email'),
-              el('th', {}, 'ID'),
-              el('th', {}, 'Joined'),
-              el('th', {}, '')
-            )
-          ),
-          el('tbody', {}, ...rows)
-        )
-      )
-    ),
-    el('div', { class: 'card' },
-      el('h3', { style: 'margin-top:0;font-size:0.95rem' }, 'Project User Auth API'),
-      el('p', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:0' },
-        'Your app\'s end-users sign up and log in via the project auth endpoints. See the ',
-        el('a', { href: '#/projects/' + id + '/api' }, 'API tab'),
-        ' for curl examples.'
-      )
-    )
-  ];
-
-  renderLayout(id, 'users', content);
-}
-
-// ─── API Reference ────────────────────────────────────────────────────────────
-
-async function renderApi({ id }, renderTarget = null) {
-  if (!renderTarget) {
-    if (!requireAuth()) return;
-    renderLayout(id, 'api', [el('p', { class: 'text-muted' }, 'Loading API reference…')]);
-  } else {
-    renderTarget.innerHTML = '<div class="text-muted">Loading…</div>';
-  }
-
-  const baseUrl = window.location.origin + '/api/v1';
-  const projectId = parseInt(id);
-
-  let tables = [], project = null;
-  try {
-    [project, tables] = await Promise.all([
-      Api.get(`/v1/projects/${id}`),
-      Api.get(`/v1/projects/${id}/tables`),
-    ]);
-  } catch (e) {
-    if (renderTarget) {
-      renderTarget.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
-    } else {
-      renderLayout(id, 'api', [el('div', { class: 'alert alert-error' }, e.message)]);
-    }
-    return;
-  }
-
-  const anonKey    = project?.anon_key    ?? 'NOT_AVAILABLE';
-  const serviceKey = project?.service_key ?? 'NOT_AVAILABLE';
-
-  function copyCode(btn, text) {
-    navigator.clipboard.writeText(text).then(() => {
-      const orig = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = orig; }, 1500);
-    });
-  }
-
-  function codeBlock(code) {
-    const pre = el('pre', { class: 'api-code-block' }, code);
-    const btn = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
-    btn.onclick = () => copyCode(btn, code);
-    const wrap = el('div', { style: 'position:relative' }, pre, btn);
-    return wrap;
-  }
-
-  function exampleTabs(curlCode, jsCode) {
-    let active = 'curl';
-    const curlBlock = codeBlock(curlCode);
-    const jsBlock   = codeBlock(jsCode);
-    jsBlock.style.display = 'none';
-
-    const curlBtn = el('button', { class: 'api-tab-btn active' }, 'curl');
-    const jsBtn   = el('button', { class: 'api-tab-btn' }, 'JavaScript');
-
-    curlBtn.onclick = () => {
-      if (active === 'curl') return;
-      active = 'curl';
-      curlBlock.style.display = ''; jsBlock.style.display = 'none';
-      curlBtn.classList.add('active'); jsBtn.classList.remove('active');
-    };
-    jsBtn.onclick = () => {
-      if (active === 'js') return;
-      active = 'js';
-      curlBlock.style.display = 'none'; jsBlock.style.display = '';
-      jsBtn.classList.add('active'); curlBtn.classList.remove('active');
-    };
-
-    return el('div', {},
-      el('div', { class: 'api-tab-row' }, curlBtn, jsBtn),
-      curlBlock, jsBlock
-    );
-  }
-
-  function methodBadge(method) {
-    return el('span', { class: `method-badge method-${method.toLowerCase()}` }, method);
-  }
-
-  function endpointRow(method, path, desc, curlCode, jsCode) {
-    const details = el('div', { class: 'api-endpoint-detail' }, exampleTabs(curlCode, jsCode));
-    details.style.display = 'none';
-    let open = false;
-    const row = el('div', { class: 'endpoint-row' },
-      methodBadge(method),
-      el('span', { class: 'endpoint-path' }, path),
-      el('span', { class: 'endpoint-desc' }, desc),
-      el('button', { class: 'btn btn-sm', style: 'margin-left:auto;flex-shrink:0' }, '▾')
-    );
-    row.querySelector('button').onclick = () => {
-      open = !open;
-      details.style.display = open ? '' : 'none';
-      row.querySelector('button').textContent = open ? '▴' : '▾';
-    };
-    return el('div', {}, row, details);
-  }
-
-  function tableCard(table) {
-    const tname = table.table_name;
-    const pname = table.physical_name;
-    const listPath   = `/v1/data/${projectId}/${tname}`;
-    const singlePath = `/v1/data/${projectId}/${tname}/:id`;
-
-    const curlList = `curl -X GET "${baseUrl}/data/${projectId}/${tname}?limit=50" \\
-  -H "Authorization: Bearer ${anonKey}"`;
-    const jsList = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}?limit=50', {
-  headers: { 'Authorization': 'Bearer ${anonKey}' }
-});
-const rows = await res.json();`;
-
-    const curlCreate = `curl -X POST "${baseUrl}/data/${projectId}/${tname}" \\
-  -H "Authorization: Bearer ${anonKey}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"column": "value"}'`;
-    const jsCreate = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}', {
-  method: 'POST',
-  headers: {
-    'Authorization': 'Bearer ${anonKey}',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({ column: 'value' })
-});
-const row = await res.json();`;
-
-    const curlGet = `curl -X GET "${baseUrl}/data/${projectId}/${tname}/1" \\
-  -H "Authorization: Bearer ${anonKey}"`;
-    const jsGet = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
-  headers: { 'Authorization': 'Bearer ${anonKey}' }
-});
-const row = await res.json();`;
-
-    const curlPatch = `curl -X PATCH "${baseUrl}/data/${projectId}/${tname}/1" \\
-  -H "Authorization: Bearer ${anonKey}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"column": "new_value"}'`;
-    const jsPatch = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
-  method: 'PATCH',
-  headers: {
-    'Authorization': 'Bearer ${anonKey}',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({ column: 'new_value' })
-});
-const row = await res.json();`;
-
-    const curlDelete = `curl -X DELETE "${baseUrl}/data/${projectId}/${tname}/1" \\
-  -H "Authorization: Bearer ${anonKey}"`;
-    const jsDelete = `const res = await fetch('${baseUrl}/data/${projectId}/${tname}/1', {
-  method: 'DELETE',
-  headers: { 'Authorization': 'Bearer ${anonKey}' }
-});`;
-
-    return el('div', { class: 'api-table-card' },
-      el('div', { class: 'api-table-title' }, tname),
-      el('div', { class: 'api-table-physical' }, pname),
-      el('div', { style: 'margin-top:12px' },
-        endpointRow('GET',    listPath,   'List rows',   curlList,   jsList),
-        endpointRow('POST',   listPath,   'Insert row',  curlCreate, jsCreate),
-        endpointRow('GET',    singlePath, 'Get row',     curlGet,    jsGet),
-        endpointRow('PATCH',  singlePath, 'Update row',  curlPatch,  jsPatch),
-        endpointRow('DELETE', singlePath, 'Delete row',  curlDelete, jsDelete),
-      )
-    );
-  }
-
-  // Project Keys card
-  function maskedKey(val) {
-    return val.length > 20 ? val.slice(0, 10) + '••••••••••••' + val.slice(-6) : val;
-  }
-
-  function keyRow(label, val, warning) {
-    let shown = false;
-    const display = el('code', { class: 'api-key-value' }, maskedKey(val));
-    const showBtn = el('button', { class: 'btn btn-sm api-tab-btn' }, 'Show');
-    showBtn.onclick = () => {
-      shown = !shown;
-      display.textContent = shown ? val : maskedKey(val);
-      showBtn.textContent = shown ? 'Hide' : 'Show';
-    };
-    const copyBtn = el('button', { class: 'btn btn-sm' }, 'Copy');
-    copyBtn.onclick = () => copyCode(copyBtn, val);
-    const row = el('div', { class: 'api-key-row' },
-      el('span', { class: 'api-key-label' }, label),
-      display,
-      el('div', { class: 'api-key-actions' }, showBtn, copyBtn)
-    );
-    if (warning) {
-      return el('div', {},
-        row,
-        el('p', { class: 'text-muted', style: 'font-size:0.75rem;margin:2px 0 8px 0' }, warning)
-      );
-    }
-    return row;
-  }
-
-  const keysCard = el('div', { class: 'api-table-card' },
-    el('div', { class: 'api-table-title' }, 'Project Keys'),
-    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-      'Use the ', el('strong', {}, 'anon key'), ' in your frontend — requests are subject to your table policies. Use the ',
-      el('strong', {}, 'service key'), ' from a trusted server only — it bypasses all policies.'
-    ),
-    keyRow('anon key', anonKey, null),
-    keyRow('service key', serviceKey, '⚠ Never expose this key in client-side code.')
-  );
-
-  // Auth section
-  const emptyState = tables.length === 0
-    ? el('div', { class: 'api-table-card', style: 'text-align:center;padding:40px' },
-        el('p', { class: 'text-muted' }, 'No tables yet — create one to see your auto-generated API endpoints.'),
-        el('a', { href: `#/projects/${id}/tables`, class: 'btn btn-primary', style: 'display:inline-block;margin-top:12px' }, 'Create a Table')
-      )
-    : null;
-
-  const content = [
-    el('div', { class: 'page-header' },
-      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
-      el('div', {},
-        el('h1', { class: 'page-title' }, 'API Reference'),
-        el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin-top:2px' }, 'Project keys and auto-generated endpoints')
-      ),
-      el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'Full Docs ↗')
-    ),
-    keysCard,
-    ...(emptyState ? [emptyState] : tables.map(tableCard)),
-  ];
-
-  if (renderTarget) {
-    renderTarget.innerHTML = '';
-    // skip page-header (first element) when rendering inline
-    content.slice(1).forEach(c => renderTarget.appendChild(c));
-    const docsLink = el('div', { style: 'margin-top:12px;text-align:right' },
-      el('a', { href: '/docs', target: '_blank', rel: 'noopener', class: 'btn btn-sm' }, 'Full Docs ↗')
-    );
-    renderTarget.appendChild(docsLink);
-  } else {
-    renderLayout(id, 'api', content);
-  }
-}
-
 // ─── Account ──────────────────────────────────────────────────────────────────
 
 async function renderAccount() {
@@ -3130,24 +2796,23 @@ async function renderAccount() {
     style: 'max-width:480px;font-family:monospace;font-size:0.82rem',
   });
 
-  let currentProjId = null, currentAnonKey = null;
+  let currentProjId = null;
 
   function refreshPreview() {
     const pat = patInput.value.trim() || null;
-    previewEl.value = generateClaudeMd(baseUrl, currentProjId, currentAnonKey, pat);
+    previewEl.value = generateClaudeMd(baseUrl, currentProjId, pat);
   }
 
   projSelect.addEventListener('change', async () => {
     const pid = projSelect.value;
     if (!pid) {
-      currentProjId = null; currentAnonKey = null;
+      currentProjId = null;
       refreshPreview();
       return;
     }
     try {
       const proj = await Api.get(`/v1/projects/${pid}`);
       currentProjId  = proj.id;
-      currentAnonKey = proj.anon_key;
       refreshPreview();
     } catch (e) { alert(e.message); }
   });
@@ -3257,7 +2922,6 @@ Router.add('projects/:id/tables',                   renderTables);
 Router.add('projects/:id/tables/:name',             renderTableEditor);
 Router.add('projects/:id/sites',                    renderSites);
 Router.add('projects/:id/sites/:site_id',           renderSiteManager);
-Router.add('projects/:id/users',                     renderProjectUsers);
 Router.add('projects/:id/api',                      renderApi);
 Router.add('account',                               renderAccount);
 

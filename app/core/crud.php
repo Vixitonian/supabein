@@ -36,13 +36,26 @@ class Crud
 
         $colRows     = $catalog->listColumns((int)$table['id']);
         $allowedCols = array_column($colRows, 'col_name');
+        $colTypes    = array_column($colRows, 'data_type', 'col_name');
 
         $policy = Policy::check($pdo, (int)$table['id'], $auth, (int)$project['owner_user_id'], $operation);
         if (!$policy->allowed) {
             abort(403, 'Policy denies this operation');
         }
 
-        return [$table, $allowedCols, $policy];
+        return [$table, $allowedCols, $policy, $colTypes];
+    }
+
+    private static function maskPasswordCols(array $rows, array $colTypes): array
+    {
+        $passCols = array_keys(array_filter($colTypes, fn($t) => $t === 'PASSWORD'));
+        if (!$passCols) return $rows;
+        return array_map(function ($r) use ($passCols) {
+            foreach ($passCols as $pc) {
+                if (array_key_exists($pc, $r)) $r[$pc] = null;
+            }
+            return $r;
+        }, $rows);
     }
 
     // ─── SELECT (list) ───────────────────────────────────────────────────────
@@ -52,7 +65,7 @@ class Crud
         $projectId  = (int)$req['params']['project_id'];
         $tableName  = $req['params']['table_name'];
 
-        [$table, $allowedCols, $policy] = self::resolve($projectId, $tableName, $req['auth'], 'SELECT');
+        [$table, $allowedCols, $policy, $colTypes] = self::resolve($projectId, $tableName, $req['auth'], 'SELECT');
 
         $limit  = min((int)($req['query']['limit'] ?? 20), 1000);
         $offset = max((int)($req['query']['offset'] ?? 0), 0);
@@ -76,6 +89,7 @@ class Crud
         $stmt->execute($params);
         $rows = $stmt->fetchAll();
         $rows = array_map(fn($r) => isset($r['id']) ? array_merge($r, ['id' => (int)$r['id']]) : $r, $rows);
+        $rows = self::maskPasswordCols($rows, $colTypes);
 
         json_out(['data' => $rows, 'count' => count($rows), 'limit' => $limit, 'offset' => $offset]);
     }
@@ -88,7 +102,7 @@ class Crud
         $tableName = $req['params']['table_name'];
         $rowId     = (int)$req['params']['id'];
 
-        [$table, $allowedCols, $policy] = self::resolve($projectId, $tableName, $req['auth'], 'SELECT');
+        [$table, $allowedCols, $policy, $colTypes] = self::resolve($projectId, $tableName, $req['auth'], 'SELECT');
 
         [$sql, $params] = QueryBuilder::selectOne(
             $table['physical_name'],
@@ -107,6 +121,7 @@ class Crud
         }
 
         if (isset($row['id'])) $row['id'] = (int)$row['id'];
+        [$row] = self::maskPasswordCols([$row], $colTypes);
         json_out($row);
     }
 
@@ -138,10 +153,17 @@ class Crud
         $projectId = (int)$req['params']['project_id'];
         $tableName = $req['params']['table_name'];
 
-        [$table, $allowedCols, $policy] = self::resolve($projectId, $tableName, $req['auth'], 'INSERT');
+        [$table, $allowedCols, $policy, $colTypes] = self::resolve($projectId, $tableName, $req['auth'], 'INSERT');
 
         // Constraint values override whatever the client sent — prevents user_id spoofing
         $body = array_merge((array)$req['body'], self::constraintInsertValues($policy->constraint));
+
+        // Auto-hash any PASSWORD columns
+        foreach ($allowedCols as $col) {
+            if (($colTypes[$col] ?? '') === 'PASSWORD' && isset($body[$col]) && $body[$col] !== '') {
+                $body[$col] = password_hash((string)$body[$col], PASSWORD_BCRYPT);
+            }
+        }
 
         try {
             [$sql, $params] = QueryBuilder::insert(
@@ -161,6 +183,7 @@ class Crud
         $stmt->execute([$newId]);
         $row = $stmt->fetch();
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
+        if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
         json_out($row, 201);
     }
 
@@ -172,14 +195,22 @@ class Crud
         $tableName = $req['params']['table_name'];
         $rowId     = (int)$req['params']['id'];
 
-        [$table, $allowedCols, $policy] = self::resolve($projectId, $tableName, $req['auth'], 'UPDATE');
+        [$table, $allowedCols, $policy, $colTypes] = self::resolve($projectId, $tableName, $req['auth'], 'UPDATE');
+
+        $body = (array)$req['body'];
+        // Auto-hash any PASSWORD columns being updated
+        foreach ($allowedCols as $col) {
+            if (($colTypes[$col] ?? '') === 'PASSWORD' && isset($body[$col]) && $body[$col] !== '') {
+                $body[$col] = password_hash((string)$body[$col], PASSWORD_BCRYPT);
+            }
+        }
 
         try {
             [$sql, $params] = QueryBuilder::update(
                 $table['physical_name'],
                 $allowedCols,
                 $rowId,
-                $req['body'],
+                $body,
                 $policy->constraint
             );
         } catch (\InvalidArgumentException $e) {
@@ -198,6 +229,7 @@ class Crud
         $stmt2->execute([$rowId]);
         $row = $stmt2->fetch();
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
+        if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
         json_out($row);
     }
 
@@ -209,7 +241,7 @@ class Crud
         $tableName = $req['params']['table_name'];
         $rowId     = (int)$req['params']['id'];
 
-        [$table, , $policy] = self::resolve($projectId, $tableName, $req['auth'], 'DELETE');
+        [$table, , $policy] = self::resolve($projectId, $tableName, $req['auth'], 'DELETE'); // $colTypes not needed for DELETE
 
         [$sql, $params] = QueryBuilder::delete(
             $table['physical_name'],

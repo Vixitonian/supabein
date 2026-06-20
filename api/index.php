@@ -75,7 +75,6 @@ require_once SUPABEIN_ROOT . '/app/routes/project_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/table_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/data_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/deploy_routes.php';
-require_once SUPABEIN_ROOT . '/app/routes/project_auth_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/storage_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/ai_routes.php';
 
@@ -84,7 +83,6 @@ register_project_routes($router);
 register_table_routes($router);
 register_data_routes($router);
 register_deploy_routes($router);
-register_project_auth_routes($router);
 register_storage_routes($router);
 register_ai_routes($router);
 

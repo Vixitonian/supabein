@@ -32,21 +32,22 @@ function resolve_token(string $token): ?array
 
     $type = $decoded->type ?? 'user';
 
-    if ($type === 'anon') {
-        // anon_key — treat as unauthenticated so policy uses anon role
-        return null;
+    if ($type === 'project_user') {
+        // JWT issued by the data /login endpoint — scoped to a project's own users table
+        return [
+            'user_id'    => (int)$decoded->sub,
+            'role'       => 'project_user',
+            'email'      => '',
+            'project_id' => isset($decoded->pid) ? (int)$decoded->pid : null,
+        ];
     }
 
-    if ($type === 'service') {
-        return ['user_id' => null, 'role' => 'service_role', 'email' => '', 'project_id' => (int)($decoded->pid ?? 0)];
-    }
-
-    // Normal user JWT (project-user tokens carry pid; platform user tokens do not)
+    // Platform user JWT (dashboard login, PATs already handled above)
     return [
         'user_id'    => (int)$decoded->sub,
-        'role'       => $decoded->role,
-        'email'      => $decoded->email,
-        'project_id' => isset($decoded->pid) ? (int)$decoded->pid : null,
+        'role'       => $decoded->role ?? 'owner',
+        'email'      => $decoded->email ?? '',
+        'project_id' => null,
     ];
 }
 

@@ -48,10 +48,6 @@ class Catalog
         );
         $stmt->execute([$userId, $name]);
         $id = (int)$this->pdo->lastInsertId();
-        $anonKey    = generate_project_key('anon', $id);
-        $serviceKey = generate_project_key('service', $id);
-        $this->pdo->prepare('UPDATE projects SET anon_key=?, service_key=? WHERE id=?')
-                  ->execute([$anonKey, $serviceKey, $id]);
         return $this->getProjectById($id, $userId);
     }
 
@@ -67,35 +63,21 @@ class Catalog
     public function getProjectById(int $id, int $userId): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, owner_user_id, name, anon_key, service_key, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
+            'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
         );
         $stmt->execute([$id, $userId]);
         $row = $stmt->fetch() ?: null;
-        return $row ? $this->ensureProjectKeys($row) : null;
+        return $row ? self::castRow($row, ['id', 'owner_user_id']) : null;
     }
 
     public function getProjectByIdInternal(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, owner_user_id, name, anon_key, service_key, created_at FROM projects WHERE id = ?'
+            'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ?'
         );
         $stmt->execute([$id]);
         $row = $stmt->fetch() ?: null;
-        return $row ? $this->ensureProjectKeys($row) : null;
-    }
-
-    private function ensureProjectKeys(array $row): array
-    {
-        $row = self::castRow($row, ['id', 'owner_user_id']);
-        if (empty($row['anon_key'])) {
-            $anon = generate_project_key('anon', $row['id']);
-            $svc  = generate_project_key('service', $row['id']);
-            $this->pdo->prepare('UPDATE projects SET anon_key=?, service_key=? WHERE id=?')
-                      ->execute([$anon, $svc, $row['id']]);
-            $row['anon_key']    = $anon;
-            $row['service_key'] = $svc;
-        }
-        return $row;
+        return $row ? self::castRow($row, ['id', 'owner_user_id']) : null;
     }
 
     public function deleteProject(int $id, int $userId): bool
@@ -354,36 +336,6 @@ class Catalog
         );
         $stmt->execute([$siteId]);
         return self::castRows($stmt->fetchAll(), ['id', 'site_id', 'size_bytes']);
-    }
-
-    // ─── Project Users ───────────────────────────────────────────────────────
-
-    public function createProjectUser(int $projectId, string $email, string $passwordHash): array
-    {
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO project_users (project_id, email, password_hash) VALUES (?, ?, ?)'
-        );
-        $stmt->execute([$projectId, $email, $passwordHash]);
-        $id = (int)$this->pdo->lastInsertId();
-        return $this->getProjectUserById($projectId, $id);
-    }
-
-    public function getProjectUserById(int $projectId, int $userId): ?array
-    {
-        $stmt = $this->pdo->prepare(
-            'SELECT id, project_id, email, created_at FROM project_users WHERE project_id = ? AND id = ?'
-        );
-        $stmt->execute([$projectId, $userId]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
-    }
-
-    public function findProjectUserByEmail(int $projectId, string $email): ?array
-    {
-        $stmt = $this->pdo->prepare(
-            'SELECT id, project_id, email, password_hash FROM project_users WHERE project_id = ? AND email = ?'
-        );
-        $stmt->execute([$projectId, $email]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
     }
 
     // ─── Personal Access Tokens ──────────────────────────────────────────────

@@ -24,6 +24,7 @@ class Schema
         'FLOAT', 'DOUBLE',
         'DATETIME', 'DATE', 'TIMESTAMP',
         'JSON',
+        'PASSWORD',
     ];
 
     // Common SQL reserved words to reject as identifiers
@@ -195,7 +196,9 @@ class Schema
         $nullable = (bool)($col['nullable'] ?? true);
         $default  = $col['default'] ?? null;
 
-        $def = self::q($name) . ' ' . $type;
+        // PASSWORD is stored as a bcrypt hash in VARCHAR(255)
+        $ddlType = ($type === 'PASSWORD') ? 'VARCHAR(255)' : $type;
+        $def = self::q($name) . ' ' . $ddlType;
         $def .= $nullable ? ' NULL' : ' NOT NULL';
 
         if ($default !== null) {
