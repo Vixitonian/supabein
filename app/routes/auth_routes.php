@@ -247,6 +247,7 @@ function issue_project_jwt(int $projectUserId, string $email, int $projectId): s
         'sub'   => (string)$projectUserId,
         'email' => $email,
         'role'  => 'authenticated',
+        'type'  => 'project_user',
         'pid'   => $projectId,
         'iat'   => $now,
         'exp'   => $now + $config['JWT_TTL'],

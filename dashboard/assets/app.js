@@ -297,20 +297,22 @@ Requests with **no Authorization header** are treated as the \`anon\` role and a
 Filter examples: \`?age=gte.18\` \`?name=like.Alice%25\` \`?status=neq.archived\`
 
 \`\`\`bash
-# List rows — no auth = anon role (subject to policies)
+# List rows — returns {data: [...], count: N, limit: N, offset: N} — always unwrap .data
 curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=20&offset=0&status=active"
+# Response: {"data":[...],"count":42,"limit":20,"offset":0}
 
-# Insert as authenticated user (JWT from /login)
+# Insert a single row (authenticated user JWT from /login)
 curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
   -H "Authorization: Bearer $USER_JWT" \\
   -H "Content-Type: application/json" \\
   -d '{"title":"Hello","body":"World","user_id":1}'
 
-# Server-side insert bypassing policies (service key)
-curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
+# Bulk insert up to 500 rows in one request (service key for seeding)
+curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/batch" \\
   -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY" \\
   -H "Content-Type: application/json" \\
-  -d '{"title":"Hello","body":"World","user_id":1}'
+  -d '[{"title":"Row 1"},{"title":"Row 2"},{"title":"Row 3"}]'
+# Response: {"inserted":3,"rows":[...]}
 
 # Get (anon) / Update (user JWT) / Delete (service key)
 curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1"
@@ -405,7 +407,7 @@ DID=$(curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPA
 
 find dist -type f | while read f; do
   REL="\${f#dist/}"
-  curl -sX PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/files?path=$REL" \\
+  curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/files?path=$REL" \\
     -H "Authorization: Bearer $SUPABEIN_TOKEN" --data-binary "@$f"
 done
 
@@ -435,11 +437,13 @@ const authHeaders = () => {
 };
 
 // Anonymous request (no auth — subject to anon policies)
+// List response is a paginated envelope {data, count, limit, offset} — unwrap .data
 async function sbQuery(table, params = {}) {
   const qs  = new URLSearchParams(params).toString();
   const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`);
   if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const result = await res.json();
+  return result.data ?? result;
 }
 
 // Authenticated request — pass a project_user JWT obtained from the login endpoint
@@ -449,7 +453,8 @@ async function sbQueryAuth(table, token, params = {}) {
     headers: { Authorization: \`Bearer \${token}\` }
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const result = await res.json();
+  return result.data ?? result;
 }
 
 async function sbInsert(table, data, token = null) {

@@ -84,8 +84,9 @@ function register_deploy_routes(\SupaBein\Router $router): void
         ['auth_middleware']
     );
 
-    // PUT /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files?path=
-    $router->put(
+    // POST /v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files?path=
+    // (POST instead of PUT — some servers block PUT at the proxy/web-server level)
+    $router->post(
         '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files',
         [\SupaBein\Deploy::class, 'putFile'],
         ['auth_middleware']

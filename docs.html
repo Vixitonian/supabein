@@ -508,9 +508,18 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
     <span class="desc">Create or update a policy (single or batch)</span>
   </div>
   <div class="endpoint-body">
-    <p>Accepts a <strong>single policy object</strong> or a <strong>JSON array</strong> of objects for batch upsert in one call.</p>
-    <div class="code-wrap"><pre class="code" id="c-policy">## Batch (recommended) — set all policies at once
-curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
+    <p>Three formats accepted: a <strong>shorthand object</strong> (fewest keystrokes), a <strong>JSON array</strong> of explicit objects, or a <strong>single explicit object</strong>.</p>
+    <div class="code-wrap"><pre class="code" id="c-policy">## Shorthand (recommended) — list allowed ops, the rest are auto-denied
+curl -X PUT "https://your-domain/api/v1/projects/1/tables/posts/policies" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '[
+    { "api_role": "anon",          "allow": ["SELECT"] },
+    { "api_role": "authenticated", "allow": ["SELECT", "INSERT", "UPDATE", "DELETE"] }
+  ]'
+
+## Explicit array — full control over each operation
+curl -X PUT "https://your-domain/api/v1/projects/1/tables/posts/policies" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '[
@@ -521,12 +530,12 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
   ]'
 
 ## Single object — one policy per call
-curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
+curl -X PUT "https://your-domain/api/v1/projects/1/tables/posts/policies" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "api_role": "anon", "operation": "SELECT", "allowed": true }'</pre>
     <button class="copy-btn" onclick="copyEl('c-policy',this)">Copy</button></div>
-    <p><code>constraint_sql</code> is an optional WHERE clause appended to queries. Use <code>:current_user_id</code> as a placeholder for the authenticated user's ID (e.g. <code>"user_id = :current_user_id"</code>). Batch response: <code>{"updated": N, "policies": [...]}</code>.</p>
+    <p><code>constraint_sql</code> is an optional WHERE clause appended to queries. Use <code>:current_user_id</code> as a placeholder for the authenticated user's ID (e.g. <code>"user_id = :current_user_id"</code>). Batch/shorthand response: <code>{"updated": N, "policies": [...]}</code>.</p>
   </div>
 </div>
 
@@ -550,6 +559,7 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/users/policies" \
       <tr><td>order=col.dir</td><td>id DESC</td><td>Sort by column: <code>?order=name.asc</code> or multiple: <code>?order=age.desc,name.asc</code></td></tr>
     </table>
     <p><strong>IDs in responses are numbers</strong> (integers), not strings.</p>
+    <p>The list response is a paginated envelope — always unwrap <code>.data</code> in client code:</p>
     <div class="code-wrap"><pre class="code" id="c-dlist"># Anonymous (no auth header — subject to anon policy)
 curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active"
 
@@ -557,6 +567,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active"
 curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -H "Authorization: Bearer &lt;service_key&gt;"</pre>
     <button class="copy-btn" onclick="copyEl('c-dlist',this)">Copy</button></div>
+    <p>Returns: <code>{"data": [{...}, ...], "count": N, "limit": N, "offset": N}</code> — read rows from <code>.data</code>.</p>
   </div>
 </div>
 
@@ -572,6 +583,27 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -d '{"name": "Alice", "email": "alice@example.com"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-dins',this)">Copy</button></div>
     <p>Only fields that match defined columns are accepted. Extra fields are silently ignored.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="data-batch">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/data/:project_id/:table/batch</span>
+    <span class="desc">Bulk insert rows (up to 500)</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Send a JSON array of objects. Each row is inserted individually and subject to the same INSERT policy as a single insert. Returns all inserted rows.</p>
+    <div class="code-wrap"><pre class="code" id="c-dbatch">curl -X POST "https://your-domain/api/v1/data/1/skills/batch" \
+  -H "Authorization: Bearer &lt;service_key&gt;" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"name": "PHP",        "category": "Backend",  "level": 5},
+    {"name": "JavaScript", "category": "Frontend", "level": 4},
+    {"name": "MySQL",      "category": "Database", "level": 5}
+  ]'</pre>
+    <button class="copy-btn" onclick="copyEl('c-dbatch',this)">Copy</button></div>
+    <p>Returns: <code>{"inserted": 3, "rows": [{...}, {...}, {...}]}</code>. Max 500 rows per request.</p>
   </div>
 </div>
 
@@ -805,12 +837,11 @@ curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
     <span class="desc">Promote staged deploy to live</span>
   </div>
   <div class="endpoint-body">
-    <p>Copies <code>staging/</code> to <code>current/</code>, sets <code>current_deploy_id</code>, and clears <code>staging_deploy_id</code> on the site. The deploy must be the current staging deploy (its ID must match <code>site.staging_deploy_id</code>). Returns the updated site object.</p>
+    <p>Copies <code>staging/</code> to <code>current/</code>, sets <code>current_deploy_id</code>, and clears <code>staging_deploy_id</code> on the site. The deploy must be the current staging deploy (its ID must match <code>site.staging_deploy_id</code>). Returns the updated site object including <code>live_url</code> and <code>staging_url</code>.</p>
     <div class="code-wrap"><pre class="code" id="c-publish">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/5/publish" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-publish',this)">Copy</button></div>
-    <p>After publishing, your site is live at:<br>
-    <code>https://your-domain/sites/s{site_id}/current/</code></p>
+    <p>Response includes <code>live_url</code> (the public URL) and <code>staging_url</code> for immediate use — no need to construct URLs manually.</p>
   </div>
 </div>
 
@@ -841,7 +872,7 @@ DID=$(curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/open"
 for f in dist/**/*; do
   [[ -f "$f" ]] || continue
   REL="${f#dist/}"
-  curl -sX PUT "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/files?path=$REL" \
+  curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/files?path=$REL" \
     -H "Authorization: Bearer YOUR_TOKEN" \
     --data-binary "@$f"
 done
@@ -873,13 +904,13 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 
 <div class="endpoint" id="deploy-put-file">
   <div class="endpoint-head">
-    <span class="method put">PUT</span>
+    <span class="method post">POST</span>
     <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
     <span class="desc">Upload a single file into the staging deploy</span>
   </div>
   <div class="endpoint-body">
     <p>Send the raw file bytes as the request body. The <code>?path=</code> query parameter specifies where the file goes relative to the site root. Subdirectories are created automatically. Blocked extensions (<code>.php</code>, <code>.sh</code>, etc.) return <code>403</code>.</p>
-    <div class="code-wrap"><pre class="code" id="c-putfile">curl -X PUT "https://your-domain/api/v1/projects/1/sites/1/deploys/7/files?path=assets/app.js" \
+    <div class="code-wrap"><pre class="code" id="c-putfile">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/7/files?path=assets/app.js" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   --data-binary "@./dist/assets/app.js"</pre>
     <button class="copy-btn" onclick="copyEl('c-putfile',this)">Copy</button></div>
@@ -923,11 +954,11 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
     <span class="desc">Finalize a pending deploy (moves to staging)</span>
   </div>
   <div class="endpoint-body">
-    <p>Writes the hardening <code>.htaccess</code>, moves files to the <strong>staging</strong> directory, and marks the deploy <code>ready</code>. The site is <strong>not live yet</strong> — call <a href="#deploy-publish">Publish to live</a> to promote it.</p>
+    <p>Writes the hardening <code>.htaccess</code>, moves files to the <strong>staging</strong> directory, and marks the deploy <code>ready</code>. Returns <code>422</code> if no files were uploaded (empty deploy). The site is <strong>not live yet</strong> — call <a href="#deploy-publish">Publish to live</a> to promote it.</p>
     <div class="code-wrap"><pre class="code" id="c-finalize">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/7/finalize" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-finalize',this)">Copy</button></div>
-    <p>Returns the updated deploy record with <code>status: "ready"</code>.</p>
+    <p>Returns the updated deploy record with <code>status: "ready"</code> and <code>staging_url</code>.</p>
   </div>
 </div>
 
