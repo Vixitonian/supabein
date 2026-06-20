@@ -96,6 +96,9 @@ class GeminiClient
 
         $plan = json_decode($text, true);
         if (!is_array($plan)) {
+            $plan = ai_lenient_json($text);
+        }
+        if (!is_array($plan)) {
             throw new \RuntimeException('Gemini response was not valid JSON: ' . substr($text, 0, 200));
         }
 
