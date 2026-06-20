@@ -42,10 +42,118 @@ function register_project_routes(\SupaBein\Router $router): void
 
     // DELETE /v1/projects/:id
     $router->delete('/v1/projects/:id', function (array $req) use ($catalog): void {
-        $deleted = $catalog->deleteProject((int)$req['params']['id'], $req['auth']['user_id']);
-        if (!$deleted) {
-            abort(404);
+        $projectId = (int)$req['params']['id'];
+        $userId    = $req['auth']['user_id'];
+
+        $project = $catalog->getProjectByIdInternal($projectId);
+        if (!$project || (int)$project['owner_user_id'] !== $userId) abort(404);
+
+        $pdo    = \App::get('db');
+        $config = \App::get('config');
+
+        // Drop all physical MySQL tables for this project
+        foreach ($catalog->listTables($projectId) as $tbl) {
+            $pdo->exec(\SupaBein\Schema::dropTableDDL($tbl['physical_name']));
         }
+
+        // Delete all site directories from disk
+        $sitesPath = $config['SITES_PATH'];
+        foreach ($catalog->listSites($projectId) as $site) {
+            $siteDir = $sitesPath . '/s' . $site['id'];
+            if (is_dir($siteDir)) \SupaBein\Deploy::rrmdir($siteDir);
+        }
+
+        // Delete project storage files
+        $storagePath = $config['STORAGE_PATH'] . '/files/p' . $projectId;
+        if (is_dir($storagePath)) \SupaBein\Deploy::rrmdir($storagePath);
+
+        $catalog->deleteProject($projectId, $userId);
         json_out(['deleted' => true]);
+    }, ['auth_middleware']);
+
+    // POST /v1/projects/:id/cleanup — remove ghost catalog entries and orphaned physical resources
+    $router->post('/v1/projects/:id/cleanup', function (array $req) use ($catalog): void {
+        $projectId = (int)$req['params']['id'];
+        $userId    = $req['auth']['user_id'];
+
+        $project = $catalog->getProjectByIdInternal($projectId);
+        if (!$project || (int)$project['owner_user_id'] !== $userId) abort(404);
+
+        $pdo    = \App::get('db');
+        $config = \App::get('config');
+
+        $tablesDropped       = [];
+        $catalogTablesRemoved = 0;
+        $deployRowsRemoved   = 0;
+        $orphanDirsDeleted   = 0;
+
+        // ── Table sync: catalog ↔ MySQL ──────────────────────────────────────
+        $catalogTables = $catalog->listTables($projectId);
+        $catalogPhysical = array_column($catalogTables, 'physical_name');
+
+        $stmt = $pdo->prepare(
+            'SELECT TABLE_NAME FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE ?'
+        );
+        $stmt->execute(['p' . $projectId . '_%']);
+        $mysqlTables = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+
+        // Ghost entries: in catalog but not in MySQL → remove catalog row
+        foreach ($catalogTables as $tbl) {
+            if (!in_array($tbl['physical_name'], $mysqlTables, true)) {
+                $pdo->prepare('DELETE FROM project_tables WHERE id = ?')->execute([$tbl['id']]);
+                $catalogTablesRemoved++;
+            }
+        }
+
+        // Orphan tables: in MySQL but not in catalog → DROP
+        foreach ($mysqlTables as $mysqlName) {
+            if (!in_array($mysqlName, $catalogPhysical, true)) {
+                $pdo->exec(\SupaBein\Schema::dropTableDDL($mysqlName));
+                $tablesDropped[] = $mysqlName;
+            }
+        }
+
+        // ── Deploy sync: catalog ↔ disk ──────────────────────────────────────
+        $sitesPath = $config['SITES_PATH'];
+        foreach ($catalog->listSites($projectId) as $site) {
+            $siteId   = (int)$site['id'];
+            $deploys  = $catalog->listDeploys($siteId);
+            $knownPaths = [];
+
+            // Ghost deploys: catalog path doesn't exist on disk
+            foreach ($deploys as $deploy) {
+                $path = (string)($deploy['path'] ?? '');
+                if ($path !== '') {
+                    $knownPaths[] = rtrim($path, '/');
+                    if (!is_dir($path)) {
+                        $pdo->prepare('DELETE FROM deploys WHERE id = ?')->execute([$deploy['id']]);
+                        $deployRowsRemoved++;
+                        continue;
+                    }
+                }
+                $knownPaths[] = rtrim($path, '/');
+            }
+
+            // Orphan deploy dirs: exist on disk but not in catalog
+            $deploysDir = $sitesPath . '/s' . $siteId . '/deploys';
+            if (is_dir($deploysDir)) {
+                foreach (scandir($deploysDir) as $entry) {
+                    if ($entry === '.' || $entry === '..') continue;
+                    $full = $deploysDir . '/' . $entry;
+                    if (is_dir($full) && !in_array($full, $knownPaths, true)) {
+                        \SupaBein\Deploy::rrmdir($full);
+                        $orphanDirsDeleted++;
+                    }
+                }
+            }
+        }
+
+        json_out([
+            'tables_dropped'           => $tablesDropped,
+            'catalog_tables_removed'   => $catalogTablesRemoved,
+            'deploy_rows_removed'      => $deployRowsRemoved,
+            'orphan_deploy_dirs_deleted' => $orphanDirsDeleted,
+        ]);
     }, ['auth_middleware']);
 }
