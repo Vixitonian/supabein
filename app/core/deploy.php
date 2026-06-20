@@ -411,6 +411,19 @@ class Deploy
         $spaMode  = (bool)$site['spa_mode'];
         file_put_contents($deployDir . '/.htaccess', self::buildHardeningHtaccess($spaMode));
 
+        // Reject empty deploys (only the auto-written .htaccess present means no real files)
+        $uploadedCount = 0;
+        foreach (new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($deployDir, \RecursiveDirectoryIterator::SKIP_DOTS)
+        ) as $f) {
+            if ($f->isFile() && $f->getFilename() !== '.htaccess') {
+                $uploadedCount++;
+            }
+        }
+        if ($uploadedCount === 0) {
+            abort(422, 'Cannot finalize an empty deploy — no files were uploaded');
+        }
+
         // Calculate total size
         $totalSize = 0;
         $it = new \RecursiveIteratorIterator(
@@ -443,7 +456,11 @@ class Deploy
         $catalog->updateDeploy($deployId, 'ready', $deployDir);
         $catalog->updateSiteStagingDeploy($siteId, $deployId);
 
-        json_out($catalog->getDeployById($deployId));
+        $apiBase    = rtrim(\App::get('config')['API_BASE_URL'] ?? '', '/');
+        $appBase    = preg_replace('#/(api|v\d+)(/.*)?$#i', '', $apiBase);
+        $result     = $catalog->getDeployById($deployId);
+        $result['staging_url'] = $appBase . '/sites/s' . $siteId . '/staging/';
+        json_out($result);
     }
 
     /**
@@ -496,7 +513,12 @@ class Deploy
         $catalog->updateSiteCurrentDeploy($siteId, $deployId);
         $catalog->updateSiteStagingDeploy($siteId, null);
 
-        json_out($catalog->getSiteByProjectId($projectId, $siteId));
+        $apiBase = rtrim(\App::get('config')['API_BASE_URL'] ?? '', '/');
+        $appBase = preg_replace('#/(api|v\d+)(/.*)?$#i', '', $apiBase);
+        $site    = $catalog->getSiteByProjectId($projectId, $siteId);
+        $site['live_url']    = $appBase . '/sites/s' . $site['id'] . '/current/';
+        $site['staging_url'] = $appBase . '/sites/s' . $site['id'] . '/staging/';
+        json_out($site);
     }
 
     /**

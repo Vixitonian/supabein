@@ -93,6 +93,13 @@ function register_data_routes(\SupaBein\Router $router): void
         ['optional_auth_middleware']
     );
 
+    // POST /v1/data/:project_id/:table_name/batch — bulk insert (up to 500 rows)
+    $router->post(
+        '/v1/data/:project_id/:table_name/batch',
+        [\SupaBein\Crud::class, 'handleBatchInsert'],
+        ['optional_auth_middleware']
+    );
+
     $router->get(
         '/v1/data/:project_id/:table_name/:id',
         [\SupaBein\Crud::class, 'handleGet'],

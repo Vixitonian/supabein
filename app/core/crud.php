@@ -187,6 +187,55 @@ class Crud
         json_out($row, 201);
     }
 
+    // ─── BATCH INSERT ────────────────────────────────────────────────────────
+
+    public static function handleBatchInsert(array $req): void
+    {
+        $projectId = (int)$req['params']['project_id'];
+        $tableName = $req['params']['table_name'];
+
+        $rows = $req['body'];
+        if (!is_array($rows) || empty($rows) || !array_is_list($rows)) {
+            abort(422, 'Request body must be a non-empty JSON array of objects');
+        }
+        if (count($rows) > 500) {
+            abort(422, 'Batch limited to 500 rows per request');
+        }
+
+        [$table, $allowedCols, $policy, $colTypes] = self::resolve($projectId, $tableName, $req['auth'], 'INSERT');
+
+        $pdo      = \App::get('db');
+        $inserted = [];
+
+        foreach ($rows as $body) {
+            $body = array_merge((array)$body, self::constraintInsertValues($policy->constraint));
+
+            foreach ($allowedCols as $col) {
+                if (($colTypes[$col] ?? '') === 'PASSWORD' && isset($body[$col]) && $body[$col] !== '') {
+                    $body[$col] = password_hash((string)$body[$col], PASSWORD_BCRYPT);
+                }
+            }
+
+            try {
+                [$sql, $params] = QueryBuilder::insert($table['physical_name'], $allowedCols, $body);
+            } catch (\InvalidArgumentException $e) {
+                abort(422, $e->getMessage());
+            }
+
+            $pdo->prepare($sql)->execute($params);
+            $newId = (int)$pdo->lastInsertId();
+
+            $stmt = $pdo->prepare('SELECT * FROM `' . $table['physical_name'] . '` WHERE id = ?');
+            $stmt->execute([$newId]);
+            $row = $stmt->fetch();
+            if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
+            if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
+            $inserted[] = $row;
+        }
+
+        json_out(['inserted' => count($inserted), 'rows' => $inserted], 201);
+    }
+
     // ─── UPDATE ──────────────────────────────────────────────────────────────
 
     public static function handleUpdate(array $req): void

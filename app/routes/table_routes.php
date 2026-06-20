@@ -201,12 +201,33 @@ function register_table_routes(\SupaBein\Router $router): void
 
     // PUT /v1/projects/:id/tables/:name/policies
     // Accepts a single policy object OR an array of policy objects (batch upsert).
+    // Shorthand: {"api_role":"anon","allow":["SELECT","INSERT"]} auto-denies omitted operations.
     $router->put('/v1/projects/:id/tables/:name/policies', function (array $req) use ($catalog, $ownProject, $ownTable): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
         $table   = $ownTable($project['id'], $req['params']['name']);
 
-        $body     = $req['body'];
-        $policies = isset($body[0]) ? $body : [$body];
+        $body = $req['body'];
+        $raw  = isset($body[0]) ? $body : [$body];
+
+        // Expand shorthand {"api_role","allow":[...]} into one entry per operation
+        $policies = [];
+        foreach ($raw as $entry) {
+            if (isset($entry['allow']) && is_array($entry['allow'])) {
+                $apiRole     = $entry['api_role']      ?? '';
+                $constraint  = $entry['constraint_sql'] ?? null;
+                $allowedOps  = array_map('strtoupper', $entry['allow']);
+                foreach (['SELECT', 'INSERT', 'UPDATE', 'DELETE'] as $op) {
+                    $policies[] = [
+                        'api_role'       => $apiRole,
+                        'operation'      => $op,
+                        'allowed'        => in_array($op, $allowedOps, true),
+                        'constraint_sql' => $constraint,
+                    ];
+                }
+            } else {
+                $policies[] = $entry;
+            }
+        }
 
         $results = [];
         foreach ($policies as $i => $policy) {
