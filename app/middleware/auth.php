@@ -32,6 +32,20 @@ function resolve_token(string $token): ?array
 
     $type = $decoded->type ?? 'user';
 
+    if ($type === 'service') {
+        $pid = isset($decoded->pid) ? (int)$decoded->pid : null;
+        if (!$pid) return null;
+        // Verify against stored key so rotation invalidates old tokens immediately
+        $project = \SupaBein\Catalog::getInstance()->getProjectByIdInternal($pid);
+        if (!$project || ($project['service_key'] ?? '') !== $token) return null;
+        return [
+            'user_id'    => 0,
+            'role'       => 'service_role',
+            'email'      => '',
+            'project_id' => $pid,
+        ];
+    }
+
     if ($type === 'project_user') {
         // JWT issued by the data /login endpoint — scoped to a project's own users table
         return [

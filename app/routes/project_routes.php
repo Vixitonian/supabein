@@ -2,6 +2,19 @@
 
 declare(strict_types=1);
 
+use Firebase\JWT\JWT;
+
+function make_service_key(int $projectId): string
+{
+    $config = \App::get('config');
+    $now    = time();
+    return JWT::encode(
+        ['sub' => $projectId, 'pid' => $projectId, 'type' => 'service', 'iat' => $now],
+        $config['JWT_SECRET'],
+        $config['JWT_ALGO']
+    );
+}
+
 function register_project_routes(\SupaBein\Router $router): void
 {
     $catalog = \SupaBein\Catalog::getInstance();
@@ -19,14 +32,19 @@ function register_project_routes(\SupaBein\Router $router): void
             abort(422, 'Project name is required (max 128 chars)');
         }
 
+        // Reserve an ID by inserting with a placeholder key, then generate the real key with that ID
         try {
-            $project = $catalog->createProject($req['auth']['user_id'], $name);
+            $project = $catalog->createProject($req['auth']['user_id'], $name, '');
         } catch (\PDOException $e) {
             if (str_contains($e->getMessage(), 'Duplicate')) {
                 abort(409, 'A project with this name already exists');
             }
             throw $e;
         }
+
+        $serviceKey = make_service_key((int)$project['id']);
+        $catalog->setServiceKey((int)$project['id'], $serviceKey);
+        $project['service_key'] = $serviceKey;
 
         json_out($project, 201);
     }, ['auth_middleware']);
@@ -69,6 +87,19 @@ function register_project_routes(\SupaBein\Router $router): void
 
         $catalog->deleteProject($projectId, $userId);
         json_out(['deleted' => true]);
+    }, ['auth_middleware']);
+
+    // POST /v1/projects/:id/rotate-service-key
+    $router->post('/v1/projects/:id/rotate-service-key', function (array $req) use ($catalog): void {
+        $projectId = (int)$req['params']['id'];
+        $userId    = $req['auth']['user_id'];
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) abort(404);
+
+        $newKey = make_service_key($projectId);
+        $catalog->setServiceKey($projectId, $newKey);
+        json_out(['service_key' => $newKey]);
     }, ['auth_middleware']);
 
     // POST /v1/projects/:id/cleanup — remove ghost catalog entries and orphaned physical resources

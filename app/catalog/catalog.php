@@ -41,12 +41,12 @@ class Catalog
 
     // ─── Projects ────────────────────────────────────────────────────────────
 
-    public function createProject(int $userId, string $name): array
+    public function createProject(int $userId, string $name, string $serviceKey): array
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO projects (owner_user_id, name) VALUES (?, ?)'
+            'INSERT INTO projects (owner_user_id, name, service_key) VALUES (?, ?, ?)'
         );
-        $stmt->execute([$userId, $name]);
+        $stmt->execute([$userId, $name, $serviceKey]);
         $id = (int)$this->pdo->lastInsertId();
         return $this->getProjectById($id, $userId);
     }
@@ -63,7 +63,7 @@ class Catalog
     public function getProjectById(int $id, int $userId): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
+            'SELECT id, owner_user_id, name, service_key, created_at FROM projects WHERE id = ? AND owner_user_id = ?'
         );
         $stmt->execute([$id, $userId]);
         $row = $stmt->fetch() ?: null;
@@ -73,11 +73,17 @@ class Catalog
     public function getProjectByIdInternal(int $id): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, owner_user_id, name, created_at FROM projects WHERE id = ?'
+            'SELECT id, owner_user_id, name, service_key, created_at FROM projects WHERE id = ?'
         );
         $stmt->execute([$id]);
         $row = $stmt->fetch() ?: null;
         return $row ? self::castRow($row, ['id', 'owner_user_id']) : null;
+    }
+
+    public function setServiceKey(int $projectId, string $key): void
+    {
+        $this->pdo->prepare('UPDATE projects SET service_key = ? WHERE id = ?')
+                  ->execute([$key, $projectId]);
     }
 
     public function deleteProject(int $id, int $userId): bool

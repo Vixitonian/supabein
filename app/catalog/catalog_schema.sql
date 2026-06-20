@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS `projects` (
     `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `owner_user_id` INT UNSIGNED NOT NULL,
     `name`          VARCHAR(128) NOT NULL,
+    `service_key`   TEXT DEFAULT NULL,
     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_owner_name` (`owner_user_id`, `name`)

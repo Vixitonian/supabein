@@ -1606,17 +1606,15 @@ async function renderProject({ id }) {
 
 
     const tabTables = el('div', { class: 'tab active' }, 'Tables');
-    const tabUsers  = el('div', { class: 'tab' }, 'Users');
     const tabApi    = el('div', { class: 'tab' }, 'API');
     const tabDeploy = el('div', { class: 'tab' }, 'Deploy');
 
     const paneTablesEl = el('div', { id: 'pane-proj-tables' });
-    const paneUsersEl  = el('div', { id: 'pane-proj-users',  class: 'hidden' });
     const paneApiEl    = el('div', { id: 'pane-proj-api',    class: 'hidden' });
     const paneDeployEl = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
 
-    const allTabs  = [tabTables, tabUsers, tabApi, tabDeploy];
-    const allPanes = [paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl];
+    const allTabs  = [tabTables, tabApi, tabDeploy];
+    const allPanes = [paneTablesEl, paneApiEl, paneDeployEl];
 
     function switchProjectTab(idx) {
       allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
@@ -1630,22 +1628,15 @@ async function renderProject({ id }) {
         loadTablesPane(id, paneTablesEl);
       }
     });
-    tabUsers.addEventListener('click', () => {
-      switchProjectTab(1);
-      if (!paneUsersEl.dataset.loaded) {
-        paneUsersEl.dataset.loaded = '1';
-        loadUsersPane(id, paneUsersEl);
-      }
-    });
     tabApi.addEventListener('click', () => {
-      switchProjectTab(2);
+      switchProjectTab(1);
       if (!paneApiEl.dataset.loaded) {
         paneApiEl.dataset.loaded = '1';
         loadApiPane(id, paneApiEl);
       }
     });
     tabDeploy.addEventListener('click', () => {
-      switchProjectTab(3);
+      switchProjectTab(2);
       if (!paneDeployEl.dataset.loaded) {
         paneDeployEl.dataset.loaded = '1';
         loadDeployPane(id, paneDeployEl);
@@ -1677,8 +1668,8 @@ async function renderProject({ id }) {
       ),
 
 
-      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabUsers, tabApi, tabDeploy),
-      paneTablesEl, paneUsersEl, paneApiEl, paneDeployEl,
+      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabApi, tabDeploy),
+      paneTablesEl, paneApiEl, paneDeployEl,
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
@@ -1792,6 +1783,103 @@ async function loadUsersPane(projectId, container) {
     );
   } catch (e) {
     container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function renderApi({ id }, container) {
+  const projectId = id;
+  const useContainer = container || document.getElementById('app');
+  if (!container) {
+    if (!requireAuth()) return;
+    renderLayout(projectId, '', [el('p', { class: 'text-muted' }, 'Loading…')]);
+  } else {
+    container.innerHTML = '<div class="text-muted">Loading…</div>';
+  }
+
+  try {
+    const project = await Api.get(`/v1/projects/${projectId}`);
+    const baseUrl  = window.location.origin;
+
+    let keyDisplay = project.service_key || '(none — create a new project to generate)';
+    const keyPre   = el('pre', { class: 'api-code-block', style: 'word-break:break-all;white-space:pre-wrap' }, keyDisplay);
+
+    function copyServiceKey(btn) {
+      navigator.clipboard.writeText(project.service_key || '').then(() => {
+        const orig = btn.textContent; btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      });
+    }
+
+    const copyBtn   = el('button', { class: 'btn btn-sm btn-secondary' }, 'Copy');
+    const rotateBtn = el('button', { class: 'btn btn-sm btn-danger' }, 'Rotate key');
+
+    copyBtn.onclick   = () => copyServiceKey(copyBtn);
+    rotateBtn.onclick = async () => {
+      if (!confirm('Rotate the service key? The old key will stop working immediately.')) return;
+      try {
+        rotateBtn.disabled = true; rotateBtn.textContent = 'Rotating…';
+        const res = await Api.post(`/v1/projects/${projectId}/rotate-service-key`, {});
+        project.service_key = res.service_key;
+        keyPre.textContent  = res.service_key;
+      } catch (e) { alert(e.message); }
+      finally { rotateBtn.disabled = false; rotateBtn.textContent = 'Rotate key'; }
+    };
+
+    const keyCard = el('div', { class: 'api-table-card' },
+      el('div', { class: 'api-table-title' }, 'Service Key'),
+      el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 12px' },
+        'Use the service key from a trusted server or backend script. It bypasses all row-level policies — never expose it in frontend code.'
+      ),
+      el('div', { style: 'position:relative;margin-bottom:10px' }, keyPre),
+      el('div', { style: 'display:flex;gap:8px' }, copyBtn, rotateBtn)
+    );
+
+    const curlBlock = (code) => {
+      const pre = el('pre', { class: 'api-code-block' }, code);
+      const btn = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
+      btn.onclick = () => { navigator.clipboard.writeText(code).then(() => { const o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = o, 1500); }); };
+      return el('div', { style: 'position:relative;margin-bottom:16px' }, pre, btn);
+    };
+
+    const docsCard = el('div', { class: 'api-table-card' },
+      el('div', { class: 'api-table-title' }, 'Data API'),
+      el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
+        `Base URL: `, el('code', {}, `${baseUrl}/api/v1/data/${projectId}`)
+      ),
+
+      el('div', { class: 'api-section-label' }, 'List rows'),
+      curlBlock(`curl ${baseUrl}/api/v1/data/${projectId}/{table}`),
+
+      el('div', { class: 'api-section-label' }, 'Insert a row'),
+      curlBlock(`curl -X POST ${baseUrl}/api/v1/data/${projectId}/{table} \\\n  -H "Content-Type: application/json" \\\n  -d '{"col": "value"}'`),
+
+      el('div', { class: 'api-section-label' }, 'Authenticated request (project_user JWT or service key)'),
+      curlBlock(`curl ${baseUrl}/api/v1/data/${projectId}/{table} \\\n  -H "Authorization: Bearer <token>"`),
+
+      el('div', { class: 'api-section-label' }, 'Login (tables with a PASSWORD column)'),
+      curlBlock(`curl -X POST ${baseUrl}/api/v1/data/${projectId}/{table}/login \\\n  -H "Content-Type: application/json" \\\n  -d '{"email": "user@example.com", "password": "secret"}'`),
+
+      el('div', { class: 'api-section-label' }, 'Service key request — bypasses all policies'),
+      curlBlock(`curl ${baseUrl}/api/v1/data/${projectId}/{table} \\\n  -H "Authorization: Bearer ${project.service_key || '<service_key>'}"`)
+    );
+
+    const nodes = [keyCard, docsCard];
+
+    if (!container) {
+      renderLayout(projectId, '', [
+        el('div', { class: 'page-header' },
+          el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${projectId}` }, '← Project'),
+          el('h1', { class: 'page-title' }, 'API')
+        ),
+        ...nodes
+      ]);
+    } else {
+      container.innerHTML = '';
+      nodes.forEach(n => container.appendChild(n));
+    }
+  } catch (e) {
+    (container || document.getElementById('app')).innerHTML =
+      `<div class="alert alert-danger">${e.message}</div>`;
   }
 }
 
