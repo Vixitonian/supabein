@@ -96,11 +96,10 @@ class OpenRouterClient
             throw new \RuntimeException('OpenRouter returned no content in response');
         }
 
-        // Strip markdown fences that some models add despite json_object mode
-        $text = preg_replace('/^```(?:json)?\s*/i', '', trim($text));
-        $text = preg_replace('/\s*```$/m', '', $text);
-
-        $plan = json_decode(trim($text), true);
+        $plan = json_decode($text, true);
+        if (!is_array($plan)) {
+            $plan = ai_lenient_json($text);
+        }
         if (!is_array($plan)) {
             throw new \RuntimeException('OpenRouter response was not valid JSON: ' . substr($text, 0, 200));
         }

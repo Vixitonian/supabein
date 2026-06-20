@@ -47,38 +47,43 @@ Rules:
 - Always include at least one table.
 PROMPT;
 
-// ── Pass 2: frontend given exact validated schema ────────────────────────────
-const AI_BUILD_FRONTEND_PROMPT = <<<'PROMPT'
-You are a frontend developer for SupaBein, a self-hosted BaaS platform.
-You will receive the app description and the exact validated database schema.
-Return ONLY a single valid JSON object — no markdown fences, no explanation.
-
-{"files": [{"path": string, "content": string}]}
-
+// ── Shared frontend rules (single source of truth for build AND edit) ────────
+const AI_FRONTEND_RULES = <<<'RULES'
 ═══════════════════════════════════════════════════════
 RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
 ═══════════════════════════════════════════════════════
 The schema lists every table's EXACT column names after validation and reserved-word renaming.
-You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
-template literals, form inputs, everything.
-Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
+Use these exact names everywhere in JS: fetch bodies, response field access, template literals,
+form inputs. Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title".
 
 ═══════════════════════════════════════════════════════
-RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
+RULE 2 — ONE DEFINITION PER NAME (app-killing bug if broken)
 ═══════════════════════════════════════════════════════
-Scripts load in order. A file cannot reference a variable from a file loaded after it.
+All <script> tags share ONE global scope. Declaring the same top-level `const`/`let` twice
+throws "Identifier 'X' has already been declared" — a fatal SyntaxError that BLANKS THE WHOLE PAGE.
 
-CORRECT load order in index.html:
-  <script src="core/config.js"></script>
-  <script src="core/api.js"></script>
-  <script src="core/router.js"></script>
-  <script src="features/auth/auth.js"></script>
-  <script src="features/<feature>/<feature>.js"></script>   ← all feature scripts
+Therefore:
+- Each module (api, router, auth, every feature) is defined EXACTLY ONCE, in its own file.
+- The inline <script> at the bottom of index.html is a BOOTSTRAP ONLY. It MUST NOT contain
+  `const`/`let`/`var` declarations of api, router, auth, or any feature module, and MUST NOT
+  re-implement them. If a name is defined in a loaded <script src> file, NEVER write `const NAME`
+  again anywhere — not inline, not in a second file.
+- Do NOT dump the whole app into index.html. The files are the app; index.html only wires them.
+
+The inline bootstrap contains ONLY:
   <script>
-    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
+    /* define updateNav() here ONCE (function declaration is fine) */
+    function updateNav() { /* toggle nav links based on auth.getCurrentUser() */ }
+
     router.defineRoute('/', featureA.renderView);
     router.defineRoute('/login', auth.renderAuthForms);
     /* ... all other routes ... */
+
+    document.getElementById('nav-toggle').addEventListener('click', () => {
+      document.getElementById('nav-menu').classList.toggle('hidden');
+    });
+    document.addEventListener('auth_status_change', updateNav);
+
     auth.ready.then(() => {
       updateNav();
       router.onHashChange();
@@ -87,327 +92,193 @@ CORRECT load order in index.html:
   </script>
 
 core/router.js must NEVER call defineRoute() itself — it only exports the router API.
-All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
 
 ═══════════════════════════════════════════════════════
 RULE 3 — AUTH INITIALISATION RACE
 ═══════════════════════════════════════════════════════
-features/auth/auth.js must expose a `ready` promise (the Promise returned by loadUser()).
-loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
-and every protected page shows "Access Denied" even for logged-in users.
+features/auth/auth.js must expose a `ready` promise resolved after loadUser() completes.
+loadUser() is async; if the router fires first, getCurrentUser() returns null and protected
+pages show "Access Denied" even for logged-in users.
 
-Required pattern in auth.js:
+Required pattern in auth.js (defined ONCE, in this file only):
   const auth = (() => {
     let currentUser = null;
     let _resolveReady;
     const ready = new Promise(res => { _resolveReady = res; });
-
     const loadUser = async () => {
       // ... fetch /auth/me, set currentUser ...
       _resolveReady(currentUser);
       document.dispatchEvent(new CustomEvent('auth_status_change'));
     };
-
-    loadUser(); // kick off — ready resolves when done
-
+    loadUser();
     return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
   })();
-
-The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
-This guarantees auth state is known before any page renders.
 
 ═══════════════════════════════════════════════════════
 RULE 4 — ROUTER NAVIGATION PATHS
 ═══════════════════════════════════════════════════════
-router.navigate(path) sets window.location.hash = path.
-Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
-  ✓ router.navigate('/')          sets hash to #/
-  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
-
-Always use: router.navigate('/'), router.navigate('/login'), etc.
-Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
+router.navigate(path) sets window.location.hash = path. Paths must NOT include a leading '#'
+(that produces '##/' and 404s).
+  ✓ router.navigate('/')      ✗ router.navigate('#/')
+Anchor hrefs still use href="#/" — only programmatic navigate() omits the #.
 
 ═══════════════════════════════════════════════════════
 RULE 5 — NULL SAFETY ON NULLABLE FIELDS
 ═══════════════════════════════════════════════════════
 The schema marks some columns nullable. Never call string/array methods on a field without guarding:
-  ✗ item.description.substring(0, 100)   — crashes if description is null
+  ✗ item.description.substring(0, 100)         — crashes if null
   ✓ (item.description ?? '').substring(0, 100)
-  ✓ item.description?.substring(0, 100) ?? ''
-
-Apply this to every nullable column accessed in templates or JS logic.
+Also guard interpolation: use ${item.description ?? ''} so a null never renders the word "null".
 
 ═══════════════════════════════════════════════════════
-RULE 6 — LOADING STATES
+RULE 6 — DATA ACCESS: USE THE api CLIENT ONLY
 ═══════════════════════════════════════════════════════
-Every async render function must show a loading indicator before the fetch,
-then replace it with real content (or an error) when the fetch completes:
-  const renderSection = async () => {
-    const el = document.getElementById('section-id');
-    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
-    try {
-      const data = await api.get('table');
-      el.innerHTML = /* real content */;
-    } catch (e) {
-      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
-    }
-  };
+NEVER call fetch() for data yourself and NEVER build data URLs by hand in feature code.
+Use the api client exclusively. core/api.js MUST be EXACTLY this file (copy verbatim,
+do not change the signatures — this is what keeps every build consistent):
+
+  const api = (() => {
+    const authHeader = () => {
+      const t = localStorage.getItem('sb:token');
+      return { 'Authorization': 'Bearer ' + (t || SB_KEY) };
+    };
+    const base = (table) => `${SB_URL}/data/${SB_PID}/${table}`;
+    // Tolerate either a bare array OR a wrapped envelope from the data API.
+    const unwrap = (j) => Array.isArray(j) ? j : (j && (j.data ?? j.rows ?? j.records)) ?? j;
+    const req = async (url, opts = {}) => {
+      const res = await fetch(url, {
+        ...opts,
+        headers: { 'Content-Type': 'application/json', ...authHeader(), ...(opts.headers || {}) }
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.status === 204 ? null : res.json();
+    };
+    const list   = async (table)         => unwrap(await req(base(table)));
+    const get    = async (table, id)     => req(`${base(table)}/${id}`);
+    const create = async (table, data)   => req(base(table), { method: 'POST',   body: JSON.stringify(data) });
+    const update = async (table, id, d)  => req(`${base(table)}/${id}`, { method: 'PUT', body: JSON.stringify(d) });
+    const remove = async (table, id)     => req(`${base(table)}/${id}`, { method: 'DELETE' });
+    return { list, get, create, update, remove };
+  })();
+
+Feature code uses ONLY: api.list('table'), api.get('table', id), api.create('table', {...}),
+api.update('table', id, {...}), api.remove('table', id). api.list() always returns an array.
 
 ═══════════════════════════════════════════════════════
-RULE 7 — RESPONSIVE NAVIGATION
+RULE 7 — LOADING STATES + RESPONSIVE NAV
 ═══════════════════════════════════════════════════════
-Always include a hamburger button for mobile. Pattern:
+Every async render shows a loading indicator before the fetch, then real content or an error:
+  el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
+  try { const rows = await api.list('table'); el.innerHTML = /* content */; }
+  catch (e) { el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`; }
+
+Always include a mobile hamburger:
   <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
-  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
-    ...links...
-  </nav>
-Wire it in the inline bootstrap:
-  document.getElementById('nav-toggle').addEventListener('click', () => {
-    document.getElementById('nav-menu').classList.toggle('hidden');
-  });
+  <nav id="nav-menu" class="hidden md:flex items-center gap-4">...links...</nav>
 
 ═══════════════════════════════════════════════════════
-STRUCTURE
+STRUCTURE (define each name once, in its own file)
 ═══════════════════════════════════════════════════════
-Feature-Based Structure:
-    index.html                         ← SPA entry point
-    core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
-    core/api.js                        ← SupaBein fetch client
+    index.html                         ← SPA entry + bootstrap ONLY (no module re-declarations)
+    core/config.js                     ← SB_URL / SB_KEY / SB_PID globals (declared once, here)
+    core/api.js                        ← the exact api client from RULE 6
     core/router.js                     ← router API only (no defineRoute calls)
     features/auth/auth.js              ← login, signup, logout, ready promise
-    features/<feature>/<feature>.js    ← one subfolder per app feature
-Every feature folder contains everything that feature needs. Do NOT cram everything into one file.
+    features/<feature>/<feature>.js    ← one subfolder per feature
+Load with RELATIVE paths in dependency order (config → api → router → auth → features → bootstrap).
+Absolute paths like /core/config.js break the site. No frameworks, no npm, no build tools.
 
 ═══════════════════════════════════════════════════════
 STYLING
 ═══════════════════════════════════════════════════════
-- Tailwind CSS via CDN. Add to <head> in index.html:
+- Tailwind via CDN in <head>:
     <script src="https://cdn.tailwindcss.com"></script>
     <script>tailwind.config = { darkMode: 'class' }</script>
-- Add class="dark" to <html>. Do NOT write a separate CSS file.
+  Add class="dark" to <html>. No separate CSS file.
 - Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
-  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger)
+  text-gray-100 (primary), text-gray-400 (muted), text-red-400 (danger).
 - Buttons: rounded-lg px-4 py-2 font-medium transition.
   Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
-  Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
 - Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
-  focus:outline-none focus:ring-2 focus:ring-emerald-500
+  focus:outline-none focus:ring-2 focus:ring-emerald-500.
 
 ═══════════════════════════════════════════════════════
-JAVASCRIPT
+PLACEHOLDERS + OWNERSHIP
 ═══════════════════════════════════════════════════════
 - Placeholders ONLY in core/config.js (substituted at deploy time):
     const SB_URL = '__SB_URL__';
     const SB_KEY = '__SB_ANON_KEY__';
     const SB_PID = '__SB_PID__';
-  Do NOT redeclare them anywhere else — they are globals.
-- API URL patterns (exact — do NOT invent other formats):
-    Data list/create:        ${SB_URL}/data/${SB_PID}/${tableName}
-    Data get/update/delete:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
-    Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
-    Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
-    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
-    Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
-    If not logged in, send the anon key instead.
-- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
-- Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
-- The app must be fully functional — real fetch calls, real CRUD, real auth flows.
-- When a table has user_id with ownership constraint, decode JWT in INSERT:
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    body.user_id = parseInt(payload.sub, 10);
+  Declared once. Never redeclare anywhere.
+- Auth endpoints:
+    signup: ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
+    login:  ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
+    me:     ${SB_URL}/projects/${SB_PID}/auth/me       → GET  Authorization: Bearer {token}
+  Store JWT as "sb:token" in localStorage.
+- When a table has user_id with an ownership constraint, set it on INSERT:
+    const payload = JSON.parse(atob(localStorage.getItem('sb:token').split('.')[1]));
+    data.user_id = parseInt(payload.sub, 10);
+
+The app must be fully functional — real api calls, real CRUD, real auth flows.
+RULES;
+
+// ── Pass 2: frontend given exact validated schema ────────────────────────────
+const AI_BUILD_FRONTEND_HEADER = <<<'PROMPT'
+You are a frontend developer for SupaBein, a self-hosted BaaS platform.
+You will receive the app description and the exact validated database schema.
+Return ONLY a single valid JSON object — no markdown fences, no explanation.
+
+{"files": [{"path": string, "content": string}]}
 PROMPT;
 
-const AI_EDIT_SYSTEM_PROMPT = <<<'PROMPT'
+const AI_BUILD_FRONTEND_PROMPT = AI_BUILD_FRONTEND_HEADER . "\n\n" . AI_FRONTEND_RULES;
+
+// ── Edit: full-stack delta ───────────────────────────────────────────────────
+const AI_EDIT_SYSTEM_HEADER = <<<'PROMPT'
 You are a full-stack developer for SupaBein, a self-hosted BaaS platform.
-The user wants to MODIFY an existing project. You will be given the current schema, current frontend files (or a file listing), and a change request.
+The user wants to MODIFY an existing project. You will be given the current schema,
+current frontend files (or a file listing), and a change request.
 Return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text.
 
 {
   "add_tables": [
     {
       "name": string,
-      "columns": [
-        {"name": string, "type": string, "nullable": boolean}
-      ],
-      "policies": [
-        {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
-      ]
+      "columns": [ {"name": string, "type": string, "nullable": boolean} ],
+      "policies": [ {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean} ]
     }
   ],
   "add_columns": [
-    {
-      "table": string,
-      "columns": [
-        {"name": string, "type": string, "nullable": boolean}
-      ]
-    }
+    { "table": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ] }
   ],
   "update_policies": [
     {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
   ],
-  "frontend": {
-    "files": [ {"path": string, "content": string} ]
-  }
+  "frontend": { "files": [ {"path": string, "content": string} ] }
 }
 
 The "frontend" key is OPTIONAL.
-- OMIT "frontend" entirely when the prompt is a pure schema change (add column, change policy, etc.).
-- INCLUDE "frontend" when the prompt involves any UI, visual, navigation, or frontend issue
-  ("fix", "broken", "not working", "blank page", "nav", "login page", "looks wrong", etc.).
-- When included, output ALL frontend files completely — every file the site needs, not just changed ones.
+- OMIT "frontend" for a pure schema change (add column, change policy).
+- INCLUDE "frontend" for any UI / visual / navigation / "broken" / "blank page" request.
+- When included, output EVERY file the site needs to run standalone — index.html, core/*, and
+  all feature files — even unchanged ones. Returned files are MERGED over the existing deploy,
+  but any file you DO return fully replaces its old version, so a half-written file breaks the site.
 - Use the exact column names from the "Exact schema" context — do NOT invent or rename them.
 
 Schema rules:
-- Do NOT include tables or columns that already exist in the current schema.
-- Do NOT drop or rename anything — only additions and policy changes.
-- column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
-- table.name and column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid SQL reserved words; do NOT use "id" or "created_at"
+- Do NOT include tables/columns that already exist. Do NOT drop or rename — additions and policy
+  changes only.
+- column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128),
+  VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1),
+  DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
+- table.name / column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid reserved
+  words; do NOT use "id" or "created_at".
 - If no changes of a given type are needed, return an empty array [] for that key.
 
-═══════════════════════════════════════════════════════
-FRONTEND RULES (apply when including frontend.files)
-═══════════════════════════════════════════════════════
-
-RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
-The schema lists every table's EXACT column names after validation and reserved-word renaming.
-You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
-template literals, form inputs, everything.
-Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
-
-RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
-Scripts load in order. A file cannot reference a variable from a file loaded after it.
-
-CORRECT load order in index.html:
-  <script src="core/config.js"></script>
-  <script src="core/api.js"></script>
-  <script src="core/router.js"></script>
-  <script src="features/auth/auth.js"></script>
-  <script src="features/<feature>/<feature>.js"></script>
-  <script>
-    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
-    router.defineRoute('/', featureA.renderView);
-    router.defineRoute('/login', auth.renderAuthForms);
-    auth.ready.then(() => {
-      updateNav();
-      router.onHashChange();
-      window.addEventListener('hashchange', router.onHashChange);
-    });
-  </script>
-
-core/router.js must NEVER call defineRoute() itself — it only exports the router API.
-All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
-
-RULE 3 — AUTH INITIALISATION RACE
-features/auth/auth.js must expose a `ready` promise resolved after loadUser() completes.
-loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
-and every protected page shows "Access Denied" even for logged-in users.
-
-Required pattern in auth.js:
-  const auth = (() => {
-    let currentUser = null;
-    let _resolveReady;
-    const ready = new Promise(res => { _resolveReady = res; });
-
-    const loadUser = async () => {
-      // ... fetch /auth/me, set currentUser ...
-      _resolveReady(currentUser);
-      document.dispatchEvent(new CustomEvent('auth_status_change'));
-    };
-
-    loadUser(); // kick off — ready resolves when done
-
-    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
-  })();
-
-The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
-This guarantees auth state is known before any page renders.
-
-RULE 4 — ROUTER NAVIGATION PATHS
-router.navigate(path) sets window.location.hash = path.
-Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
-  ✓ router.navigate('/')          sets hash to #/
-  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
-
-Always use: router.navigate('/'), router.navigate('/login'), etc.
-Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
-
-RULE 5 — NULL SAFETY ON NULLABLE FIELDS
-The schema marks some columns nullable. Never call string/array methods on a field without guarding:
-  ✗ item.description.substring(0, 100)   — crashes if description is null
-  ✓ (item.description ?? '').substring(0, 100)
-  ✓ item.description?.substring(0, 100) ?? ''
-
-Apply this to every nullable column accessed in templates or JS logic.
-
-RULE 6 — LOADING STATES
-Every async render function must show a loading indicator before the fetch,
-then replace it with real content (or an error) when the fetch completes:
-  const renderSection = async () => {
-    const el = document.getElementById('section-id');
-    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
-    try {
-      const data = await api.get('table');
-      el.innerHTML = /* real content */;
-    } catch (e) {
-      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
-    }
-  };
-
-RULE 7 — RESPONSIVE NAVIGATION
-Always include a hamburger button for mobile. Pattern:
-  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
-  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
-    ...links...
-  </nav>
-Wire it in the inline bootstrap:
-  document.getElementById('nav-toggle').addEventListener('click', () => {
-    document.getElementById('nav-menu').classList.toggle('hidden');
-  });
-
-STRUCTURE
-Feature-Based Structure:
-    index.html                         ← SPA entry point
-    core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
-    core/api.js                        ← SupaBein fetch client
-    core/router.js                     ← router API only (no defineRoute calls)
-    features/auth/auth.js              ← login, signup, logout, ready promise
-    features/<feature>/<feature>.js    ← one subfolder per app feature
-Every feature folder contains everything that feature needs.
-
-STYLING
-- Tailwind CSS via CDN. Add to <head> in index.html:
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>tailwind.config = { darkMode: 'class' }</script>
-- Add class="dark" to <html>. Do NOT write a separate CSS file.
-- Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
-  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger)
-- Buttons: rounded-lg px-4 py-2 font-medium transition.
-  Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
-  Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
-- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
-  focus:outline-none focus:ring-2 focus:ring-emerald-500
-
-JAVASCRIPT
-- Placeholders ONLY in core/config.js (substituted at deploy time):
-    const SB_URL = '__SB_URL__';
-    const SB_KEY = '__SB_ANON_KEY__';
-    const SB_PID = '__SB_PID__';
-  Do NOT redeclare them anywhere else — they are globals.
-- API URL patterns (exact — do NOT invent other formats):
-    Data list/create:        ${SB_URL}/data/${SB_PID}/${tableName}
-    Data get/update/delete:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
-    Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
-    Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
-    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
-    Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
-    If not logged in, send the anon key instead.
-- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
-- Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
-- The app must be fully functional — real fetch calls, real CRUD, real auth flows.
-- When a table has user_id with ownership constraint, decode JWT in INSERT:
-    const payload = JSON.parse(atob(token.split('.')[1]));
-    body.user_id = parseInt(payload.sub, 10);
+The FRONTEND RULES below apply whenever you include frontend.files:
 PROMPT;
+
+const AI_EDIT_SYSTEM_PROMPT = AI_EDIT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
 
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
 
@@ -416,7 +287,8 @@ function ai_deploy_files(
     \SupaBein\Catalog $catalog,
     int $siteId,
     array $project,
-    array $frontendFiles
+    array $frontendFiles,
+    bool $mergeFromCurrent = false
 ): array {
     $sitesPath = rtrim($config['SITES_PATH'], '/');
     $label     = 'ai-generated-' . date('Y-m-d');
@@ -433,7 +305,18 @@ function ai_deploy_files(
         return ['error' => 'Cannot create deploy directory', 'deploy' => null];
     }
 
-    // Substitution map — replace placeholders with real credentials
+    // Seed from the live deploy so an edit that returns only some files
+    // doesn't blank the rest of the site.
+    if ($mergeFromCurrent) {
+        $currentDir = $sitesPath . '/s' . $siteId . '/current';
+        if (is_dir($currentDir)) {
+            \SupaBein\Deploy::rcopy($currentDir, $deployDir);
+            @unlink($deployDir . '/.htaccess');   // regenerated below
+        }
+    }
+
+    // Substitution map — replace placeholders with real credentials.
+    // Already-substituted files copied from current/ contain no placeholders.
     $apiBase = rtrim($config['API_BASE_URL'], '/') . '/v1';
     $replacements = [
         '__SB_URL__'      => $apiBase,
@@ -444,7 +327,6 @@ function ai_deploy_files(
     $errors = [];
     foreach ($frontendFiles as $fileDef) {
         $relPath = ltrim((string)($fileDef['path'] ?? ''), '/');
-        $relPath = str_replace('..', '', $relPath);
         if ($relPath === '') continue;
 
         $fullPath = \SupaBein\Deploy::normalizePath($deployDir . '/' . $relPath);
@@ -475,11 +357,19 @@ function ai_deploy_files(
         return ['error' => implode('; ', $errors), 'deploy' => null];
     }
 
-    // Overwrite with hardening .htaccess (cannot be skipped)
+    // Hardening .htaccess (force-written, cannot be skipped).
     $htaccess = \SupaBein\Deploy::buildHardeningHtaccess(true);
     file_put_contents($deployDir . '/.htaccess', $htaccess);
 
-    // Calculate total size
+    // Smoke check the assembled (merged) site before publishing.
+    $smoke = ai_smoke_check_dir($deployDir);
+    if ($smoke !== null) {
+        \SupaBein\Deploy::rrmdir($deployDir);
+        $catalog->updateDeploy($deployId, 'failed');
+        return ['error' => 'Smoke check failed: ' . $smoke, 'deploy' => null];
+    }
+
+    // Calculate total size.
     $totalSize = 0;
     $iterator  = new \RecursiveIteratorIterator(
         new \RecursiveDirectoryIterator($deployDir, \RecursiveDirectoryIterator::SKIP_DOTS)
@@ -490,7 +380,7 @@ function ai_deploy_files(
     \App::get('db')->prepare('UPDATE deploys SET size_bytes = ? WHERE id = ?')
                    ->execute([$totalSize, $deployId]);
 
-    // Copy to staging/
+    // Copy to staging/.
     $stagingDir = $sitesPath . '/s' . $siteId . '/staging';
     if (is_dir($stagingDir))   \SupaBein\Deploy::rrmdir($stagingDir);
     if (is_link($stagingDir))  unlink($stagingDir);
@@ -504,7 +394,7 @@ function ai_deploy_files(
     $catalog->updateDeploy($deployId, 'ready', $deployDir);
     $catalog->updateSiteStagingDeploy($siteId, $deployId);
 
-    // Auto-publish to current/ for AI builds so the site is live immediately
+    // Auto-publish to current/ so the site is live immediately.
     $currentDir = $sitesPath . '/s' . $siteId . '/current';
     if (is_dir($currentDir))  \SupaBein\Deploy::rrmdir($currentDir);
     if (is_link($currentDir)) unlink($currentDir);
@@ -514,8 +404,6 @@ function ai_deploy_files(
 
     return ['error' => null, 'deploy' => $catalog->getDeployById($deployId)];
 }
-
-// ─── Validation helpers ──────────────────────────────────────────────────────
 
 function ai_sanitize_plan(array $plan): array
 {
@@ -606,7 +494,7 @@ function ai_sanitize_plan(array $plan): array
     }
 
     // ── 2. Tables ─────────────────────────────────────────────────────────────
-    foreach ($plan['tables'] as &$table) {
+    foreach (($plan['tables'] ?? []) as &$table) {
 
         // Rename reserved table names
         if (in_array(strtolower($table['name'] ?? ''), $SQL_RESERVED, true)) {
@@ -763,6 +651,132 @@ function ai_schema_from_db(int $projectId, \SupaBein\Catalog $catalog): array
         ];
     }
     return ['tables' => $tables];
+}
+
+
+// ─── AI output helpers ───────────────────────────────────────────────────────
+
+/**
+ * Lenient JSON extraction for models that wrap output in ```json fences or add prose.
+ * Strips fences and pulls the first balanced {...} object.
+ */
+function ai_lenient_json(string $raw): ?array
+{
+    $s = trim($raw);
+
+    if (str_starts_with($s, '```')) {
+        $s = preg_replace('#^```[a-zA-Z]*\s*#', '', $s);
+        $s = preg_replace('#\s*```\s*$#', '', $s);
+    }
+
+    $start = strpos($s, '{');
+    if ($start === false) return null;
+
+    $depth = 0; $inStr = false; $esc = false; $end = null;
+    for ($i = $start, $n = strlen($s); $i < $n; $i++) {
+        $c = $s[$i];
+        if ($inStr) {
+            if ($esc)            { $esc = false; }
+            elseif ($c === '\\') { $esc = true; }
+            elseif ($c === '"')  { $inStr = false; }
+            continue;
+        }
+        if ($c === '"')      { $inStr = true; }
+        elseif ($c === '{')  { $depth++; }
+        elseif ($c === '}')  { $depth--; if ($depth === 0) { $end = $i; break; } }
+    }
+    if ($end === null) return null;
+
+    $data = json_decode(substr($s, $start, $end - $start + 1), true);
+    return is_array($data) ? $data : null;
+}
+
+/**
+ * Collect top-level (global-scope) const/let/var names from a JS string.
+ * Strips strings, templates, and comments so their braces don't skew depth.
+ */
+function ai_collect_top_level_decls(string $js): array
+{
+    $clean = preg_replace('#/\*.*?\*/#s', '', $js);
+    $clean = preg_replace('#//[^\n]*#', '', (string)$clean);
+    $clean = preg_replace('#"(?:\\\\.|[^"\\\\])*"#s', '""', (string)$clean);
+    $clean = preg_replace("#'(?:\\\\.|[^'\\\\])*'#s", "''", (string)$clean);
+    $clean = preg_replace('#`(?:\\\\.|[^`\\\\])*`#s', '``', (string)$clean);
+
+    $names = [];
+    $depth = 0;
+    $len   = strlen((string)$clean);
+    for ($i = 0; $i < $len; $i++) {
+        $ch = $clean[$i];
+        if ($ch === '{' || $ch === '(' || $ch === '[') { $depth++; continue; }
+        if ($ch === '}' || $ch === ')' || $ch === ']') { $depth = max(0, $depth - 1); continue; }
+        if ($depth === 0 && ($ch === 'c' || $ch === 'l' || $ch === 'v')) {
+            if (preg_match('/(const|let|var)\s+([A-Za-z_$][\w$]*)/A', $clean, $m, 0, $i)) {
+                $names[] = $m[2];
+                $i += strlen($m[0]) - 1;
+            }
+        }
+    }
+    return $names;
+}
+
+/**
+ * Static pre-publish smoke check on the assembled deploy directory.
+ * Returns an error string (deploy should be rejected) or null if it passes.
+ */
+function ai_smoke_check_dir(string $dir): ?string
+{
+    $indexPath = $dir . '/index.html';
+    if (!is_file($indexPath)) return 'index.html is missing';
+    $html = (string)file_get_contents($indexPath);
+
+    // 1. No absolute script paths (break on subdomain hosting).
+    if (preg_match('#<script[^>]+src\s*=\s*["\']/[^"\']#i', $html)) {
+        return 'index.html loads a script with an absolute path (src="/..."); use relative paths';
+    }
+
+    // 2. Every referenced local script must exist in the assembled deploy.
+    if (preg_match_all('#<script[^>]+src\s*=\s*["\']([^"\']+)["\']#i', $html, $m)) {
+        foreach ($m[1] as $src) {
+            if (preg_match('#^https?://#i', $src)) continue;
+            $rel = ltrim(preg_replace('#^\./+#', '', $src), '/');
+            if (!is_file($dir . '/' . $rel)) {
+                return "index.html references a missing script: {$src}";
+            }
+        }
+    }
+
+    // 3. Duplicate top-level const/let across all classic scripts → fatal SyntaxError.
+    $counts = [];
+    $record = function (string $js) use (&$counts) {
+        foreach (ai_collect_top_level_decls($js) as $name) {
+            $counts[$name] = ($counts[$name] ?? 0) + 1;
+        }
+    };
+
+    $it = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($dir, \RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+    foreach ($it as $f) {
+        if ($f->isFile() && strtolower($f->getExtension()) === 'js') {
+            $record((string)file_get_contents($f->getPathname()));
+        }
+    }
+    // inline <script> blocks in index.html (those WITHOUT a src attribute)
+    if (preg_match_all('#<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>#is', $html, $sm)) {
+        foreach ($sm[1] as $block) {
+            $record($block);
+        }
+    }
+
+    $dupes = array_keys(array_filter($counts, fn($c) => $c > 1));
+    if ($dupes) {
+        return 'duplicate top-level declaration(s) — fatal "already declared" SyntaxError: '
+             . implode(', ', $dupes)
+             . '. Each module/global must be declared exactly once.';
+    }
+
+    return null;
 }
 
 // ─── Execution helpers ───────────────────────────────────────────────────────
@@ -1475,7 +1489,8 @@ PROMPT;
                 $editSites  = $catalog->listSites($projectId);
                 if ($editSites) {
                     $deployResult = ai_deploy_files($editConfig, $catalog, (int)$editSites[0]['id'],
-                                                    $project, $plan['frontend']['files']);
+                                                    $project, $plan['frontend']['files'],
+                                                    true);
                     if (!empty($deployResult['deploy'])) {
                         $result['deploy'] = $deployResult['deploy'];
                     }
