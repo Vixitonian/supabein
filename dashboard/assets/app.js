@@ -1387,8 +1387,7 @@ const AiPanel = (() => {
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
-      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
     }
 
     renderMessages();
