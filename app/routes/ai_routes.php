@@ -802,9 +802,12 @@ function ai_execute_build(array $plan, int $userId): array
     $partial     = ['project' => null, 'tables' => [], 'site' => null];
 
     try {
-        $project = $catalog->createProject($userId, $projectName);
-        $partial['project'] = $project;
+        $project   = $catalog->createProject($userId, $projectName, '');
         $projectId = (int)$project['id'];
+        $serviceKey = make_service_key($projectId);
+        $catalog->setServiceKey($projectId, $serviceKey);
+        $project['service_key'] = $serviceKey;
+        $partial['project'] = $project;
     } catch (\PDOException $e) {
         if (str_contains($e->getMessage(), 'Duplicate')) {
             abort(409, "A project named \"$projectName\" already exists");
