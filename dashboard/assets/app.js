@@ -157,9 +157,10 @@ function makeCollapsible(card, open = false) {
   });
 }
 
-function generateClaudeMd(baseUrl, projectId, pat) {
-  const pid  = projectId || 'YOUR_PROJECT_ID';
-  const token = pat      || 'sb_pat_xxxx          # create one above in Personal Access Tokens';
+function generateClaudeMd(baseUrl, projectId, serviceKey, pat) {
+  const pid  = projectId  || 'YOUR_PROJECT_ID';
+  const skey = serviceKey || 'YOUR_SERVICE_KEY';
+  const token = pat       || 'sb_pat_xxxx          # create one above in Personal Access Tokens';
   const siteUrl = baseUrl;
 
   return `# CLAUDE.md — SupaBein Project
@@ -175,10 +176,12 @@ Read this file before writing any backend code — all data and hosting goes thr
 SUPABEIN_URL=${siteUrl}
 SUPABEIN_TOKEN=${token}
 SUPABEIN_PROJECT_ID=${pid}
+SUPABEIN_SERVICE_KEY=${skey}
 SUPABEIN_SITE_ID=YOUR_SITE_ID       # Fill in after creating a site (from Deploy tab)
 \`\`\`
 
-> The PAT authenticates as the project owner and can create tables, set policies, and deploy.
+> The PAT authenticates as the project owner — use it for control-plane operations (tables, policies, deploys).
+> The service_key bypasses all row-level policies — use it only in trusted server-side code, never in frontend bundles.
 
 ---
 
@@ -192,7 +195,10 @@ PROJECT=$(curl -s -X POST "${siteUrl}/api/v1/projects" \\
   -d '{"name":"my-app"}')
 
 PROJECT_ID=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-echo "Project ID: $PROJECT_ID"
+SERVICE_KEY=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['service_key'])")
+
+echo "Project ID:  $PROJECT_ID"
+echo "Service key: $SERVICE_KEY"
 \`\`\`
 
 ### 2. Create a site (for frontend hosting)
@@ -227,6 +233,9 @@ curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables" \\
 
 ### Allowed column types
 \`INT\` \`BIGINT\` \`VARCHAR(255)\` \`TEXT\` \`BOOLEAN\` \`DATETIME\` \`DECIMAL(10,2)\` \`FLOAT\` \`PASSWORD\`
+
+
+> \`PASSWORD\` columns are stored as bcrypt hashes. Reads always return \`null\`. Write a plaintext value and it is hashed automatically. Use the data login endpoint to verify credentials.
 
 ### List / delete tables
 \`\`\`bash
@@ -270,7 +279,7 @@ Operations: \`SELECT\` \`INSERT\` \`UPDATE\` \`DELETE\`
 
 ## Data API
 
-Use the **anon key** for frontend calls. Use the **PAT or service key** for trusted server calls.
+Requests with **no Authorization header** are treated as the \`anon\` role and are subject to table policies. Use the **service_key** for trusted server-side calls that need to bypass policies.
 
 > **ID types**: \`id\` fields in responses are numbers (integers), not strings.
 > Use \`===\` comparisons safely.
@@ -288,19 +297,25 @@ Use the **anon key** for frontend calls. Use the **PAT or service key** for trus
 Filter examples: \`?age=gte.18\` \`?name=like.Alice%25\` \`?status=neq.archived\`
 
 \`\`\`bash
-# List rows (public table — no auth needed)
+# List rows — no auth = anon role (subject to policies)
 curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=20&offset=0&status=active"
 
-# Insert (authenticated table — pass user JWT from /login)
+# Insert as authenticated user (JWT from /login)
 curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
   -H "Authorization: Bearer $USER_JWT" \\
   -H "Content-Type: application/json" \\
   -d '{"title":"Hello","body":"World","user_id":1}'
 
-# Get / Update / Delete
+# Server-side insert bypassing policies (service key)
+curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
+  -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"title":"Hello","body":"World","user_id":1}'
+
+# Get (anon) / Update (user JWT) / Delete (service key)
 curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1"
 curl -s -X PATCH "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $USER_JWT" -H "Content-Type: application/json" -d '{"title":"Updated"}'
-curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $USER_JWT"
+curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY"
 \`\`\`
 
 ---
@@ -311,13 +326,13 @@ When any project table has a column of type \`PASSWORD\`, passwords are auto-has
 and never returned on read. Use the data API login endpoint for authentication.
 
 \`\`\`bash
-# Sign up — password is auto-hashed server-side
-curl -s -X POST "${siteUrl}/api/v1/data/${pid}/users" \\
+# Insert a user (password is auto-hashed; use service key to bypass policies)
+curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/users" \\
+  -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{"email":"user@example.com","password":"secret123"}'
-# → returns the new user row (password field is null)
 
-# Log in  → returns { token: "eyJ...", user: {...} }
+# Log in → returns { token: "eyJ...", row: { id, email, ... } }
 curl -s -X POST "${siteUrl}/api/v1/data/${pid}/users/login" \\
   -H "Content-Type: application/json" \\
   -d '{"email":"user@example.com","password":"secret123"}'
@@ -408,7 +423,7 @@ curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_S
 
 ---
 
-## Data API in frontend JS
+## Querying the Data API from Frontend JS
 
 \`\`\`js
 const SB_URL = '${siteUrl}/api/v1';
@@ -419,25 +434,36 @@ const authHeaders = () => {
   return t ? { Authorization: \`Bearer \${t}\` } : {};
 };
 
+// Anonymous request (no auth — subject to anon policies)
 async function sbQuery(table, params = {}) {
   const qs  = new URLSearchParams(params).toString();
+  const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+// Authenticated request — pass a project_user JWT obtained from the login endpoint
+async function sbQueryAuth(table, token, params = {}) {
+  const qs  = new URLSearchParams(params).toString();
   const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`, {
-    headers: authHeaders()
+    headers: { Authorization: \`Bearer \${token}\` }
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-async function sbInsert(table, data) {
+async function sbInsert(table, data, token = null) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = \`Bearer \${token}\`;
   const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}\`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(data)
+    method: 'POST', headers, body: JSON.stringify(data)
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 \`\`\`
+
+> Never put the \`service_key\` in frontend code — it bypasses all policies. Use anon requests (no header) for public data, and project_user JWTs (from the login endpoint) for per-user authenticated access.
 
 ---
 
@@ -449,10 +475,11 @@ async function sbInsert(table, data) {
 - Always set policies on new tables — the default is deny all.
 - Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
 - **Always deploy to staging first. Never publish to live unless the user explicitly instructs it** (e.g. "go live", "publish", "push to production"). Staging is safe to overwrite at any time.
-- Never expose your PAT in client-side code — it gives owner access to all your projects.
-- Project user JWTs (from /data/{pid}/{table}/login) are scoped to that project.
+- Never expose your PAT or service_key in client-side code — the PAT gives owner access to all projects; the service_key bypasses all policies.
+- Anon requests (no Authorization header) are subject to table policies. Use a project-user JWT (from /login) for authenticated user access.
 - Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
-- Use \`/v1/auth/*\` only for SupaBein platform management (dashboard login, CI), never for app end-users.
+- For app-user authentication, use \`POST /v1/data/:pid/:table/login\` with a table that has a \`PASSWORD\` column. Project-user JWTs are scoped to their project.
+- Use \`/v1/auth/*\` only for SupaBein platform management (operators/CI), never for app end-users.
 `;
 }
 
@@ -2900,23 +2927,24 @@ async function renderAccount() {
     style: 'max-width:480px;font-family:monospace;font-size:0.82rem',
   });
 
-  let currentProjId = null;
+  let currentProjId = null, currentServiceKey = null;
 
   function refreshPreview() {
     const pat = patInput.value.trim() || null;
-    previewEl.value = generateClaudeMd(baseUrl, currentProjId, pat);
+    previewEl.value = generateClaudeMd(baseUrl, currentProjId, currentServiceKey, pat);
   }
 
   projSelect.addEventListener('change', async () => {
     const pid = projSelect.value;
     if (!pid) {
-      currentProjId = null;
+      currentProjId = null; currentServiceKey = null;
       refreshPreview();
       return;
     }
     try {
       const proj = await Api.get(`/v1/projects/${pid}`);
       currentProjId  = proj.id;
+      currentServiceKey = proj.service_key;
       refreshPreview();
     } catch (e) { alert(e.message); }
   });
