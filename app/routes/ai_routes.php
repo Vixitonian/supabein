@@ -218,11 +218,10 @@ JAVASCRIPT
 PROMPT;
 
 const AI_EDIT_SYSTEM_PROMPT = <<<'PROMPT'
-You are a backend architect for SupaBein, a self-hosted BaaS platform.
-The user wants to MODIFY an existing project. You will be given the current schema and a change request.
+You are a full-stack developer for SupaBein, a self-hosted BaaS platform.
+The user wants to MODIFY an existing project. You will be given the current schema, current frontend files (or a file listing), and a change request.
 Return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text.
 
-Schema:
 {
   "add_tables": [
     {
@@ -245,15 +244,169 @@ Schema:
   ],
   "update_policies": [
     {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
-  ]
+  ],
+  "frontend": {
+    "files": [ {"path": string, "content": string} ]
+  }
 }
 
-Rules:
+The "frontend" key is OPTIONAL.
+- OMIT "frontend" entirely when the prompt is a pure schema change (add column, change policy, etc.).
+- INCLUDE "frontend" when the prompt involves any UI, visual, navigation, or frontend issue
+  ("fix", "broken", "not working", "blank page", "nav", "login page", "looks wrong", etc.).
+- When included, output ALL frontend files completely — every file the site needs, not just changed ones.
+- Use the exact column names from the "Exact schema" context — do NOT invent or rename them.
+
+Schema rules:
 - Do NOT include tables or columns that already exist in the current schema.
 - Do NOT drop or rename anything — only additions and policy changes.
 - column.type MUST be exactly one of: INT, BIGINT, SMALLINT, TINYINT, VARCHAR(255), VARCHAR(128), VARCHAR(64), VARCHAR(36), VARCHAR(32), TEXT, MEDIUMTEXT, LONGTEXT, BOOLEAN, TINYINT(1), DECIMAL(10,2), DECIMAL(15,4), FLOAT, DOUBLE, DATETIME, DATE, TIMESTAMP, JSON
 - table.name and column.name: valid SQL identifiers /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/; avoid SQL reserved words; do NOT use "id" or "created_at"
 - If no changes of a given type are needed, return an empty array [] for that key.
+
+═══════════════════════════════════════════════════════
+FRONTEND RULES (apply when including frontend.files)
+═══════════════════════════════════════════════════════
+
+RULE 1 — COLUMN NAME CONSISTENCY (most common bug)
+The schema lists every table's EXACT column names after validation and reserved-word renaming.
+You MUST use these exact names everywhere in JS: fetch request bodies, response field access,
+template literals, form inputs, everything.
+Do NOT guess, shorten, or rename. If the schema says "skill_title", use "skill_title" — not "title".
+
+RULE 2 — SCRIPT LOAD ORDER (app-killing bug if broken)
+Scripts load in order. A file cannot reference a variable from a file loaded after it.
+
+CORRECT load order in index.html:
+  <script src="core/config.js"></script>
+  <script src="core/api.js"></script>
+  <script src="core/router.js"></script>
+  <script src="features/auth/auth.js"></script>
+  <script src="features/<feature>/<feature>.js"></script>
+  <script>
+    /* inline bootstrap — runs LAST, after ALL scripts above are loaded */
+    router.defineRoute('/', featureA.renderView);
+    router.defineRoute('/login', auth.renderAuthForms);
+    auth.ready.then(() => {
+      updateNav();
+      router.onHashChange();
+      window.addEventListener('hashchange', router.onHashChange);
+    });
+  </script>
+
+core/router.js must NEVER call defineRoute() itself — it only exports the router API.
+All defineRoute() calls go in the inline bootstrap script, where all globals are guaranteed to exist.
+
+RULE 3 — AUTH INITIALISATION RACE
+features/auth/auth.js must expose a `ready` promise resolved after loadUser() completes.
+loadUser() is async. If the router fires before it completes, getCurrentUser() returns null
+and every protected page shows "Access Denied" even for logged-in users.
+
+Required pattern in auth.js:
+  const auth = (() => {
+    let currentUser = null;
+    let _resolveReady;
+    const ready = new Promise(res => { _resolveReady = res; });
+
+    const loadUser = async () => {
+      // ... fetch /auth/me, set currentUser ...
+      _resolveReady(currentUser);
+      document.dispatchEvent(new CustomEvent('auth_status_change'));
+    };
+
+    loadUser(); // kick off — ready resolves when done
+
+    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
+  })();
+
+The inline bootstrap script then does: auth.ready.then(() => router.onHashChange())
+This guarantees auth state is known before any page renders.
+
+RULE 4 — ROUTER NAVIGATION PATHS
+router.navigate(path) sets window.location.hash = path.
+Paths must NOT include a leading '#' — that produces '##/' in the URL and 404s.
+  ✓ router.navigate('/')          sets hash to #/
+  ✗ router.navigate('#/')         sets hash to ##/ — WRONG, breaks navigation
+
+Always use: router.navigate('/'), router.navigate('/login'), etc.
+Anchor hrefs still use href="#/" — only programmatic navigate() must omit the #.
+
+RULE 5 — NULL SAFETY ON NULLABLE FIELDS
+The schema marks some columns nullable. Never call string/array methods on a field without guarding:
+  ✗ item.description.substring(0, 100)   — crashes if description is null
+  ✓ (item.description ?? '').substring(0, 100)
+  ✓ item.description?.substring(0, 100) ?? ''
+
+Apply this to every nullable column accessed in templates or JS logic.
+
+RULE 6 — LOADING STATES
+Every async render function must show a loading indicator before the fetch,
+then replace it with real content (or an error) when the fetch completes:
+  const renderSection = async () => {
+    const el = document.getElementById('section-id');
+    el.innerHTML = '<p class="text-gray-400 animate-pulse">Loading...</p>';
+    try {
+      const data = await api.get('table');
+      el.innerHTML = /* real content */;
+    } catch (e) {
+      el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`;
+    }
+  };
+
+RULE 7 — RESPONSIVE NAVIGATION
+Always include a hamburger button for mobile. Pattern:
+  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
+  <nav id="nav-menu" class="hidden md:flex items-center gap-4">
+    ...links...
+  </nav>
+Wire it in the inline bootstrap:
+  document.getElementById('nav-toggle').addEventListener('click', () => {
+    document.getElementById('nav-menu').classList.toggle('hidden');
+  });
+
+STRUCTURE
+Feature-Based Structure:
+    index.html                         ← SPA entry point
+    core/config.js                     ← SB_URL/SB_KEY/SB_PID globals
+    core/api.js                        ← SupaBein fetch client
+    core/router.js                     ← router API only (no defineRoute calls)
+    features/auth/auth.js              ← login, signup, logout, ready promise
+    features/<feature>/<feature>.js    ← one subfolder per app feature
+Every feature folder contains everything that feature needs.
+
+STYLING
+- Tailwind CSS via CDN. Add to <head> in index.html:
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>tailwind.config = { darkMode: 'class' }</script>
+- Add class="dark" to <html>. Do NOT write a separate CSS file.
+- Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
+  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger)
+- Buttons: rounded-lg px-4 py-2 font-medium transition.
+  Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
+  Secondary = bg-gray-800 hover:bg-gray-700 text-gray-200.
+- Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
+  focus:outline-none focus:ring-2 focus:ring-emerald-500
+
+JAVASCRIPT
+- Placeholders ONLY in core/config.js (substituted at deploy time):
+    const SB_URL = '__SB_URL__';
+    const SB_KEY = '__SB_ANON_KEY__';
+    const SB_PID = '__SB_PID__';
+  Do NOT redeclare them anywhere else — they are globals.
+- API URL patterns (exact — do NOT invent other formats):
+    Data list/create:        ${SB_URL}/data/${SB_PID}/${tableName}
+    Data get/update/delete:  ${SB_URL}/data/${SB_PID}/${tableName}/${id}
+    Auth signup:  ${SB_URL}/projects/${SB_PID}/auth/signup  → POST {email,password} → {token}
+    Auth login:   ${SB_URL}/projects/${SB_PID}/auth/login   → POST {email,password} → {token}
+    Auth me:      ${SB_URL}/projects/${SB_PID}/auth/me      → GET Authorization: Bearer {token}
+    Store JWT as "sb:token" in localStorage. Send as Authorization: Bearer {token}.
+    If not logged in, send the anon key instead.
+- Load scripts with RELATIVE paths in dependency order. NOT absolute paths (/core/config.js breaks the site).
+- Vanilla JS only — no frameworks, no npm, no build tools. Plain <script> tags; share state via IIFEs.
+- The app must be fully functional — real fetch calls, real CRUD, real auth flows.
+- When a table has user_id with ownership constraint, decode JWT in INSERT:
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    body.user_id = parseInt(payload.sub, 10);
 PROMPT;
 
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
@@ -591,6 +744,25 @@ function ai_schema_to_context(array $plan): string
         }
     }
     return implode("\n", $lines);
+}
+
+function ai_schema_from_db(int $projectId, \SupaBein\Catalog $catalog): array
+{
+    $tables = [];
+    foreach ($catalog->listTables($projectId) as $tbl) {
+        $cols = array_map(fn($c) => [
+            'name'     => $c['name'],
+            'type'     => $c['type'],
+            'nullable' => (bool)$c['nullable'],
+            'default'  => $c['default'] ?? null,
+        ], $catalog->listColumns($tbl['id']));
+        $tables[] = [
+            'name'     => $tbl['logical_name'],
+            'columns'  => $cols,
+            'policies' => $catalog->listPolicies($tbl['id']),
+        ];
+    }
+    return ['tables' => $tables];
 }
 
 // ─── Execution helpers ───────────────────────────────────────────────────────
@@ -1207,26 +1379,30 @@ CHAT;
                 $project = $catalog->getProjectById($projectId, $userId);
                 if (!$project) abort(404, 'Project not found');
 
-                $existingTables = $catalog->listTables($projectId);
-                $schemaLines = [];
-                foreach ($existingTables as $tbl) {
-                    $cols = array_map(fn($c) => $c['name'] . ' ' . $c['type'], $catalog->listColumns($tbl['id']));
-                    $schemaLines[] = '  Table "' . $tbl['logical_name'] . '": id (INT auto), ' . implode(', ', $cols) . ', created_at (DATETIME auto)';
-                }
-                $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
-
-                $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
+                $schemaCtx    = ai_schema_to_context(ai_schema_from_db($projectId, $catalog));
+                $currentFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+                $userMessage  = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
                 $delta = $gemini->generateJsonWithHistory(AI_EDIT_SYSTEM_PROMPT, $history, $userMessage);
+
+                // Normalise file paths if the AI returned frontend files
+                if (!empty($delta['frontend']['files'])) {
+                    foreach ($delta['frontend']['files'] as &$file) {
+                        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+                    }
+                    unset($file);
+                }
 
                 $summary = [
                     'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
-                    'add_columns'     => array_map(fn($e) => implode(', ', array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? [])), $delta['add_columns'] ?? []),
+                    'add_columns'     => array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? [])),
                     'update_policies' => array_map(fn($p) => $p['table'] . ' ' . $p['api_role'] . ' ' . $p['operation'], $delta['update_policies'] ?? []),
                 ];
-                // flatten add_columns
-                $summary['add_columns'] = array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? []));
+                if (!empty($delta['frontend']['files'])) {
+                    $summary['frontend_files'] = count($delta['frontend']['files']);
+                }
 
-                json_out(['mode' => 'edit', 'plan' => array_merge($delta, ['project_id' => $projectId]), 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+                $editPlan = array_merge($delta, ['project_id' => $projectId]);
+                json_out(['mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
 
             } else { // diagnose
                 $project = $catalog->getProjectById($projectId, $userId);
@@ -1294,6 +1470,17 @@ PROMPT;
             $project = $catalog->getProjectById($projectId, $userId);
             if (!$project) abort(404, 'Project not found');
             $result = ai_execute_edit($plan, $projectId, $userId);
+            if (!empty($plan['frontend']['files'])) {
+                $editConfig = \App::get('config');
+                $editSites  = $catalog->listSites($projectId);
+                if ($editSites) {
+                    $deployResult = ai_deploy_files($editConfig, $catalog, (int)$editSites[0]['id'],
+                                                    $project, $plan['frontend']['files']);
+                    if (!empty($deployResult['deploy'])) {
+                        $result['deploy'] = $deployResult['deploy'];
+                    }
+                }
+            }
             json_out($result);
 
         } else {

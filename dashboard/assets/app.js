@@ -1101,7 +1101,8 @@ const AiPanel = (() => {
     } else if (mode === 'edit') {
       const hasChanges = (summary.add_tables && summary.add_tables.length) ||
                          (summary.add_columns && summary.add_columns.length) ||
-                         (summary.update_policies && summary.update_policies.length);
+                         (summary.update_policies && summary.update_policies.length) ||
+                         summary.frontend_files;
       if (!hasChanges) {
         lines.push(el('div', { class: 'text-muted', style: 'font-size:13px' }, 'No changes needed for this request.'));
       } else {
@@ -1116,6 +1117,29 @@ const AiPanel = (() => {
         if (summary.update_policies && summary.update_policies.length) {
           lines.push(el('div', { class: 'ai-plan-section' }, 'Policy changes'));
           summary.update_policies.forEach(p => lines.push(el('div', { class: 'ai-plan-item' }, '~ ' + p)));
+        }
+        if (summary.frontend_files) {
+          lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
+            el('strong', {}, 'Frontend: '), summary.frontend_files + ' files updated'
+          ));
+        }
+        // Collapsible file list
+        if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+          const filesDetails = el('details', { class: 'ai-plan-details' },
+            el('summary', { class: 'ai-plan-details-summary' }, 'Files'),
+            ...plan.frontend.files.map(f =>
+              el('div', { class: 'ai-plan-details-file' }, f.path)
+            )
+          );
+          lines.push(filesDetails);
+        }
+        // Download plan JSON button
+        if (plan && plan.frontend && plan.frontend.files && plan.frontend.files.length) {
+          const dlBtn = el('button', { class: 'ai-plan-dl-btn', onClick: () => {
+            const name = 'edit-' + (plan.project_id || 'plan');
+            downloadText(name + '.json', JSON.stringify(plan, null, 2));
+          }}, '↓ Download JSON');
+          lines.push(dlBtn);
         }
       }
     }
