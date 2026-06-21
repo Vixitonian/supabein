@@ -443,4 +443,42 @@ class Catalog
         $stmt->execute([$id, $userId]);
         return $stmt->rowCount() > 0;
     }
+
+    // ─── AI Jobs ─────────────────────────────────────────────────────────────
+
+    public function createJob(int $userId, string $mode, array $payload): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO ai_jobs (user_id, mode, payload) VALUES (?, ?, ?)'
+        );
+        $stmt->execute([$userId, $mode, json_encode($payload, JSON_UNESCAPED_UNICODE)]);
+        $id = (int)$this->pdo->lastInsertId();
+        return $this->getJobById($id, $userId);
+    }
+
+    public function getJobById(int $id, int $userId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, mode, status, result, error, pid, created_at, updated_at
+             FROM ai_jobs WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$id, $userId]);
+        $row = $stmt->fetch() ?: null;
+        if (!$row) return null;
+        if ($row['result'] !== null) {
+            $row['result'] = json_decode($row['result'], true);
+        }
+        return self::castRow($row, ['id', 'user_id', 'pid']);
+    }
+
+    public function listActiveJobs(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT id, user_id, mode, status, created_at, updated_at
+             FROM ai_jobs WHERE user_id = ? AND status IN ('queued','running')
+             ORDER BY created_at DESC"
+        );
+        $stmt->execute([$userId]);
+        return self::castRows($stmt->fetchAll() ?: [], ['id', 'user_id', 'pid']);
+    }
 }

@@ -807,6 +807,9 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
+  let activeJobId   = null;
+  let jobPollTimer  = null;
+  let jobIndicator  = null;
 
   const AI_MODELS = [
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -1364,6 +1367,13 @@ const AiPanel = (() => {
       startThinkingStages(thinkingLabel, msg.stageMode || 'default');
       return bubble;
     }
+    if (msg.type === 'job') {
+      const label = el('span', { class: 'ai-thinking-label' });
+      label.textContent = 'Working in the background…';
+      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
+        el('span', { class: 'ai-thinking-dots' }, '● ● ●'), label
+      );
+    }
     if (msg.type === 'intent') return renderIntentSummaryCard(msg);
     if (msg.type === 'edit-intent') return renderEditIntentSummaryCard(msg);
     if (msg.type === 'recover') return renderRecoveryCard(msg);
@@ -1747,11 +1757,20 @@ const AiPanel = (() => {
 
     const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
-      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel, async: true });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
-      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+
+      if (result.job_id) {
+        activeJobId = result.job_id;
+        const jobMsgId = 'job_' + result.job_id;
+        await addMessage(currentSessionId, { id: jobMsgId, role: 'ai', type: 'job', content: '' });
+        showJobIndicator();
+        startJobPolling(result.job_id, mode, jobMsgId);
+      } else {
+        await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+      }
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
@@ -1783,6 +1802,88 @@ const AiPanel = (() => {
     }
 
     renderMessages();
+  }
+
+  function startJobPolling(jobId, mode, jobMsgId) {
+    let polls = 0;
+    const MAX_POLLS = 240;
+    stopJobPolling();
+    jobPollTimer = setInterval(async () => {
+      polls++;
+      if (polls > MAX_POLLS) {
+        stopJobPolling();
+        hideJobIndicator();
+        const sess = currentSession();
+        if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'AI job timed out after 12 minutes.' });
+        renderMessages();
+        return;
+      }
+      try {
+        const job = await Api.get('/v1/ai/jobs/' + jobId);
+        if (job.status === 'done') {
+          stopJobPolling();
+          hideJobIndicator();
+          await handleJobDone(job, mode, jobMsgId);
+        } else if (job.status === 'failed') {
+          stopJobPolling();
+          hideJobIndicator();
+          await handleJobFailed(job, mode, jobMsgId);
+        }
+      } catch(e) { /* keep polling on network error */ }
+    }, 3000);
+  }
+
+  function stopJobPolling() {
+    if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
+  }
+
+  async function handleJobDone(job, mode, jobMsgId) {
+    const sess = currentSession();
+    if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
+    const result = job.result || {};
+    await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+    await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+    renderMessages();
+    renderSidebar();
+    activeJobId = null;
+  }
+
+  async function handleJobFailed(job, mode, jobMsgId) {
+    const sess = currentSession();
+    if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
+    await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `AI job failed: ${job.error || 'Unknown error'}` });
+    renderMessages();
+    activeJobId = null;
+  }
+
+  function showJobIndicator() {
+    if (!jobIndicator) {
+      jobIndicator = el('div', { class: 'ai-job-indicator' },
+        el('span', { class: 'ai-job-indicator-dot' }),
+        el('span', { class: 'ai-job-indicator-label' }, 'AI is building…'),
+        el('button', { class: 'ai-job-indicator-view', onClick: () => AiPanel.open() }, 'View')
+      );
+      document.body.appendChild(jobIndicator);
+    }
+    requestAnimationFrame(() => jobIndicator.classList.add('ai-job-indicator-visible'));
+  }
+
+  function hideJobIndicator() {
+    if (jobIndicator) jobIndicator.classList.remove('ai-job-indicator-visible');
+  }
+
+  async function checkForActiveJobs() {
+    if (activeJobId || jobPollTimer) return;
+    try {
+      const jobs = await Api.get('/v1/ai/jobs');
+      if (Array.isArray(jobs) && jobs.length > 0) {
+        const job = jobs[0];
+        activeJobId = job.id;
+        showJobIndicator();
+        startJobPolling(job.id, job.mode, null);
+      }
+    } catch(e) { /* ignore */ }
   }
 
   function buildPanel() {
@@ -1934,6 +2035,7 @@ const AiPanel = (() => {
     if (fab) fab.classList.add('ai-fab-hidden');
 
     setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
+    checkForActiveJobs();
   }
 
   function close() {
@@ -1951,7 +2053,7 @@ const AiPanel = (() => {
     if (isOpen) close(); else open(options);
   }
 
-  return { open, close, toggle };
+  return { open, close, toggle, checkForActiveJobs };
 })();
 
 function initAiFab() {
@@ -3493,4 +3595,4 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
 });
 
-document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); });
+document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); AiPanel.checkForActiveJobs(); });

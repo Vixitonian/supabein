@@ -4,7 +4,14 @@ declare(strict_types=1);
 
 require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
 require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
+require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
+
+function can_exec(): bool {
+    if (!function_exists('exec')) return false;
+    $disabled = array_map('trim', explode(',', (string)ini_get('disable_functions')));
+    return !in_array('exec', $disabled, true);
+}
 
 // ─── Gemini system prompts ───────────────────────────────────────────────────
 
@@ -2080,6 +2087,7 @@ PROMPT;
 
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
+        $async   = !empty($req['body']['async']) && can_exec();
 
         $mode = $req['body']['mode'] ?? '';
         $plan = $req['body']['plan'] ?? [];
@@ -2090,6 +2098,18 @@ PROMPT;
             $plan = ai_sanitize_plan($plan);
             $validationError = ai_validate_plan($plan);
             if ($validationError) abort(422, 'Invalid plan: ' . $validationError);
+
+            if ($async) {
+                $job     = $catalog->createJob($userId, 'build', ['plan' => $plan]);
+                $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
+                $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
+                         . ' ' . (int)$job['id']
+                         . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
+                exec($cmd);
+                json_out(['job_id' => $job['id'], 'status' => 'queued'], 202);
+                return;
+            }
+
             $result = ai_execute_build($plan, $userId);
             json_out($result, 201);
 
@@ -2100,6 +2120,22 @@ PROMPT;
             if (!$project) abort(404, 'Project not found');
             $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
             if ($deltaError) abort(422, 'Invalid edit plan: ' . $deltaError);
+
+            if ($async) {
+                $jobPayload = ['delta' => $plan, 'project_id' => $projectId];
+                if (!empty($plan['frontend']['files'])) {
+                    $jobPayload['frontend_files'] = $plan['frontend']['files'];
+                }
+                $job     = $catalog->createJob($userId, 'edit', $jobPayload);
+                $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
+                $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
+                         . ' ' . (int)$job['id']
+                         . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
+                exec($cmd);
+                json_out(['job_id' => $job['id'], 'status' => 'queued'], 202);
+                return;
+            }
+
             $result = ai_execute_edit($plan, $projectId, $userId);
             if (!empty($plan['frontend']['files'])) {
                 $editConfig = \App::get('config');
@@ -2166,5 +2202,22 @@ PROMPT;
         $catalog   = \SupaBein\Catalog::getInstance();
         if (!$catalog->deleteAiSession($sessionId, $userId)) abort(404, 'Session not found');
         json_out(['deleted' => true]);
+    }, ['auth_middleware']);
+
+    // ── AI Jobs ────────────────────────────────────────────────────────────────
+
+    $router->get('/v1/ai/jobs', function (array $req): void {
+        $userId  = (int)$req['auth']['user_id'];
+        $catalog = \SupaBein\Catalog::getInstance();
+        json_out($catalog->listActiveJobs($userId));
+    }, ['auth_middleware']);
+
+    $router->get('/v1/ai/jobs/:id', function (array $req): void {
+        $userId  = (int)$req['auth']['user_id'];
+        $jobId   = (int)$req['params']['id'];
+        $catalog = \SupaBein\Catalog::getInstance();
+        $job     = $catalog->getJobById($jobId, $userId);
+        if (!$job) abort(404, 'Job not found');
+        json_out($job);
     }, ['auth_middleware']);
 }

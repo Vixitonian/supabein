@@ -1320,3 +1320,53 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+
+/* ─── AI Job Indicator ───────────────────────────────────────────────────── */
+.ai-job-indicator {
+  position: fixed;
+  bottom: 80px;
+  right: 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-2, #1a1d27);
+  border: 1px solid var(--accent, #3ecf8e);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  z-index: 1100;
+}
+.ai-job-indicator-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+.ai-job-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #3ecf8e);
+  flex-shrink: 0;
+  animation: ai-job-pulse 1.4s ease-in-out infinite;
+}
+@keyframes ai-job-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.7); }
+}
+.ai-job-indicator-label { flex: 1; }
+.ai-job-indicator-view {
+  background: transparent;
+  border: 1px solid var(--accent, #3ecf8e);
+  color: var(--accent, #3ecf8e);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ai-job-indicator-view:hover { background: rgba(62,207,142,0.1); }

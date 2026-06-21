@@ -121,6 +121,22 @@ CREATE TABLE IF NOT EXISTS `ai_sessions` (
     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `ai_jobs` (
+    `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `user_id`    INT UNSIGNED NOT NULL,
+    `mode`       ENUM('build','edit') NOT NULL,
+    `payload`    LONGTEXT NOT NULL,
+    `status`     ENUM('queued','running','done','failed') NOT NULL DEFAULT 'queued',
+    `result`     LONGTEXT DEFAULT NULL,
+    `error`      TEXT DEFAULT NULL,
+    `pid`        INT UNSIGNED DEFAULT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    KEY `idx_user_status` (`user_id`, `status`),
+    KEY `idx_status_created` (`status`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `user_reset_tokens` (
     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `user_id`    INT UNSIGNED NOT NULL,
