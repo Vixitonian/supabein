@@ -1036,6 +1036,114 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-send-btn:not(:disabled):hover { opacity: 0.85; }
 .ai-send-btn:not(:disabled):active { transform: scale(0.9); }
 
+/* ─── Review toggle ─────────────────────────────────────────────────────── */
+.ai-review-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ai-review-toggle:hover { border-color: var(--accent); color: var(--text); }
+.ai-review-toggle.active {
+  background: rgba(62,207,142,0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ─── Intent card ───────────────────────────────────────────────────────── */
+.ai-intent-card { padding: 14px 16px; }
+.ai-intent-header {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+.ai-intent-section-label {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 7px;
+}
+.ai-intent-divider { height: 1px; background: var(--border); margin: 12px 0; }
+.ai-intent-actors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.ai-actor-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(62,207,142,0.10);
+  border: 1px solid rgba(62,207,142,0.28);
+  color: var(--accent);
+  border-radius: 20px;
+  padding: 3px 6px 3px 10px;
+  font-size: 12px;
+}
+.ai-chip-remove {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  font-size: 14px;
+  opacity: 0.6;
+}
+.ai-chip-remove:hover { opacity: 1; }
+.ai-intent-stories { display: flex; flex-direction: column; }
+.ai-story-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.ai-story-text { flex: 1; line-height: 1.5; }
+.ai-story-remove {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+  margin-top: 0;
+}
+.ai-story-remove:hover { color: var(--danger, #f87171); }
+.ai-story-add-row { margin-top: 8px; }
+.ai-intent-add-input {
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  padding: 5px 10px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+.ai-intent-add-input:focus { border-color: var(--accent); color: var(--text); }
+.ai-intent-actors .ai-intent-add-input { width: 90px; }
+.ai-story-add-row .ai-intent-add-input { width: 100%; box-sizing: border-box; }
+.ai-intent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 /* ─── Mobile sidebar drawer ──────────────────────────────────────────────── */
 .ai-sidebar-overlay {
   display: none;

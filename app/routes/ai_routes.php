@@ -47,6 +47,45 @@ Rules:
 - policy.constraint_sql: WHERE-style expression or null; use ":current_user_id" for logged-in user ID
   Do NOT use "auth.uid()" — it is not supported.
 - Always include at least one table.
+
+AUTHENTICATION (read carefully — this is the most common design failure):
+- If the app stores or scopes data per user — anything involving "my", accounts, profiles,
+  carts, orders, posts-by-author, ownership, roles, or login — you MUST include exactly ONE
+  users table that has a column of type PASSWORD (e.g. {"name":"email","type":"VARCHAR(255)"}
+  plus {"name":"password","type":"PASSWORD"}). Without a PASSWORD column the platform cannot
+  issue a login token, so :current_user_id is always empty and every owner-scoped table is
+  permanently inaccessible.
+- Reference the logged-in user from other tables with a column named EXACTLY "user_id" of type
+  INT. Do NOT invent owner column names like "customer_ref", "user_ref", "owner_id", or "author".
+  Owner-scoped policies must read "user_id = :current_user_id".
+- NEVER use ":current_user_id" in any policy unless a PASSWORD column exists somewhere in the
+  schema. If the app is genuinely single-user / public-only (no accounts), use anon policies and
+  no :current_user_id at all.
+
+LOCKED PRODUCT INTENT:
+- If the user message contains a "Locked product intent" block (a fixed list of actors and user
+  stories), you MUST design the schema for EXACTLY those actors and stories. Do not add tables,
+  features, or roles that no listed story requires, and do not drop any. The locked list is the
+  complete scope — treat anything outside it as out of scope.
+- Derive auth from the actors: if the actors are more than one, or any actor is not a single
+  anonymous "owner", include a users table with a PASSWORD column and user_id ownership.
+PROMPT;
+
+// ── Intent pass (pass 0): minimal actors + user stories, deliberately capped ──
+const AI_INTENT_PROMPT = <<<'PROMPT'
+You extract the MINIMAL set of actors and user stories for a web app from a short description.
+Return ONLY JSON, no prose and no markdown fences: {"actors": [...], "stories": [...]}
+
+Rules:
+- Include ONLY what the description asks for or strictly requires. Invent nothing.
+- "actors": the distinct kinds of human user. If the app is for one person with no sharing,
+  accounts, or roles, return exactly ["owner"] — a single anonymous user needing no login.
+  Add another actor ONLY if the description implies sharing, assignment, roles, or many users.
+- "stories": short "as a <actor> I can <do one thing>" lines, one capability each, core actions only.
+- Do NOT add admin panels, notifications, comments, tags, search, analytics, profiles, or sharing
+  unless the description explicitly mentions them.
+- HARD LIMITS: at most 5 actors and at most 7 stories. Fewer is better. For a trivial app,
+  return 1 actor and 2–3 stories.
 PROMPT;
 
 // ── Shared frontend rules (single source of truth for build AND edit) ────────
@@ -102,25 +141,9 @@ features/auth/auth.js must expose a `ready` promise resolved after loadUser() co
 loadUser() is async; if the router fires first, getCurrentUser() returns null and protected
 pages show "Access Denied" even for logged-in users.
 
-Required pattern in auth.js (defined ONCE, in this file only):
-  const auth = (() => {
-    let currentUser = null;
-    let _resolveReady;
-    const ready = new Promise(res => { _resolveReady = res; });
-    const loadUser = async () => {
-      const t = localStorage.getItem('sb:token');
-      if (!t) { _resolveReady(null); document.dispatchEvent(new CustomEvent('auth_status_change')); return; }
-      try {
-        const payload = JSON.parse(atob(t.split('.')[1]));
-        // Optionally fetch full user row: currentUser = await api.get('{table_name}', payload.sub);
-        currentUser = { id: payload.sub };
-      } catch { localStorage.removeItem('sb:token'); }
-      _resolveReady(currentUser);
-      document.dispatchEvent(new CustomEvent('auth_status_change'));
-    };
-    loadUser();
-    return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
-  })();
+Do NOT hand-write this module. Copy the verbatim auth.js given in the PLACEHOLDERS + AUTH
+section below (it already implements `ready`, loadUser, login, signup, logout, getCurrentUser,
+and renderAuthForms). Define it ONCE, in features/auth/auth.js only.
 
 ═══════════════════════════════════════════════════════
 RULE 4 — ROUTER NAVIGATION PATHS
@@ -172,6 +195,12 @@ do not change the signatures — this is what keeps every build consistent):
 Feature code uses ONLY: api.list('table'), api.get('table', id), api.create('table', {...}),
 api.update('table', id, {...}), api.remove('table', id). api.list() always returns an array.
 
+FILTERING: the data API does NOT support PostgREST-style query strings. NEVER write
+api.list('table?col=eq.value') or append ?foo=bar to a table name — the filter is ignored and
+you get every row (or a 404). To get related/owned rows, fetch the table and filter in JS:
+  const rows = (await api.list('order_line_items')).filter(r => r.order_id === orderId);
+Keep these client-side filters on small tables only; this is fine for the app sizes here.
+
 ═══════════════════════════════════════════════════════
 RULE 7 — LOADING STATES + RESPONSIVE NAV
 ═══════════════════════════════════════════════════════
@@ -210,6 +239,7 @@ STYLING
   Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
 - Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
   focus:outline-none focus:ring-2 focus:ring-emerald-500.
+- Never hardcode the year (e.g. a "© 2023" footer). Use new Date().getFullYear().
 
 ═══════════════════════════════════════════════════════
 PLACEHOLDERS + OWNERSHIP
@@ -218,15 +248,82 @@ PLACEHOLDERS + OWNERSHIP
     const SB_URL = '__SB_URL__';
     const SB_PID = '__SB_PID__';
   Declared once. Never redeclare anywhere. No SB_KEY — public requests need no auth token.
-- Auth (ONLY when the schema has a table with a PASSWORD column):
-    signup: POST ${SB_URL}/data/${SB_PID}/{table_name}        {field: "...", password: "..."}
-            → server auto-hashes the password; returns the new user row (password field is null)
-    login:  POST ${SB_URL}/data/${SB_PID}/{table_name}/login  {field: "...", password: "..."}
-            → returns {token, user} where user.password is null
-  Replace {table_name} with the actual table name from the schema (e.g. "users").
-  Store the JWT as "sb:token" in localStorage.
-  Include features/auth/auth.js ONLY when the project has a PASSWORD column.
-  If no PASSWORD column exists, omit auth.js and any /login route.
+- Auth (include features/auth/auth.js ONLY when the schema has a table with a PASSWORD column;
+  if no PASSWORD column exists, omit auth.js and any /login route entirely).
+  Copy this file VERBATIM. The placeholders __AUTH_TABLE__ and __AUTH_FIELD__ are already filled
+  in for you with the real users-table name and its identifier column — do not change them.
+
+  features/auth/auth.js:
+    const auth = (() => {
+      const TABLE = '__AUTH_TABLE__';   // users table from the schema
+      const FIELD = '__AUTH_FIELD__';   // its non-password identifier column (email/username)
+      let currentUser = null;
+      let _resolveReady;
+      const ready = new Promise(res => { _resolveReady = res; });
+
+      const loadUser = async () => {
+        const t = localStorage.getItem('sb:token');
+        if (!t) { _resolveReady(null); document.dispatchEvent(new CustomEvent('auth_status_change')); return; }
+        try {
+          const payload = JSON.parse(atob(t.split('.')[1]));
+          currentUser = { id: parseInt(payload.sub, 10) };
+        } catch { localStorage.removeItem('sb:token'); }
+        _resolveReady(currentUser);
+        document.dispatchEvent(new CustomEvent('auth_status_change'));
+      };
+
+      const getCurrentUser = () => currentUser;
+
+      const login = async (identifier, password) => {
+        const res = await fetch(`${SB_URL}/data/${SB_PID}/${TABLE}/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [FIELD]: identifier, password })
+        });
+        if (!res.ok) throw new Error('Invalid credentials');
+        const { token, user } = await res.json();
+        localStorage.setItem('sb:token', token);
+        currentUser = { id: user.id };
+        document.dispatchEvent(new CustomEvent('auth_status_change'));
+        return currentUser;
+      };
+
+      const signup = async (identifier, password) => {
+        await api.create(TABLE, { [FIELD]: identifier, password });
+        return login(identifier, password);   // auto-login after signup
+      };
+
+      const logout = () => {
+        localStorage.removeItem('sb:token');
+        currentUser = null;
+        document.dispatchEvent(new CustomEvent('auth_status_change'));
+        router.navigate('/login');
+      };
+
+      const renderAuthForms = () => {
+        // MUST render BOTH a login form and a signup form (two panels or tabs) into #app.
+        // Each submit calls auth.login(...) / auth.signup(...) then router.navigate('/').
+        // Show errors inline (text-red-400). Use FIELD as the first input's name.
+      };
+
+      loadUser();
+      return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
+    })();
+
+  Auth wiring requirements (all three are mandatory when auth exists):
+  1. renderAuthForms MUST render BOTH login AND signup on the /login screen — never login only.
+  2. updateNav() MUST show a "Login" link (href="#/login") when auth.getCurrentUser() is null,
+     and a "Logout" button calling auth.logout() when a user is set. There must always be a
+     visible way to reach /login.
+  3. Protected routes MUST redirect, not dead-end: if a gated render finds no current user, call
+     router.navigate('/login') instead of printing "Access Denied" — otherwise the form is
+     unreachable.
+  - Signup/login server contract (already handled by the verbatim file above):
+      signup → POST ${SB_URL}/data/${SB_PID}/{TABLE}            {FIELD: "...", password: "..."}
+               server auto-hashes the password; returns the new user row (password is null)
+      login  → POST ${SB_URL}/data/${SB_PID}/{TABLE}/login      {FIELD: "...", password: "..."}
+               returns {token, user} where user.password is null
+    Store the JWT as "sb:token" in localStorage (the file does this).
 - When a table has user_id for ownership, set it on INSERT from the stored token:
     const payload = JSON.parse(atob(localStorage.getItem('sb:token').split('.')[1]));
     data.user_id = parseInt(payload.sub, 10);
@@ -610,10 +707,228 @@ function ai_validate_plan(array $plan): ?string
             }
         }
     }
+
+    // ── Cross-pass auth coherence: :current_user_id requires a PASSWORD column ──
+    // Without a PASSWORD column the platform cannot issue a login token, so any
+    // owner-scoped policy is permanently unsatisfiable and the app is dead on arrival.
+    $hasPassword     = false;
+    $usesCurrentUser = false;
+    foreach ($plan['tables'] as $t) {
+        foreach ($t['columns'] ?? [] as $c) {
+            if (strtoupper(trim((string)($c['type'] ?? ''))) === 'PASSWORD') $hasPassword = true;
+        }
+        foreach ($t['policies'] ?? [] as $p) {
+            if (!empty($p['constraint_sql']) && str_contains((string)$p['constraint_sql'], ':current_user_id')) {
+                $usesCurrentUser = true;
+            }
+        }
+    }
+    if ($usesCurrentUser && !$hasPassword) {
+        return 'policies use :current_user_id but no table has a PASSWORD column, so login is '
+             . 'impossible and every owner-scoped table is unreachable. Add a users table with a '
+             . 'PASSWORD column (e.g. email VARCHAR(255), password PASSWORD) and reference it via user_id.';
+    }
+
+    return null;
+}
+
+/**
+ * Validate an EDIT delta against the existing schema so a one-shot retry has something
+ * concrete to feed back. Catches the silent edit-killers: invalid column types, re-adding
+ * a table/column that already exists (DDL duplicate → non-fatal skip → the user's change
+ * just never appears), and targeting a table that doesn't exist. Pure-frontend deltas
+ * (empty add_* arrays) are valid. Returns an error string or null.
+ */
+function ai_validate_delta(array $delta, array $existingSchema): ?string
+{
+    // Index existing tables/columns (lowercased) for collision checks.
+    $existing = [];
+    foreach ($existingSchema['tables'] ?? [] as $t) {
+        $tn = strtolower((string)($t['name'] ?? ''));
+        if ($tn === '') continue;
+        $existing[$tn] = [];
+        foreach ($t['columns'] ?? [] as $c) {
+            $existing[$tn][strtolower((string)($c['name'] ?? ''))] = true;
+        }
+    }
+
+    // Tables being added in THIS delta (so add_columns may target them).
+    $newTables = [];
+    foreach ($delta['add_tables'] ?? [] as $i => $t) {
+        $name = (string)($t['name'] ?? '');
+        try { \SupaBein\Schema::validateIdentifier($name); }
+        catch (\InvalidArgumentException $e) { return "add_tables[$i].name: " . $e->getMessage(); }
+        if (isset($existing[strtolower($name)])) {
+            return "add_tables[$i] \"$name\" already exists — do not re-add existing tables; "
+                 . "use add_columns or update_policies for changes to it.";
+        }
+        $newTables[strtolower($name)] = true;
+        foreach ($t['columns'] ?? [] as $j => $c) {
+            try { \SupaBein\Schema::validateDataType((string)($c['type'] ?? '')); }
+            catch (\InvalidArgumentException $e) { return "add_tables[$i].columns[$j].type: " . $e->getMessage(); }
+        }
+    }
+
+    foreach ($delta['add_columns'] ?? [] as $i => $entry) {
+        $tn = strtolower((string)($entry['table'] ?? ''));
+        if ($tn === '') return "add_columns[$i].table is required";
+        $tableIsNew = isset($newTables[$tn]);
+        if (!$tableIsNew && !isset($existing[$tn])) {
+            return "add_columns[$i] targets unknown table \"{$entry['table']}\" — it is neither in "
+                 . "the current schema nor in add_tables.";
+        }
+        foreach ($entry['columns'] ?? [] as $j => $c) {
+            $cn = strtolower((string)($c['name'] ?? ''));
+            try { \SupaBein\Schema::validateIdentifier((string)($c['name'] ?? '')); }
+            catch (\InvalidArgumentException $e) { return "add_columns[$i].columns[$j].name: " . $e->getMessage(); }
+            if (in_array($cn, ['id', 'created_at'], true)) {
+                return "add_columns[$i] column \"{$entry['table']}.{$c['name']}\" is auto-managed by "
+                     . "SupaBein — never add id or created_at.";
+            }
+            try { \SupaBein\Schema::validateDataType((string)($c['type'] ?? '')); }
+            catch (\InvalidArgumentException $e) { return "add_columns[$i].columns[$j].type: " . $e->getMessage(); }
+            if (!$tableIsNew && isset($existing[$tn][$cn])) {
+                return "add_columns[$i] column \"{$entry['table']}.{$c['name']}\" already exists — "
+                     . "remove it from the delta (additions only, no duplicates).";
+            }
+        }
+    }
+
+    foreach ($delta['update_policies'] ?? [] as $i => $p) {
+        $tn = strtolower((string)($p['table'] ?? ''));
+        if ($tn === '') return "update_policies[$i].table is required";
+        if (!isset($existing[$tn]) && !isset($newTables[$tn])) {
+            return "update_policies[$i] targets unknown table \"{$p['table']}\".";
+        }
+    }
+
     return null;
 }
 
 // ─── Schema serializer for two-pass generation ───────────────────────────────
+
+/**
+ * Deterministically cap an intent so a weak model can never explode scope, with or without
+ * human review: dedupe, trim, drop empties, hard-limit to 5 actors and 7 stories. This runs
+ * on every intent — it protects the review screen as much as the automatic path.
+ */
+function ai_cap_intent(array $intent): array
+{
+    $clean = static function ($list, int $max): array {
+        if (!is_array($list)) return [];
+        $out = [];
+        foreach ($list as $item) {
+            if (!is_string($item)) continue;
+            $item = trim($item);
+            if ($item === '') continue;
+            if (!in_array($item, $out, true)) $out[] = $item;
+            if (count($out) >= $max) break;
+        }
+        return $out;
+    };
+    return [
+        'actors'  => $clean($intent['actors']  ?? [], 5),
+        'stories' => $clean($intent['stories'] ?? [], 7),
+    ];
+}
+
+/**
+ * Structural check on an intent so the retry loop has something concrete to feed back.
+ */
+function ai_validate_intent(array $intent): ?string
+{
+    if (empty($intent['actors'])  || !is_array($intent['actors']))  return 'intent.actors must be a non-empty array of strings';
+    if (empty($intent['stories']) || !is_array($intent['stories'])) return 'intent.stories must be a non-empty array of strings';
+    return null;
+}
+
+/**
+ * Run the intent pass (pass 0) with one self-correcting retry, then cap deterministically.
+ * Returns ['actors'=>[...], 'stories'=>[...]]. Throws \RuntimeException on model/transport error.
+ */
+function ai_generate_intent(object $client, string $prompt, array $history = []): array
+{
+    $call = static function (string $user) use ($client, $history) {
+        return $history
+            ? $client->generateJsonWithHistory(AI_INTENT_PROMPT, $history, $user)
+            : $client->generateJson(AI_INTENT_PROMPT, $user);
+    };
+
+    $intent = $call($prompt);
+    $err = ai_validate_intent($intent);
+    if ($err) {
+        $intent = $call($prompt . "\n\nYour previous response was rejected: " . $err
+            . "\nReturn ONLY {\"actors\":[...],\"stories\":[...]} obeying the limits.");
+        $err = ai_validate_intent($intent);
+        if ($err) {
+            // Last-resort fallback so a flaky intent pass never blocks a build.
+            $intent = ['actors' => ['owner'], 'stories' => [$prompt]];
+        }
+    }
+    return ai_cap_intent($intent);
+}
+
+/**
+ * Serialize an approved intent into a locked context block for the schema pass. The wording
+ * matches the "Locked product intent" rule in AI_BUILD_SCHEMA_PROMPT so the model treats it
+ * as the complete, fixed scope rather than a suggestion to expand on.
+ */
+function ai_intent_to_context(array $intent): string
+{
+    $intent = ai_cap_intent($intent);
+    $lines = "Locked product intent — design the schema for EXACTLY these, add nothing and drop nothing.\nActors:\n";
+    foreach ($intent['actors'] as $a)  $lines .= "- {$a}\n";
+    $lines .= "User stories:\n";
+    foreach ($intent['stories'] as $s) $lines .= "- {$s}\n";
+    return $lines;
+}
+
+/**
+ * Detect the auth/users table in a plan (or DB-derived schema): the table holding a
+ * PASSWORD column, plus its identifier field (email/username preferred). These fill the
+ * __AUTH_TABLE__ / __AUTH_FIELD__ placeholders in the verbatim auth.js so weak models
+ * never have to guess them. Returns ['table' => null, 'field' => null] when no auth.
+ */
+function ai_detect_auth(array $plan): array
+{
+    foreach ($plan['tables'] ?? [] as $t) {
+        $hasPw = false;
+        $field = null;
+        foreach ($t['columns'] ?? [] as $c) {
+            if (strtoupper(trim((string)($c['type'] ?? ''))) === 'PASSWORD') { $hasPw = true; continue; }
+            if ($field === null) {
+                $n = strtolower((string)($c['name'] ?? ''));
+                if (in_array($n, ['email','username','user_name','login','handle','phone'], true)) {
+                    $field = $c['name'];
+                }
+            }
+        }
+        if ($hasPw) {
+            if ($field === null) {
+                foreach ($t['columns'] ?? [] as $c) {
+                    if (strtoupper(trim((string)($c['type'] ?? ''))) !== 'PASSWORD') { $field = $c['name']; break; }
+                }
+            }
+            return ['table' => $t['name'], 'field' => $field ?? 'email'];
+        }
+    }
+    return ['table' => null, 'field' => null];
+}
+
+/**
+ * Bind __AUTH_TABLE__ / __AUTH_FIELD__ in a system prompt to the real schema values so the
+ * model copies a ready-to-run auth.js instead of inventing one. Safe to call even with no
+ * auth table (falls back to neutral defaults; the rules tell the model to omit auth.js then).
+ */
+function ai_bind_auth_placeholders(string $systemPrompt, array $plan): string
+{
+    $auth = ai_detect_auth($plan);
+    return str_replace(
+        ['__AUTH_TABLE__', '__AUTH_FIELD__'],
+        [$auth['table'] ?? 'users', $auth['field'] ?? 'email'],
+        $systemPrompt
+    );
+}
 
 /**
  * Convert a validated plan's tables into a human-readable schema string
@@ -1151,15 +1466,43 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(422, 'prompt is required and must be under 2000 characters');
         }
 
+        // Optional human-review controls (both default off → current behaviour unchanged):
+        //   review:true  → generate + cap the intent, return it, build NOTHING (caller edits it)
+        //   intent:{...}  → an approved/edited intent; lock it into the schema pass and build
+        $review         = !empty($req['body']['review']);
+        $approvedIntent = (isset($req['body']['intent']) && is_array($req['body']['intent']))
+                        ? $req['body']['intent'] : null;
+
         // ── 2. Call AI (two passes) ──────────────────────────────────────────
         $provider = $req['body']['provider'] ?? null;
         $model    = $req['body']['model']    ?? null;
-        sb_log('ai_build', 'Calling AI (pass 1: schema)', ['user_id' => $userId, 'provider' => $provider, 'model' => $model]);
         $gemini = make_ai_client($config, $provider, $model);
 
-        // Pass 1 — schema only
+        // ── Review gate: return capped intent for the caller to edit, build nothing ──
+        if ($review && !$approvedIntent) {
+            sb_log('ai_build', 'Review requested: generating intent only', ['user_id' => $userId]);
+            try {
+                $intent = ai_generate_intent($gemini, $prompt);
+            } catch (\RuntimeException $e) {
+                $msg = $e->getMessage();
+                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+                abort(502, 'AI generation failed: ' . $msg);
+            }
+            json_out(['mode' => 'intent', 'intent' => $intent, 'usage' => $gemini->getLastUsage()]);
+            return;
+        }
+
+        // If an approved intent was supplied, lock it into the schema prompt as fixed scope.
+        $schemaUserMsg = $prompt;
+        if ($approvedIntent) {
+            $schemaUserMsg = $prompt . "\n\n" . ai_intent_to_context($approvedIntent);
+        }
+
+        sb_log('ai_build', 'Calling AI (pass 1: schema)', ['user_id' => $userId, 'provider' => $provider, 'model' => $model, 'locked_intent' => (bool)$approvedIntent]);
+
+        // Pass 1 — schema only (one self-correcting retry on validation failure)
         try {
-            $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $prompt);
+            $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $schemaUserMsg);
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             sb_log('ai_build', 'AI error (pass 1): ' . $msg, ['user_id' => $userId]);
@@ -1167,21 +1510,37 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(502, 'AI generation failed: ' . $msg);
         }
 
-        // ── 3. Validate schema ────────────────────────────────────────────────
+        // ── 3. Validate schema (sanitize → validate → retry once with the error) ──
         $schemaPlan['frontend'] = ['files' => []];
         $schemaPlan = ai_sanitize_plan($schemaPlan);
         $validationError = ai_validate_plan($schemaPlan);
         if ($validationError) {
-            sb_log('ai_build', 'Schema validation failed: ' . $validationError, ['plan_keys' => array_keys($schemaPlan)]);
+            sb_log('ai_build', 'Schema invalid, retrying with feedback: ' . $validationError, ['user_id' => $userId]);
+            try {
+                $retryPrompt = $schemaUserMsg
+                    . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
+                    . "\nReturn a corrected schema that fixes exactly this problem.";
+                $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $retryPrompt);
+                $schemaPlan['frontend'] = ['files' => []];
+                $schemaPlan = ai_sanitize_plan($schemaPlan);
+                $validationError = ai_validate_plan($schemaPlan);
+            } catch (\RuntimeException $e) {
+                $msg = $e->getMessage();
+                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+                abort(502, 'AI generation failed: ' . $msg);
+            }
+        }
+        if ($validationError) {
+            sb_log('ai_build', 'Schema validation failed after retry: ' . $validationError, ['plan_keys' => array_keys($schemaPlan)]);
             abort(422, 'AI returned an invalid schema: ' . $validationError);
         }
 
-        // Pass 2 — frontend with exact (post-sanitize) column names
+        // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
         sb_log('ai_build', 'Calling AI (pass 2: frontend)', ['user_id' => $userId]);
         $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
                      . ai_schema_to_context($schemaPlan);
         try {
-            $frontendResult = $gemini->generateJson(AI_BUILD_FRONTEND_PROMPT, $frontendMsg);
+            $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             sb_log('ai_build', 'AI error (pass 2): ' . $msg, ['user_id' => $userId]);
@@ -1199,6 +1558,43 @@ function register_ai_routes(\SupaBein\Router $router): void
         // ── 4-7. Execute build ────────────────────────────────────────────────
         $result = ai_execute_build($plan, $userId);
         json_out($result, 201);
+
+    }, ['auth_middleware']);
+
+    // ── AI Intent: return capped actors + user stories for review (builds nothing) ──
+    $router->post('/v1/ai/intent', function (array $req): void {
+        set_time_limit(120);
+
+        $config = \App::get('config');
+        $userId = (int)$req['auth']['user_id'];
+
+        $prompt = trim($req['body']['prompt'] ?? '');
+        if (!$prompt || strlen($prompt) > 2000) {
+            abort(422, 'prompt is required and must be under 2000 characters');
+        }
+
+        // Optional prior turns for multi-turn context (capped at 20)
+        $history = [];
+        foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
+            if (!is_array($turn)) continue;
+            $role = $turn['role'] ?? '';
+            $text = trim($turn['text'] ?? '');
+            if (!in_array($role, ['user', 'model'], true) || $text === '') continue;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+
+        $client = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        try {
+            $intent = ai_generate_intent($client, $prompt, $history);
+        } catch (\RuntimeException $e) {
+            $msg = $e->getMessage();
+            sb_log('ai_intent', 'AI error: ' . $msg, ['user_id' => $userId]);
+            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+            abort(502, 'AI generation failed: ' . $msg);
+        }
+
+        // Caller edits the returned intent, then POSTs it back to /v1/ai/build as body.intent
+        json_out(['mode' => 'intent', 'intent' => $intent, 'usage' => $client->getLastUsage()]);
 
     }, ['auth_middleware']);
 
@@ -1231,8 +1627,22 @@ function register_ai_routes(\SupaBein\Router $router): void
         $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
 
         $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $existingSchema   = ai_schema_from_db($projectId, $catalog);
+        $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
         try {
-            $delta = $gemini->generateJson(AI_EDIT_SYSTEM_PROMPT, $userMessage);
+            $delta = $gemini->generateJson($editSystemPrompt, $userMessage);
+
+            // Validate the delta; one self-correcting retry with the reason fed back.
+            $deltaError = ai_validate_delta($delta, $existingSchema);
+            if ($deltaError) {
+                sb_log('ai_edit', 'Delta invalid, retrying with feedback: ' . $deltaError, ['project_id' => $projectId]);
+                $retryMsg = $userMessage
+                    . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
+                    . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
+                $delta = $gemini->generateJson($editSystemPrompt, $retryMsg);
+                $deltaError = ai_validate_delta($delta, $existingSchema);
+                if ($deltaError) abort(422, 'AI returned an invalid edit: ' . $deltaError);
+            }
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
@@ -1380,13 +1790,23 @@ CHAT;
 
                 $validationError = ai_validate_plan($schemaPlan);
                 if ($validationError) {
-                    abort(422, 'AI returned an invalid schema: ' . $validationError);
+                    // One self-correcting retry with the rejection reason fed back.
+                    $retryPrompt = $prompt
+                        . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
+                        . "\nReturn a corrected schema that fixes exactly this problem.";
+                    $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+                    $schemaPlan['frontend'] = ['files' => []];
+                    $schemaPlan = ai_sanitize_plan($schemaPlan);
+                    $validationError = ai_validate_plan($schemaPlan);
+                    if ($validationError) {
+                        abort(422, 'AI returned an invalid schema: ' . $validationError);
+                    }
                 }
 
-                // Pass 2 — frontend with exact (post-sanitize) column names
+                // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
                 $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
                              . ai_schema_to_context($schemaPlan);
-                $frontendResult = $gemini->generateJson(AI_BUILD_FRONTEND_PROMPT, $frontendMsg);
+                $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
 
                 $plan = $schemaPlan;
                 $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
@@ -1407,10 +1827,23 @@ CHAT;
                 $project = $catalog->getProjectById($projectId, $userId);
                 if (!$project) abort(404, 'Project not found');
 
-                $schemaCtx    = ai_schema_to_context(ai_schema_from_db($projectId, $catalog));
+                $existingSchema = ai_schema_from_db($projectId, $catalog);
+                $schemaCtx    = ai_schema_to_context($existingSchema);
                 $currentFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
                 $userMessage  = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
-                $delta = $gemini->generateJsonWithHistory(AI_EDIT_SYSTEM_PROMPT, $history, $userMessage);
+                $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+                $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
+
+                // Validate the delta; one self-correcting retry with the reason fed back.
+                $deltaError = ai_validate_delta($delta, $existingSchema);
+                if ($deltaError) {
+                    $retryMsg = $userMessage
+                        . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
+                        . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
+                    $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg);
+                    $deltaError = ai_validate_delta($delta, $existingSchema);
+                    if ($deltaError) abort(422, 'AI returned an invalid edit: ' . $deltaError);
+                }
 
                 // Normalise file paths if the AI returned frontend files
                 if (!empty($delta['frontend']['files'])) {
@@ -1497,6 +1930,8 @@ PROMPT;
             if (!$projectId) abort(422, 'plan.project_id is required for edit mode');
             $project = $catalog->getProjectById($projectId, $userId);
             if (!$project) abort(404, 'Project not found');
+            $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
+            if ($deltaError) abort(422, 'Invalid edit plan: ' . $deltaError);
             $result = ai_execute_edit($plan, $projectId, $userId);
             if (!empty($plan['frontend']['files'])) {
                 $editConfig = \App::get('config');

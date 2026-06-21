@@ -805,6 +805,7 @@ const AiPanel = (() => {
   let panelEl = null;
   let backdropEl = null;
   let sidebarVisible = false;
+  let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
 
   const AI_MODELS = [
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -854,6 +855,7 @@ const AiPanel = (() => {
     edit:     ['Reading current schema…', 'Planning the changes…', 'Generating edits…', 'Almost done…'],
     diagnose: ['Analyzing the issue…', 'Checking schema & policies…', 'Preparing suggestions…', 'Almost done…'],
     chat:     ['Thinking…', 'Looking up your projects…', 'Formulating reply…'],
+    intent:   ['Analyzing your idea…', 'Identifying actors…', 'Distilling user stories…'],
     default:  ['Working on it…', 'Still going…', 'Almost done…'],
   };
 
@@ -1025,6 +1027,119 @@ const AiPanel = (() => {
     }
     sess.messages.forEach(msg => container.appendChild(renderMessage(msg)));
     container.scrollTop = container.scrollHeight;
+  }
+
+  function renderIntentCard(intent, onConfirm, onCancel) {
+    const actors  = [...(intent.actors  || [])];
+    const stories = [...(intent.stories || [])];
+
+    const actorsWrap  = el('div', { class: 'ai-intent-actors' });
+    const storiesWrap = el('div', { class: 'ai-intent-stories' });
+
+    function refreshActors() {
+      actorsWrap.innerHTML = '';
+      actors.forEach((a, i) => {
+        const chip = el('span', { class: 'ai-actor-chip' },
+          a,
+          el('button', { class: 'ai-chip-remove', title: 'Remove', onClick: () => { actors.splice(i, 1); refreshActors(); }}, '×')
+        );
+        actorsWrap.appendChild(chip);
+      });
+      const inp = el('input', { class: 'ai-intent-add-input', placeholder: '+ actor', type: 'text' });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const v = inp.value.trim();
+          if (v && !actors.includes(v)) { actors.push(v); refreshActors(); }
+        }
+      });
+      actorsWrap.appendChild(inp);
+    }
+
+    function refreshStories() {
+      storiesWrap.innerHTML = '';
+      stories.forEach((s, i) => {
+        storiesWrap.appendChild(el('div', { class: 'ai-story-item' },
+          el('button', { class: 'ai-story-remove', title: 'Remove', onClick: () => { stories.splice(i, 1); refreshStories(); }}, '−'),
+          el('span', { class: 'ai-story-text' }, s)
+        ));
+      });
+      const addRow = el('div', { class: 'ai-story-add-row' });
+      const inp = el('input', { class: 'ai-intent-add-input', placeholder: '+ add a story…', type: 'text' });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const v = inp.value.trim();
+          if (v) { stories.push(v); refreshStories(); }
+        }
+      });
+      addRow.appendChild(inp);
+      storiesWrap.appendChild(addRow);
+    }
+
+    refreshActors();
+    refreshStories();
+
+    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' },
+      el('div', { class: 'ai-intent-header' }, 'Intent — review before building'),
+      el('div', { class: 'ai-intent-section-label' }, 'Actors'),
+      actorsWrap,
+      el('div', { class: 'ai-intent-divider' }),
+      el('div', { class: 'ai-intent-section-label' }, 'User Stories'),
+      storiesWrap,
+      el('div', { class: 'ai-intent-actions' },
+        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
+        el('button', { class: 'btn btn-ai btn-sm', onClick: () => onConfirm({ actors, stories }) }, 'Build with this →')
+      )
+    );
+  }
+
+  function showIntentReviewCard(intent, body) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-intent-card');
+    if (existing) existing.remove();
+
+    const card = renderIntentCard(
+      intent,
+      async (confirmedIntent) => {
+        card.remove();
+        body.intent = confirmedIntent;
+        await proceedWithPlan(body);
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function proceedWithPlan(body) {
+    const sess = currentSession();
+    const stageMode = body.project_id ? 'edit' : 'build';
+    const thinkingId = 'thinking_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+    renderMessages();
+
+    try {
+      const response = await callWithFallback('/v1/ai/plan', body);
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await handlePlanResponse(response);
+    } catch(e) {
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+    }
+    renderSidebar();
+    renderMessages();
+  }
+
+  async function handlePlanResponse(response) {
+    if (response.mode === 'chat') {
+      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
+    } else if (response.mode === 'diagnose') {
+      await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
+    } else {
+      await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
+    }
   }
 
   function renderMessage(msg) {
@@ -1302,48 +1417,62 @@ const AiPanel = (() => {
     renderSidebar();
     renderMessages();
 
-    const thinkingId = 'thinking_' + Date.now();
     const sess = currentSession();
+
+    // Build conversation history for Gemini context
+    const body = { prompt };
+    if (selectedProjectId) body.project_id = selectedProjectId;
+    const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
+    if (priorMessages.length > 0) {
+      body.history = priorMessages.slice(-20).map(m => {
+        if (m.role === 'user') return { role: 'user', text: m.content };
+        if (m.type === 'plan') {
+          const s = m.data?.summary || {};
+          return { role: 'model', text: 'I proposed a plan. Summary: ' + JSON.stringify(s) };
+        }
+        if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
+        if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
+        if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
+        return { role: 'model', text: m.content || '' };
+      }).filter(h => h.text.trim() !== '');
+    }
+
+    // ── Intent review pass (only for new builds, not edits) ──────────────────
+    if (reviewEnabled && !selectedProjectId) {
+      const thinkingId = 'intent_thinking_' + Date.now();
+      if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'intent' });
+      renderMessages();
+      try {
+        const intentResp = await callWithFallback('/v1/ai/intent', { prompt });
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        renderMessages();
+        showIntentReviewCard(intentResp.intent, body);
+      } catch(e) {
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request.` });
+        renderSidebar();
+        renderMessages();
+      }
+      return;
+    }
+
+    // ── Regular plan flow ─────────────────────────────────────────────────────
     const stageMode = selectedProjectId ? 'edit' : 'build';
+    const thinkingId = 'thinking_' + Date.now();
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
     renderMessages();
 
     try {
-      const body = { prompt };
-      if (selectedProjectId) body.project_id = selectedProjectId;
-
-      // Build conversation history for Gemini context (exclude current message and thinking placeholders)
-      const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking' && m.id !== thinkingId);
-      if (priorMessages.length > 0) {
-        body.history = priorMessages.slice(-20).map(m => {
-          if (m.role === 'user') return { role: 'user', text: m.content };
-          if (m.type === 'plan') {
-            const s = m.data?.summary || {};
-            return { role: 'model', text: 'I proposed a plan. Summary: ' + JSON.stringify(s) };
-          }
-          if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
-          if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
-          if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
-          return { role: 'model', text: m.content || '' };
-        }).filter(h => h.text.trim() !== '');
-      }
-
       const response = await callWithFallback('/v1/ai/plan', body);
-
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-
-      if (response.mode === 'chat') {
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
-      } else if (response.mode === 'diagnose') {
-        await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
-      } else {
-        await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
-      }
+      await handlePlanResponse(response);
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
     }
 
     renderSidebar();
@@ -1430,11 +1559,22 @@ const AiPanel = (() => {
     const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '↑');
     sendBtn.disabled = true;
 
+    const reviewToggle = el('button', {
+      class: 'ai-review-toggle' + (reviewEnabled ? ' active' : ''),
+      title: 'Review intent before building',
+      onClick: () => {
+        reviewEnabled = !reviewEnabled;
+        localStorage.setItem('sb:ai_review', reviewEnabled ? '1' : '0');
+        reviewToggle.classList.toggle('active', reviewEnabled);
+      }
+    }, 'Review');
+
     const inputBar = el('div', { class: 'ai-input-bar' },
       el('div', { class: 'ai-input-card' },
         textarea,
         el('div', { class: 'ai-input-actions' },
           projectPicker,
+          reviewToggle,
           sendBtn
         )
       )
