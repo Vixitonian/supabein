@@ -1407,7 +1407,7 @@ function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $
 
 // ─── AI provider factory ─────────────────────────────────────────────────────
 
-const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter'];
+const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter', 'nvidia'];
 const AI_ALLOWED_MODELS = [
     'gemini' => [
         'gemini-2.5-flash',
@@ -1418,18 +1418,20 @@ const AI_ALLOWED_MODELS = [
         'openai/gpt-4o',
         'anthropic/claude-sonnet-4-5',
         'mistralai/mistral-small-3.2-24b-instruct',
-        'qwen/qwen3-coder:free',
-        'meta-llama/llama-3.3-70b-instruct:free',
+        'moonshotai/kimi-k2',
         'google/gemma-4-31b-it:free',
         'google/gemma-4-26b-a4b-it:free',
         'openai/gpt-oss-120b:free',
         'openai/gpt-oss-20b:free',
-        'nvidia/nemotron-3-ultra-550b-a55b:free',
+        'nvidia/nemotron-3-super-120b-a12b:free',
         'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
         'openrouter/owl-alpha',
         'nex-agi/nex-n2-pro:free',
-        'poolside/laguna-m.1:free',
         'poolside/laguna-xs.2:free',
+    ],
+    'nvidia' => [
+        'qwen/qwen3.5-122b-a10b',
+        'moonshotai/kimi-k2.6',
     ],
 ];
 
@@ -1445,6 +1447,14 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
         $allowed = AI_ALLOWED_MODELS['openrouter'];
         $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
         return new \SupaBein\OpenRouterClient($key, $model);
+    }
+
+    if ($provider === 'nvidia') {
+        $key = $config['NVIDIA_API_KEY'] ?? '';
+        if (!$key) abort(503, 'NVIDIA API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['nvidia'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\NvidiaClient($key, $model);
     }
 
     // Default: Gemini

@@ -34,11 +34,16 @@ class ComposerStaticInit753c8cb8ffabbbb7204c5332f18fd258
         'SupaBein\\Catalog' => __DIR__ . '/../..' . '/app/catalog/catalog.php',
         'SupaBein\\Crud' => __DIR__ . '/../..' . '/app/core/crud.php',
         'SupaBein\\Deploy' => __DIR__ . '/../..' . '/app/core/deploy.php',
+        'SupaBein\\GeminiClient' => __DIR__ . '/../..' . '/app/core/gemini_client.php',
+        'SupaBein\\NvidiaClient' => __DIR__ . '/../..' . '/app/core/nvidia_client.php',
+        'SupaBein\\OpenRouterClient' => __DIR__ . '/../..' . '/app/core/openrouter_client.php',
         'SupaBein\\Policy' => __DIR__ . '/../..' . '/app/core/policy.php',
         'SupaBein\\PolicyResult' => __DIR__ . '/../..' . '/app/core/policy.php',
         'SupaBein\\QueryBuilder' => __DIR__ . '/../..' . '/app/core/query_builder.php',
+        'SupaBein\\RateLimit' => __DIR__ . '/../..' . '/app/core/rate_limit.php',
         'SupaBein\\Router' => __DIR__ . '/../..' . '/app/router.php',
         'SupaBein\\Schema' => __DIR__ . '/../..' . '/app/core/schema.php',
+        'SupaBein\\Storage' => __DIR__ . '/../..' . '/app/core/storage.php',
     );
 
     public static function getInitializer(ClassLoader $loader)
