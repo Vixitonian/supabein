@@ -47,9 +47,10 @@ class NvidiaClient
         $body    = [
             'model'      => $this->model,
             'messages'   => $messages,
-            'max_tokens' => 16384,
+            'max_tokens' => 8192,
+            'stream'     => false,
         ];
-        $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
         $ch = curl_init(self::ENDPOINT);
         curl_setopt_array($ch, [
@@ -75,8 +76,10 @@ class NvidiaClient
         }
 
         if ($httpCode !== 200) {
-            $body = json_decode($response, true);
-            $msg  = $body['error']['message'] ?? ('HTTP ' . $httpCode);
+            $errBody = json_decode($response, true);
+            $msg = $errBody['error']['message']
+                ?? $errBody['message']
+                ?? ('HTTP ' . $httpCode . ': ' . substr($response, 0, 300));
             throw new \RuntimeException('NVIDIA error: ' . $msg);
         }
 

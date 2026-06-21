@@ -1661,66 +1661,48 @@ const AiPanel = (() => {
       }).filter(h => h.text.trim() !== '');
     }
 
-    // ── Intent review pass (only for new builds, not edits) ──────────────────
-    if (reviewEnabled && !selectedProjectId) {
-      const thinkingId = 'intent_thinking_' + Date.now();
-      if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'intent' });
-      renderMessages();
-      try {
-        const intentResp = await callWithFallback('/v1/ai/intent', { prompt });
-        stopThinkingStages?.();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        renderMessages();
-        showIntentReviewCard(intentResp.intent, body);
-      } catch(e) {
-        stopThinkingStages?.();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request.` });
-        renderSidebar();
-        renderMessages();
-      }
+    // ── Chat detection: don't pipeline casual messages ───────────────────────
+    const isChat = /^(hi|hello|hey|yo|sup|howdy|hiya|thanks|thank\s+you|ok|okay|sure|cool|great|nice|perfect|lol|haha)[\s!.,?]*$/i.test(prompt)
+      || prompt.endsWith('?')
+      || (prompt.length < 30 && !/\b(app|application|website|site|build|create|make|blog|store|shop|todo|task|system|tool|dashboard|tracker|manager|platform|api|database)\b/i.test(prompt));
+
+    if (isChat) {
+      await proceedWithPlan(body);
       return;
     }
 
-    // ── Edit suggest/review pass (review on + project selected = editing) ─────
-    if (reviewEnabled && selectedProjectId) {
-      const thinkingId = 'suggest_thinking_' + Date.now();
-      if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'edit' });
-      renderMessages();
-      try {
-        const { provider: sProvider, model: sModel } = getSelectedModel();
-        const suggestResp = await callWithFallback('/v1/ai/plan', {
-          ...body, mode: 'suggest', provider: sProvider, model: sModel
-        });
-        stopThinkingStages?.();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        renderMessages();
-        showEditReviewCard(suggestResp.suggestions || [], body);
-      } catch(e) {
-        stopThinkingStages?.();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request.` });
-        renderSidebar();
-        renderMessages();
-      }
-      return;
-    }
-
-    // ── Regular plan flow ─────────────────────────────────────────────────────
+    // ── Start pipeline job immediately ────────────────────────────────────────
     const stageMode = selectedProjectId ? 'edit' : 'build';
-    const thinkingId = 'thinking_' + Date.now();
+    const { provider: pProvider, model: pModel } = getSelectedModel();
+    const thinkingId = 'pipeline_' + Date.now();
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
     renderMessages();
 
     try {
-      const response = await callWithFallback('/v1/ai/plan', body);
+      const result = await Api.post('/v1/ai/apply', {
+        mode: 'pipeline',
+        prompt,
+        project_id: selectedProjectId || undefined,
+        review: reviewEnabled,
+        history: body.history || [],
+        provider: pProvider,
+        model: pModel,
+        async: true,
+      });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await handlePlanResponse(response);
+
+      if (result.job_id) {
+        activeJobId = result.job_id;
+        const jobMsgId = 'job_' + result.job_id;
+        await addMessage(currentSessionId, { id: jobMsgId, role: 'ai', type: 'job', content: '' });
+        showJobIndicator();
+        startJobPolling(result.job_id, stageMode, jobMsgId);
+      }
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
     }
 
     renderSidebar();
@@ -1820,7 +1802,19 @@ const AiPanel = (() => {
       }
       try {
         const job = await Api.get('/v1/ai/jobs/' + jobId);
-        if (job.status === 'done') {
+        if (job.status === 'waiting_input') {
+          stopJobPolling();
+          hideJobIndicator();
+          const sess = currentSession();
+          if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
+          renderMessages();
+          const waitMode = job.result?.wait_mode;
+          if (waitMode === 'intent_review') {
+            showIntentReviewFromJob(jobId, job.result.intent, mode);
+          } else if (waitMode === 'edit_review') {
+            showEditReviewFromJob(jobId, job.result.suggestions, mode);
+          }
+        } else if (job.status === 'done') {
           stopJobPolling();
           hideJobIndicator();
           await handleJobDone(job, mode, jobMsgId);
@@ -1833,6 +1827,63 @@ const AiPanel = (() => {
     }, 3000);
   }
 
+  async function resumeJob(jobId, response, mode) {
+    try {
+      await Api.post('/v1/ai/jobs/' + jobId + '/resume', { response });
+      const jobMsgId = 'job_resume_' + jobId;
+      const sess = currentSession();
+      if (sess) {
+        sess.messages.push({ id: jobMsgId, role: 'ai', type: 'job', content: '' });
+      }
+      showJobIndicator();
+      startJobPolling(jobId, mode, jobMsgId);
+      renderMessages();
+    } catch(e) {
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Failed to resume job: ${e.message}` });
+      renderMessages();
+    }
+  }
+
+  function showIntentReviewFromJob(jobId, intent, mode) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-intent-card');
+    if (existing) existing.remove();
+    const card = renderIntentCard(
+      intent,
+      async (confirmedIntent) => {
+        card.remove();
+        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
+        renderMessages();
+        await resumeJob(jobId, { intent: confirmedIntent }, mode);
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    renderMessages();
+  }
+
+  function showEditReviewFromJob(jobId, suggestions, mode) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-edit-review-card');
+    if (existing) existing.remove();
+    const card = renderEditReviewCard(
+      suggestions,
+      async (selected) => {
+        card.remove();
+        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: { confirmed: selected } });
+        renderMessages();
+        await resumeJob(jobId, { suggestions: selected }, mode);
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    renderMessages();
+  }
+
   function stopJobPolling() {
     if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
   }
@@ -1841,8 +1892,9 @@ const AiPanel = (() => {
     const sess = currentSession();
     if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
     const result = job.result || {};
+    const summaryMode = (mode === 'pipeline_edit' || mode === 'edit') ? 'edit' : 'build';
     await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
-    await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+    await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, summaryMode) });
     renderMessages();
     renderSidebar();
     activeJobId = null;
@@ -1878,9 +1930,18 @@ const AiPanel = (() => {
       const jobs = await Api.get('/v1/ai/jobs');
       if (Array.isArray(jobs) && jobs.length > 0) {
         const job = jobs[0];
+        const summaryMode = (job.mode === 'pipeline_edit' || job.mode === 'edit') ? 'edit' : 'build';
         activeJobId = job.id;
-        showJobIndicator();
-        startJobPolling(job.id, job.mode, null);
+        if (job.status === 'waiting_input') {
+          // Resume a review that was interrupted mid-session
+          const fullJob = await Api.get('/v1/ai/jobs/' + job.id);
+          const waitMode = fullJob.result?.wait_mode;
+          if (waitMode === 'intent_review') showIntentReviewFromJob(job.id, fullJob.result.intent, summaryMode);
+          else if (waitMode === 'edit_review') showEditReviewFromJob(job.id, fullJob.result.suggestions, summaryMode);
+        } else {
+          showJobIndicator();
+          startJobPolling(job.id, summaryMode, null);
+        }
       }
     } catch(e) { /* ignore */ }
   }

@@ -1471,6 +1471,140 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
     return new \SupaBein\GeminiClient($key, $model);
 }
 
+// ─── Pipeline plan-generation helpers (used by background worker) ────────────
+
+function ai_generate_build_plan(object $client, string $prompt, ?array $approvedIntent, array $history): array
+{
+    $schemaUserMsg = $approvedIntent
+        ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
+        : $prompt;
+
+    $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
+    $schemaPlan['frontend'] = ['files' => []];
+    $schemaPlan = ai_sanitize_plan($schemaPlan);
+
+    $validationError = ai_validate_plan($schemaPlan);
+    if ($validationError) {
+        $retryPrompt = $schemaUserMsg
+            . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
+            . "\nReturn a corrected schema that fixes exactly this problem.";
+        $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+        $schemaPlan['frontend'] = ['files' => []];
+        $schemaPlan = ai_sanitize_plan($schemaPlan);
+        if (ai_validate_plan($schemaPlan) !== null) {
+            throw new \RuntimeException('AI returned an invalid schema after retry: ' . ai_validate_plan($schemaPlan));
+        }
+    }
+
+    $frontendMsg    = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                    . ai_schema_to_context($schemaPlan);
+    $frontendResult = $client->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
+
+    $plan = $schemaPlan;
+    $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+    foreach ($plan['frontend']['files'] as &$file) {
+        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+    }
+    unset($file);
+    return $plan;
+}
+
+function ai_generate_edit_plan(object $client, int $projectId, int $userId, string $prompt, array $history, \SupaBein\Catalog $catalog, array $config): array
+{
+    $project = $catalog->getProjectById($projectId, $userId);
+    if (!$project) throw new \RuntimeException('Project not found');
+
+    $existingSchema   = ai_schema_from_db($projectId, $catalog);
+    $schemaCtx        = ai_schema_to_context($existingSchema);
+    $currentFiles     = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+    $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
+    $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+
+    $delta      = $client->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
+    $deltaError = ai_validate_delta($delta, $existingSchema);
+    if ($deltaError) {
+        $delta      = $client->generateJsonWithHistory($editSystemPrompt, $history,
+            $userMessage . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
+            . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.");
+        $deltaError = ai_validate_delta($delta, $existingSchema);
+        if ($deltaError) throw new \RuntimeException('AI returned an invalid edit: ' . $deltaError);
+    }
+
+    if (!empty($delta['frontend']['files'])) {
+        foreach ($delta['frontend']['files'] as &$file) {
+            $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+        }
+        unset($file);
+
+        // Column audit pass
+        $allCols  = [];
+        foreach ($existingSchema['tables'] as $tbl) {
+            foreach ($tbl['columns'] as $col) {
+                $allCols[] = '"' . $col['name'] . '" (table "' . $tbl['name'] . '")';
+            }
+            $allCols[] = '"id" (auto, table "' . $tbl['name'] . '")';
+            $allCols[] = '"created_at" (auto, table "' . $tbl['name'] . '")';
+        }
+        try {
+            $audited = $client->generateJson(
+                "You are a code reviewer fixing frontend JS column name mismatches. Return only {\"files\":[...]} with corrected file contents.",
+                "EXACT column names: " . implode(', ', $allCols)
+                . "\n\nFrontend files:\n" . json_encode(['files' => $delta['frontend']['files']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+                . "\n\nCheck every data property access and replace any hallucinated column names with the correct ones. Return ONLY: {\"files\": [{\"path\": string, \"content\": string}]}"
+            );
+            if (!empty($audited['files']) && is_array($audited['files'])) {
+                foreach ($audited['files'] as &$aFile) {
+                    $aFile['path'] = ltrim(preg_replace('#^\./+#', '', $aFile['path'] ?? ''), '/');
+                }
+                unset($aFile);
+                $delta['frontend']['files'] = $audited['files'];
+            }
+        } catch (\RuntimeException $e) {
+            sb_log('ai_pipeline', 'Column audit skipped: ' . $e->getMessage());
+        }
+    }
+
+    return array_merge($delta, ['project_id' => $projectId]);
+}
+
+function ai_generate_edit_suggestions(object $client, int $projectId, int $userId, string $prompt, \SupaBein\Catalog $catalog, array $config): array
+{
+    $project = $catalog->getProjectById($projectId, $userId);
+    if (!$project) throw new \RuntimeException('Project not found');
+
+    $existingSchema = ai_schema_from_db($projectId, $catalog);
+    $schemaCtx      = ai_schema_to_context($existingSchema);
+    $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+    $suggestContext = "Project: " . $project['name']
+        . "\n\nExact schema:\n" . $schemaCtx
+        . $currentFiles
+        . "\n\nUser request: " . $prompt;
+
+    $result = $client->generateJson(<<<'PROMPT'
+You are a SupaBein full-stack AI assistant reviewing an edit request.
+Analyze the project schema, frontend files, and user request.
+Return a list of specific, concrete changes that should be made.
+
+Return ONLY valid JSON:
+{
+  "suggestions": [
+    {
+      "id": "s1",
+      "label": "Short action title (max 60 chars)",
+      "description": "What exactly will change and why (1-2 sentences)"
+    }
+  ]
+}
+
+Rules:
+- 2-8 suggestions maximum
+- Each suggestion must reference actual column names from the schema
+- Be specific: "Add price column display to product cards" not "Update frontend"
+PROMPT, $suggestContext);
+
+    return $result['suggestions'] ?? [];
+}
+
 // ─── Route registration ──────────────────────────────────────────────────────
 
 function register_ai_routes(\SupaBein\Router $router): void
@@ -2150,10 +2284,71 @@ PROMPT;
             }
             json_out($result);
 
+        } elseif ($mode === 'pipeline') {
+            $prompt    = trim($req['body']['prompt'] ?? '');
+            $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
+            $review    = !empty($req['body']['review']);
+            $history   = array_slice((array)($req['body']['history'] ?? []), 0, 20);
+            $provider  = $req['body']['provider'] ?? null;
+            $model     = $req['body']['model']    ?? null;
+
+            if (!$prompt) abort(422, 'prompt is required for pipeline mode');
+
+            if ($async) {
+                $jobMode = $projectId ? 'pipeline_edit' : 'pipeline_build';
+                $job     = $catalog->createJob($userId, $jobMode, [
+                    'prompt'     => $prompt,
+                    'project_id' => $projectId,
+                    'review'     => $review,
+                    'history'    => $history,
+                    'provider'   => $provider,
+                    'model'      => $model,
+                ]);
+                $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
+                $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
+                         . ' ' . (int)$job['id']
+                         . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
+                exec($cmd);
+                json_out(['job_id' => $job['id'], 'status' => 'queued'], 202);
+                return;
+            }
+            abort(503, 'Pipeline mode requires background execution (exec() unavailable)');
+
         } else {
-            abort(422, 'mode must be build or edit');
+            abort(422, 'mode must be build, edit, or pipeline');
         }
 
+    }, ['auth_middleware']);
+
+    // ── Resume a waiting job ───────────────────────────────────────────────────
+    $router->post('/v1/ai/jobs/:id/resume', function (array $req): void {
+        $userId  = (int)$req['auth']['user_id'];
+        $jobId   = (int)$req['params']['id'];
+        $catalog = \SupaBein\Catalog::getInstance();
+        $db      = \App::get('db');
+
+        $job = $catalog->getJobById($jobId, $userId);
+        if (!$job || $job['status'] !== 'waiting_input') {
+            abort(404, 'Job not found or not awaiting input');
+        }
+
+        $payloadStmt = $db->prepare('SELECT payload FROM ai_jobs WHERE id=?');
+        $payloadStmt->execute([$jobId]);
+        $payload = json_decode($payloadStmt->fetchColumn(), true) ?: [];
+
+        $payload['user_response'] = $req['body']['response'] ?? null;
+
+        $db->prepare("UPDATE ai_jobs SET status='queued', result=NULL, payload=? WHERE id=?")
+           ->execute([json_encode($payload, JSON_UNESCAPED_UNICODE), $jobId]);
+
+        if (can_exec()) {
+            $logFile = SUPABEIN_ROOT . '/storage/worker_' . $jobId . '.log';
+            $cmd = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
+                 . ' ' . $jobId . ' >> ' . escapeshellarg($logFile) . ' 2>&1 &';
+            exec($cmd);
+        }
+
+        json_out(['ok' => true, 'job_id' => $jobId]);
     }, ['auth_middleware']);
 
     // ── AI Sessions (DB-backed) ────────────────────────────────────────────────

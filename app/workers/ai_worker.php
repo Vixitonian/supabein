@@ -49,6 +49,7 @@ register_shutdown_function(function () use ($db, $jobId) {
 try {
     if ($mode === 'build') {
         $result = ai_execute_build($payload['plan'], $userId);
+
     } elseif ($mode === 'edit') {
         $result = ai_execute_edit($payload['delta'], $payload['project_id'], $userId);
         if (!empty($payload['frontend_files'])) {
@@ -64,6 +65,74 @@ try {
                 }
             }
         }
+
+    } elseif ($mode === 'pipeline_build') {
+        $prompt       = $payload['prompt']      ?? '';
+        $review       = (bool)($payload['review']   ?? false);
+        $history      = $payload['history']     ?? [];
+        $provider     = $payload['provider']    ?? null;
+        $model        = $payload['model']       ?? null;
+        $userResponse = $payload['user_response'] ?? null;
+        $approvedIntent = $userResponse['intent'] ?? null;
+
+        $config = \App::get('config');
+        $client = make_ai_client($config, $provider, $model);
+
+        // Phase 1: intent generation (only if review mode and no approved intent yet)
+        if ($review && $approvedIntent === null) {
+            $intent = ai_generate_intent($client, $prompt, $history);
+            $db->prepare("UPDATE ai_jobs SET status='waiting_input', result=? WHERE id=?")
+               ->execute([json_encode(['wait_mode' => 'intent_review', 'intent' => $intent], JSON_UNESCAPED_UNICODE), $jobId]);
+            exit(0);
+        }
+
+        // Phase 2: full plan generation + execution
+        $plan   = ai_generate_build_plan($client, $prompt, $approvedIntent, $history);
+        $result = ai_execute_build($plan, $userId);
+
+    } elseif ($mode === 'pipeline_edit') {
+        $prompt      = $payload['prompt']      ?? '';
+        $projectId   = (int)($payload['project_id'] ?? 0);
+        $review      = (bool)($payload['review']    ?? false);
+        $history     = $payload['history']     ?? [];
+        $provider    = $payload['provider']    ?? null;
+        $model       = $payload['model']       ?? null;
+        $userResponse = $payload['user_response'] ?? null;
+        $approvedSuggestions = $userResponse['suggestions'] ?? null;
+
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $client  = make_ai_client($config, $provider, $model);
+
+        // Phase 1: edit suggestions (only if review mode and no approved suggestions yet)
+        if ($review && $approvedSuggestions === null) {
+            $suggestions = ai_generate_edit_suggestions($client, $projectId, $userId, $prompt, $catalog, $config);
+            $db->prepare("UPDATE ai_jobs SET status='waiting_input', result=? WHERE id=?")
+               ->execute([json_encode(['wait_mode' => 'edit_review', 'suggestions' => $suggestions], JSON_UNESCAPED_UNICODE), $jobId]);
+            exit(0);
+        }
+
+        // Phase 2: generate delta and execute
+        $refinedPrompt = $approvedSuggestions
+            ? $prompt . "\n\nApply ONLY these specific changes:\n"
+              . implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . ($s['label'] ?? ''), $approvedSuggestions, array_keys($approvedSuggestions)))
+            : $prompt;
+
+        $delta  = ai_generate_edit_plan($client, $projectId, $userId, $refinedPrompt, $history, $catalog, $config);
+        $result = ai_execute_edit($delta, $projectId, $userId);
+
+        if (!empty($delta['frontend']['files'])) {
+            $project = $catalog->getProjectByIdInternal($projectId);
+            $sites   = $catalog->listSites($projectId);
+            if ($sites && $project) {
+                $deployResult = ai_deploy_files($config, $catalog, (int)$sites[0]['id'],
+                                                $project, $delta['frontend']['files'], true);
+                if (!empty($deployResult['deploy'])) {
+                    $result['deploy'] = $deployResult['deploy'];
+                }
+            }
+        }
+
     } else {
         throw new \RuntimeException('Unknown job mode: ' . $mode);
     }

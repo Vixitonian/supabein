@@ -475,7 +475,7 @@ class Catalog
     {
         $stmt = $this->pdo->prepare(
             "SELECT id, user_id, mode, status, created_at, updated_at
-             FROM ai_jobs WHERE user_id = ? AND status IN ('queued','running')
+             FROM ai_jobs WHERE user_id = ? AND status IN ('queued','running','waiting_input')
              ORDER BY created_at DESC"
         );
         $stmt->execute([$userId]);
