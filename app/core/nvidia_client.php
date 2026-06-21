@@ -63,7 +63,7 @@ class NvidiaClient
                 'Authorization: Bearer ' . $this->apiKey,
                 'Accept: application/json',
             ],
-            CURLOPT_TIMEOUT        => 180,
+            CURLOPT_TIMEOUT        => 420,
             CURLOPT_CONNECTTIMEOUT => 10,
         ]);
 

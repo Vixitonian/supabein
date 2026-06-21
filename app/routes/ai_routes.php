@@ -1470,7 +1470,7 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
 function register_ai_routes(\SupaBein\Router $router): void
 {
     $router->post('/v1/ai/build', function (array $req): void {
-        set_time_limit(240);
+        set_time_limit(420);
 
         $config  = \App::get('config');
         $userId  = (int)$req['auth']['user_id'];
@@ -1578,7 +1578,7 @@ function register_ai_routes(\SupaBein\Router $router): void
 
     // ── AI Intent: return capped actors + user stories for review (builds nothing) ──
     $router->post('/v1/ai/intent', function (array $req): void {
-        set_time_limit(120);
+        set_time_limit(420);
 
         $config = \App::get('config');
         $userId = (int)$req['auth']['user_id'];
@@ -1615,7 +1615,7 @@ function register_ai_routes(\SupaBein\Router $router): void
 
     // ── AI Edit: modify an existing project ────────────────────────────────────
     $router->post('/v1/ai/edit', function (array $req): void {
-        set_time_limit(240);
+        set_time_limit(420);
 
         $config  = \App::get('config');
         $catalog = \SupaBein\Catalog::getInstance();
@@ -1671,7 +1671,7 @@ function register_ai_routes(\SupaBein\Router $router): void
 
     // ── AI Plan: generate a plan without executing ─────────────────────────────
     $router->post('/v1/ai/plan', function (array $req): void {
-        set_time_limit(240);
+        set_time_limit(420);
 
         $config  = \App::get('config');
         $catalog = \SupaBein\Catalog::getInstance();
@@ -2076,7 +2076,7 @@ PROMPT;
 
     // ── AI Apply: execute a previously generated plan ──────────────────────────
     $router->post('/v1/ai/apply', function (array $req): void {
-        set_time_limit(240);
+        set_time_limit(420);
 
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
