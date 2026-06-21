@@ -1148,7 +1148,9 @@ function ai_execute_build(array $plan, int $userId): array
             $table = $catalog->createTable($projectId, $tableName);
         } catch (\PDOException $e) {
             $catalog->deleteProject($projectId, $userId);
-            abort(500, "Table creation failed for \"$tableName\": " . $e->getMessage());
+            abort(500, "Table creation failed for \"$tableName\": " . $e->getMessage(), [
+                'partial' => array_merge($partial, ['failed_at' => $tableName]),
+            ]);
         }
 
         try {
@@ -1157,7 +1159,9 @@ function ai_execute_build(array $plan, int $userId): array
         } catch (\Throwable $e) {
             $catalog->deleteTable($projectId, $tableName);
             $catalog->deleteProject($projectId, $userId);
-            abort(500, "DDL failed for table \"$tableName\": " . $e->getMessage());
+            abort(500, "DDL failed for table \"$tableName\": " . $e->getMessage(), [
+                'partial' => array_merge($partial, ['failed_at' => $tableName]),
+            ]);
         }
 
         foreach ($columns as $col) {
@@ -1662,6 +1666,68 @@ function register_ai_routes(\SupaBein\Router $router): void
         $config  = \App::get('config');
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
+
+        // ── Recovery mode: fast-path before normal plan flow ──────────────────
+        if (($req['body']['mode'] ?? '') === 'recover') {
+            $error    = trim($req['body']['error']   ?? '');
+            $origPlan = $req['body']['plan']          ?? [];
+            $partial  = $req['body']['partial']       ?? [];
+
+            if (!$error || !is_array($origPlan) || empty($origPlan)) {
+                abort(422, 'error and plan are required for recover mode');
+            }
+
+            $gemini          = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+            $tablesCompleted = array_column($partial['tables'] ?? [], 'name');
+            $failedAt        = $partial['failed_at'] ?? 'unknown';
+            $planJson        = json_encode($origPlan, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+            $context         = "Original build plan:\n{$planJson}"
+                             . "\n\nBuild error: {$error}"
+                             . "\n\nState before rollback (project was fully rolled back, nothing persists):"
+                             . "\n  Project name: " . ($partial['project']['name'] ?? 'not created')
+                             . "\n  Tables completed before error: " . (implode(', ', $tablesCompleted) ?: 'none')
+                             . "\n  Failed at table: {$failedAt}";
+
+            $recoverPrompt = <<<'PROMPT'
+You are a SupaBein AI error recovery assistant. A database build failed. Analyze the error and propose 2–4 concrete, immediately applicable fixes.
+
+Return ONLY valid JSON:
+{
+  "diagnosis": "One or two sentences explaining the root cause in plain language",
+  "options": [
+    {
+      "id": "opt_1",
+      "label": "Short label (5 words max)",
+      "description": "One sentence: exactly what this option changes",
+      "plan": { ...complete corrected build plan... }
+    }
+  ]
+}
+
+Rules:
+- Each plan must be COMPLETE: project_name, subdomain, tables (with all columns+policies), frontend — same as the original
+- Include ALL original tables in every plan; the project was rolled back so everything must be rebuilt from scratch
+- Only change what is necessary to fix the error; everything else stays identical
+- Common fixes for "Unsafe default value": (1) set default to null, (2) use a safe string literal like "pending", (3) remove the column if non-essential
+- Common fixes for "already exists" or 409: change project_name/subdomain
+- Do NOT propose vague options like "review manually" — every option must be auto-applicable
+PROMPT;
+
+            try {
+                $result = $gemini->generateJson($recoverPrompt, $context);
+            } catch (\RuntimeException $e) {
+                $msg = $e->getMessage();
+                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+                abort(502, 'AI recovery failed: ' . $msg);
+            }
+
+            json_out([
+                'mode'      => 'recover',
+                'diagnosis' => $result['diagnosis'] ?? 'An error occurred during the build.',
+                'options'   => $result['options']   ?? [],
+                'usage'     => $gemini->getLastUsage(),
+            ]);
+        }
 
         $prompt    = trim($req['body']['prompt'] ?? '');
         $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;

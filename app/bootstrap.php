@@ -48,7 +48,7 @@ App::set('config', $config);
 App::set('db', $pdo);
 
 // Helpers available globally
-function abort(int $status, string $message = ''): never
+function abort(int $status, string $message = '', array $data = []): never
 {
     http_response_code($status);
     $default = [
@@ -61,7 +61,8 @@ function abort(int $status, string $message = ''): never
         422 => 'Unprocessable entity',
         500 => 'Internal server error',
     ];
-    echo json_encode(['error' => $message ?: ($default[$status] ?? 'Error')]);
+    $body = array_merge(['error' => $message ?: ($default[$status] ?? 'Error')], $data);
+    echo json_encode($body);
     exit;
 }
 

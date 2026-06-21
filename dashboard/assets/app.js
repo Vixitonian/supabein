@@ -59,7 +59,7 @@ const Api = (() => {
     const json = await res.json().catch(() => ({}));
 
     if (!res.ok) {
-      const err = new ApiError(json.error || 'Request failed', res.status);
+      const err = new ApiError(json.error || 'Request failed', res.status, json);
       console.error('[SupaBein] API error', { method, path, status: res.status, message: err.message });
       throw err;
     }
@@ -68,9 +68,10 @@ const Api = (() => {
   }
 
   class ApiError extends Error {
-    constructor(msg, status) {
+    constructor(msg, status, data = {}) {
       super(msg);
       this.status = status;
+      this.data = data;
     }
   }
 
@@ -1102,6 +1103,7 @@ const AiPanel = (() => {
       intent,
       async (confirmedIntent) => {
         card.remove();
+        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
         body.intent = confirmedIntent;
         await proceedWithPlan(body);
       },
@@ -1142,6 +1144,60 @@ const AiPanel = (() => {
     }
   }
 
+  function renderIntentSummaryCard(msg) {
+    const intent = msg.data || {};
+    const actors = intent.actors || [];
+    const stories = intent.stories || [];
+    const parts = [];
+    if (actors.length) {
+      parts.push(el('div', { class: 'ai-intent-summary-actors' },
+        el('span', { class: 'ai-intent-section-label', style: 'margin-right:6px' }, 'Actors:'),
+        ...actors.map(a => el('span', { class: 'ai-actor-chip' }, a))
+      ));
+    }
+    if (stories.length) {
+      parts.push(el('div', { class: 'ai-intent-summary-stories' },
+        ...stories.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s))
+      ));
+    }
+    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-summary' },
+      el('div', { class: 'ai-intent-summary-header' }, '✓ Intent confirmed'),
+      ...parts
+    );
+  }
+
+  function renderRecoveryCard(msg) {
+    const data = msg.data || {};
+    const options = data.options || [];
+    const optionBtns = [];
+
+    options.forEach(opt => {
+      const labelEl = el('div', { class: 'ai-recovery-option-label' }, opt.label || '');
+      const btn = el('button', { class: 'ai-recovery-option' },
+        labelEl,
+        el('div', { class: 'ai-recovery-option-desc' }, opt.description || '')
+      );
+      btn.addEventListener('click', async () => {
+        optionBtns.forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
+        labelEl.textContent = '⏳ Applying…';
+        await applyPlan(opt.plan, 'build');
+      });
+      optionBtns.push(btn);
+    });
+
+    const tokenEl = renderTokenUsage(data.usage || msg.usage);
+
+    return el('div', { class: 'ai-msg ai-msg-ai ai-recovery-card' },
+      el('div', { class: 'ai-recovery-header' }, '⚠ Build failed — here\'s what I can do:'),
+      el('div', { class: 'ai-recovery-diagnosis' }, data.diagnosis || ''),
+      ...(optionBtns.length ? [
+        el('div', { class: 'ai-recovery-options-label' }, 'Choose an option:'),
+        el('div', { class: 'ai-recovery-options' }, ...optionBtns),
+      ] : []),
+      ...(tokenEl ? [tokenEl] : [])
+    );
+  }
+
   function renderMessage(msg) {
     if (msg.role === 'user') {
       return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
@@ -1155,6 +1211,8 @@ const AiPanel = (() => {
       startThinkingStages(thinkingLabel, msg.stageMode || 'default');
       return bubble;
     }
+    if (msg.type === 'intent') return renderIntentSummaryCard(msg);
+    if (msg.type === 'recover') return renderRecoveryCard(msg);
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
@@ -1432,6 +1490,8 @@ const AiPanel = (() => {
         }
         if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
         if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
+        if (m.type === 'intent') return { role: 'model', text: 'Intent confirmed — actors: [' + (m.data?.actors || []).join(', ') + '], stories: [' + (m.data?.stories || []).join('; ') + ']' };
+        if (m.type === 'recover') return { role: 'model', text: 'Build failed and recovery was offered: ' + (m.data?.diagnosis || '') };
         if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
         return { role: 'model', text: m.content || '' };
       }).filter(h => h.text.trim() !== '');
@@ -1506,8 +1566,8 @@ const AiPanel = (() => {
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
     renderMessages();
 
+    const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
-      const { provider: aProvider, model: aModel } = getSelectedModel();
       const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
@@ -1516,7 +1576,31 @@ const AiPanel = (() => {
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+
+      if (mode === 'build' && e.data?.partial) {
+        const recoverThinkId = 'recover_' + Date.now();
+        if (sess) sess.messages.push({ id: recoverThinkId, role: 'ai', type: 'thinking', content: '', stageMode: 'diagnose' });
+        renderMessages();
+        try {
+          const recovery = await Api.post('/v1/ai/plan', {
+            mode: 'recover',
+            error: e.message,
+            plan,
+            partial: e.data.partial,
+            provider: aProvider,
+            model: aModel,
+          });
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== recoverThinkId);
+          await addMessage(currentSessionId, { role: 'ai', type: 'recover', content: '', data: recovery });
+        } catch(re) {
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== recoverThinkId);
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Build failed: ${e.message}` });
+        }
+      } else {
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+      }
     }
 
     renderMessages();
