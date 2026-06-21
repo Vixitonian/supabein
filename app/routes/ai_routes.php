@@ -1432,6 +1432,7 @@ const AI_ALLOWED_MODELS = [
     ],
     'nvidia' => [
         'qwen/qwen3.5-122b-a10b',
+        'z-ai/glm-5.1',
     ],
 ];
 
