@@ -91,8 +91,14 @@ class NvidiaClient
 
         $envelope = json_decode($response, true);
         $msg      = $envelope['choices'][0]['message'] ?? [];
-        // Some reasoning models put output in reasoning_content; prefer content
-        $text     = $msg['content'] ?? $msg['reasoning_content'] ?? null;
+        $raw_content = $msg['content'] ?? $msg['reasoning_content'] ?? null;
+        // VLM responses return content as [{type:text, text:...}]; flatten to string
+        if (is_array($raw_content)) {
+            $parts = array_filter($raw_content, fn($c) => ($c['type'] ?? '') === 'text');
+            $text  = implode('', array_column(array_values($parts), 'text')) ?: null;
+        } else {
+            $text = $raw_content;
+        }
 
         $raw = $envelope['usage'] ?? [];
         $this->lastUsage = [
