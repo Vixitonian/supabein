@@ -2295,14 +2295,16 @@ PROMPT;
             if (!$prompt) abort(422, 'prompt is required for pipeline mode');
 
             if ($async) {
-                $jobMode = $projectId ? 'pipeline_edit' : 'pipeline_build';
-                $job     = $catalog->createJob($userId, $jobMode, [
-                    'prompt'     => $prompt,
-                    'project_id' => $projectId,
-                    'review'     => $review,
-                    'history'    => $history,
-                    'provider'   => $provider,
-                    'model'      => $model,
+                $userResponse = $req['body']['user_response'] ?? null;
+                $jobMode      = $projectId ? 'pipeline_edit' : 'pipeline_build';
+                $job          = $catalog->createJob($userId, $jobMode, [
+                    'prompt'        => $prompt,
+                    'project_id'    => $projectId,
+                    'review'        => $review,
+                    'history'       => $history,
+                    'provider'      => $provider,
+                    'model'         => $model,
+                    'user_response' => $userResponse,
                 ]);
                 $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
                 $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')

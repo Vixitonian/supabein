@@ -67,58 +67,101 @@ try {
         }
 
     } elseif ($mode === 'pipeline_build') {
-        $prompt       = $payload['prompt']      ?? '';
-        $review       = (bool)($payload['review']   ?? false);
-        $history      = $payload['history']     ?? [];
-        $provider     = $payload['provider']    ?? null;
-        $model        = $payload['model']       ?? null;
-        $userResponse = $payload['user_response'] ?? null;
-        $approvedIntent = $userResponse['intent'] ?? null;
+        $prompt         = $payload['prompt']         ?? '';
+        $review         = (bool)($payload['review']  ?? false);
+        $history        = $payload['history']        ?? [];
+        $provider       = $payload['provider']       ?? null;
+        $model          = $payload['model']          ?? null;
+        $userResponse   = $payload['user_response']  ?? null;
+        $approvedIntent = $userResponse['intent']    ?? null;
+        $generatedPlan  = $payload['generated_plan'] ?? null;
 
         $config = \App::get('config');
         $client = make_ai_client($config, $provider, $model);
 
-        // Phase 1: intent generation (only if review mode and no approved intent yet)
-        if ($review && $approvedIntent === null) {
+        if ($generatedPlan !== null) {
+            // Phase 2: user clicked Apply — execute the stored plan
+            $result = ai_execute_build($generatedPlan, $userId);
+        } elseif ($review && $approvedIntent === null) {
+            // Fallback: review=ON but no intent supplied (frontend now handles intent sync)
             $intent = ai_generate_intent($client, $prompt, $history);
             $db->prepare("UPDATE ai_jobs SET status='waiting_input', result=? WHERE id=?")
                ->execute([json_encode(['wait_mode' => 'intent_review', 'intent' => $intent], JSON_UNESCAPED_UNICODE), $jobId]);
             exit(0);
+        } else {
+            // Phase 1: generate plan, then pause for user to click Apply
+            $plan    = ai_generate_build_plan($client, $prompt, $approvedIntent, $history);
+            $summary = [
+                'project_name'   => $plan['project_name'],
+                'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
+                'frontend_files' => count($plan['frontend']['files'] ?? []),
+            ];
+            $updatedPayload = $payload;
+            $updatedPayload['generated_plan'] = $plan;
+            $db->prepare("UPDATE ai_jobs SET status='waiting_input', result=?, payload=? WHERE id=?")
+               ->execute([
+                   json_encode(['wait_mode' => 'plan_review', 'summary' => $summary], JSON_UNESCAPED_UNICODE),
+                   json_encode($updatedPayload, JSON_UNESCAPED_UNICODE),
+                   $jobId,
+               ]);
+            exit(0);
         }
 
-        // Phase 2: full plan generation + execution
-        $plan   = ai_generate_build_plan($client, $prompt, $approvedIntent, $history);
-        $result = ai_execute_build($plan, $userId);
-
     } elseif ($mode === 'pipeline_edit') {
-        $prompt      = $payload['prompt']      ?? '';
-        $projectId   = (int)($payload['project_id'] ?? 0);
-        $review      = (bool)($payload['review']    ?? false);
-        $history     = $payload['history']     ?? [];
-        $provider    = $payload['provider']    ?? null;
-        $model       = $payload['model']       ?? null;
-        $userResponse = $payload['user_response'] ?? null;
+        $prompt              = $payload['prompt']           ?? '';
+        $projectId           = (int)($payload['project_id'] ?? 0);
+        $review              = (bool)($payload['review']    ?? false);
+        $history             = $payload['history']          ?? [];
+        $provider            = $payload['provider']         ?? null;
+        $model               = $payload['model']            ?? null;
+        $userResponse        = $payload['user_response']    ?? null;
         $approvedSuggestions = $userResponse['suggestions'] ?? null;
+        $generatedDelta      = $payload['generated_delta']  ?? null;
 
         $config  = \App::get('config');
         $catalog = \SupaBein\Catalog::getInstance();
         $client  = make_ai_client($config, $provider, $model);
 
-        // Phase 1: edit suggestions (only if review mode and no approved suggestions yet)
-        if ($review && $approvedSuggestions === null) {
+        if ($generatedDelta !== null) {
+            // Phase 2: user clicked Apply — execute the stored delta
+            $delta = $generatedDelta;
+        } elseif ($review && $approvedSuggestions === null) {
+            // Fallback: review=ON but no suggestions (frontend now handles suggestions sync)
             $suggestions = ai_generate_edit_suggestions($client, $projectId, $userId, $prompt, $catalog, $config);
             $db->prepare("UPDATE ai_jobs SET status='waiting_input', result=? WHERE id=?")
                ->execute([json_encode(['wait_mode' => 'edit_review', 'suggestions' => $suggestions], JSON_UNESCAPED_UNICODE), $jobId]);
             exit(0);
+        } else {
+            // Phase 1: generate delta, then pause for user to click Apply
+            $refinedPrompt = $approvedSuggestions
+                ? $prompt . "\n\nApply ONLY these specific changes:\n"
+                  . implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . ($s['label'] ?? ''), $approvedSuggestions, array_keys($approvedSuggestions)))
+                : $prompt;
+
+            $delta   = ai_generate_edit_plan($client, $projectId, $userId, $refinedPrompt, $history, $catalog, $config);
+            $summary = [
+                'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
+                'add_columns'     => array_merge([], ...array_map(
+                    fn($e) => array_map(fn($c) => ($e['table'] ?? '') . '.' . ($c['name'] ?? ''), $e['columns'] ?? []),
+                    $delta['add_columns'] ?? []
+                )),
+                'update_policies' => array_map(
+                    fn($p) => ($p['table'] ?? '') . ' ' . ($p['api_role'] ?? '') . ' ' . strtoupper($p['operation'] ?? ''),
+                    $delta['update_policies'] ?? []
+                ),
+                'frontend_files'  => count($delta['frontend']['files'] ?? []),
+            ];
+            $updatedPayload = $payload;
+            $updatedPayload['generated_delta'] = $delta;
+            $db->prepare("UPDATE ai_jobs SET status='waiting_input', result=?, payload=? WHERE id=?")
+               ->execute([
+                   json_encode(['wait_mode' => 'edit_apply', 'summary' => $summary], JSON_UNESCAPED_UNICODE),
+                   json_encode($updatedPayload, JSON_UNESCAPED_UNICODE),
+                   $jobId,
+               ]);
+            exit(0);
         }
 
-        // Phase 2: generate delta and execute
-        $refinedPrompt = $approvedSuggestions
-            ? $prompt . "\n\nApply ONLY these specific changes:\n"
-              . implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . ($s['label'] ?? ''), $approvedSuggestions, array_keys($approvedSuggestions)))
-            : $prompt;
-
-        $delta  = ai_generate_edit_plan($client, $projectId, $userId, $refinedPrompt, $history, $catalog, $config);
         $result = ai_execute_edit($delta, $projectId, $userId);
 
         if (!empty($delta['frontend']['files'])) {

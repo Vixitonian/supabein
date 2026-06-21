@@ -1671,7 +1671,13 @@ const AiPanel = (() => {
       return;
     }
 
-    // ── Start pipeline job immediately ────────────────────────────────────────
+    // ── Review ON: sync intent/suggest (fast ~2-5s), then pipeline for plan+Apply ──
+    if (reviewEnabled) {
+      await doReviewThenPipeline(prompt, body);
+      return;
+    }
+
+    // ── Review OFF: pipeline immediately (worker pauses at plan_review for Apply) ──
     const stageMode = selectedProjectId ? 'edit' : 'build';
     const { provider: pProvider, model: pModel } = getSelectedModel();
     const thinkingId = 'pipeline_' + Date.now();
@@ -1683,7 +1689,7 @@ const AiPanel = (() => {
         mode: 'pipeline',
         prompt,
         project_id: selectedProjectId || undefined,
-        review: reviewEnabled,
+        review: false,
         history: body.history || [],
         provider: pProvider,
         model: pModel,
@@ -1785,6 +1791,215 @@ const AiPanel = (() => {
     renderMessages();
   }
 
+  // ── Review ON: sync intent/suggest, then start pipeline with the response ────
+
+  async function doReviewThenPipeline(prompt, body) {
+    const sess = currentSession();
+    const { provider, model } = getSelectedModel();
+    const stageMode = selectedProjectId ? 'edit' : 'build';
+    const thinkingId = 'review_fetch_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: selectedProjectId ? 'edit' : 'intent' });
+    renderMessages();
+
+    try {
+      if (!selectedProjectId) {
+        const res = await Api.post('/v1/ai/intent', { prompt, history: body.history || [], provider, model });
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        renderMessages();
+        showIntentReviewForPipeline(res.intent, prompt, body, stageMode);
+      } else {
+        const res = await Api.post('/v1/ai/plan', { mode: 'suggest', prompt, project_id: selectedProjectId, history: body.history || [], provider, model });
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        renderMessages();
+        showEditReviewForPipeline(res.suggestions, prompt, body, stageMode);
+      }
+    } catch(e) {
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+      renderSidebar();
+      renderMessages();
+    }
+  }
+
+  function showIntentReviewForPipeline(intent, prompt, body, stageMode) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-intent-card');
+    if (existing) existing.remove();
+    const card = renderIntentCard(
+      intent,
+      async (confirmedIntent) => {
+        card.remove();
+        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
+        renderMessages();
+        await startPipelineWithResponse(prompt, body, { intent: confirmedIntent }, stageMode);
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    renderMessages();
+  }
+
+  function showEditReviewForPipeline(suggestions, prompt, body, stageMode) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-edit-review-card');
+    if (existing) existing.remove();
+    const card = renderEditReviewCard(
+      suggestions,
+      async (selected) => {
+        card.remove();
+        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: { confirmed: selected } });
+        renderMessages();
+        await startPipelineWithResponse(prompt, body, { suggestions: selected }, stageMode);
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    renderMessages();
+  }
+
+  async function startPipelineWithResponse(prompt, body, userResponse, stageMode) {
+    const sess = currentSession();
+    const { provider, model } = getSelectedModel();
+    const thinkingId = 'pipeline_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+    renderMessages();
+
+    try {
+      const result = await Api.post('/v1/ai/apply', {
+        mode: 'pipeline',
+        prompt,
+        project_id: selectedProjectId || undefined,
+        review: true,
+        history: body.history || [],
+        provider,
+        model,
+        async: true,
+        user_response: userResponse,
+      });
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+
+      if (result.job_id) {
+        activeJobId = result.job_id;
+        const jobMsgId = 'job_' + result.job_id;
+        await addMessage(currentSessionId, { id: jobMsgId, role: 'ai', type: 'job', content: '' });
+        showJobIndicator();
+        startJobPolling(result.job_id, stageMode, jobMsgId);
+      }
+    } catch(e) {
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+    }
+    renderSidebar();
+    renderMessages();
+  }
+
+  function renderPlanApplyCard(summary, onApply, onCancel) {
+    const lines = [];
+    if (summary.project_name) {
+      lines.push(el('div', { class: 'ai-plan-row' }, el('strong', {}, 'Project: '), summary.project_name));
+    }
+    if (summary.tables && summary.tables.length) {
+      lines.push(el('div', { class: 'ai-plan-section' }, 'Tables'));
+      summary.tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
+    }
+    if (summary.frontend_files) {
+      lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
+        el('strong', {}, 'Frontend: '), summary.frontend_files + ' file' + (summary.frontend_files !== 1 ? 's' : '')
+      ));
+    }
+    return el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' },
+      el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
+      ...lines,
+      el('div', { class: 'ai-plan-actions' },
+        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
+        el('button', { class: 'btn btn-ai btn-sm', onClick: onApply }, '✓ Apply')
+      )
+    );
+  }
+
+  function renderEditApplyCard(summary, onApply, onCancel) {
+    const lines = [];
+    if (summary.add_tables && summary.add_tables.length) {
+      lines.push(el('div', { class: 'ai-plan-section' }, 'New tables'));
+      summary.add_tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
+    }
+    if (summary.add_columns && summary.add_columns.length) {
+      lines.push(el('div', { class: 'ai-plan-section' }, 'New columns'));
+      summary.add_columns.forEach(c => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + c)));
+    }
+    if (summary.update_policies && summary.update_policies.length) {
+      lines.push(el('div', { class: 'ai-plan-section' }, 'Policy changes'));
+      summary.update_policies.forEach(p => lines.push(el('div', { class: 'ai-plan-item' }, '~ ' + p)));
+    }
+    if (summary.frontend_files) {
+      lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
+        el('strong', {}, 'Frontend: '), summary.frontend_files + ' file' + (summary.frontend_files !== 1 ? 's' : '') + ' updated'
+      ));
+    }
+    if (!summary.add_tables?.length && !summary.add_columns?.length && !summary.update_policies?.length && !summary.frontend_files) {
+      lines.push(el('div', { class: 'text-muted', style: 'font-size:13px' }, 'No changes needed for this request.'));
+    }
+    return el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' },
+      el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
+      ...lines,
+      el('div', { class: 'ai-plan-actions' },
+        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
+        el('button', { class: 'btn btn-ai btn-sm', onClick: onApply }, '✓ Apply')
+      )
+    );
+  }
+
+  function showPlanReviewFromJob(jobId, summary, mode) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const card = renderPlanApplyCard(
+      summary || {},
+      async () => {
+        card.remove();
+        activeJobId = jobId;
+        await resumeJob(jobId, { approved: true }, mode);
+      },
+      () => {
+        card.remove();
+        activeJobId = null;
+        renderMessages();
+      }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    renderMessages();
+  }
+
+  function showEditApplyFromJob(jobId, summary, mode) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const card = renderEditApplyCard(
+      summary || {},
+      async () => {
+        card.remove();
+        activeJobId = jobId;
+        await resumeJob(jobId, { approved: true }, mode);
+      },
+      () => {
+        card.remove();
+        activeJobId = null;
+        renderMessages();
+      }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+    renderMessages();
+  }
+
   function startJobPolling(jobId, mode, jobMsgId) {
     let polls = 0;
     const MAX_POLLS = 240;
@@ -1813,6 +2028,10 @@ const AiPanel = (() => {
             showIntentReviewFromJob(jobId, job.result.intent, mode);
           } else if (waitMode === 'edit_review') {
             showEditReviewFromJob(jobId, job.result.suggestions, mode);
+          } else if (waitMode === 'plan_review') {
+            showPlanReviewFromJob(jobId, job.result.summary, mode);
+          } else if (waitMode === 'edit_apply') {
+            showEditApplyFromJob(jobId, job.result.summary, mode);
           }
         } else if (job.status === 'done') {
           stopJobPolling();
@@ -1830,6 +2049,7 @@ const AiPanel = (() => {
   async function resumeJob(jobId, response, mode) {
     try {
       await Api.post('/v1/ai/jobs/' + jobId + '/resume', { response });
+      activeJobId = jobId;
       const jobMsgId = 'job_resume_' + jobId;
       const sess = currentSession();
       if (sess) {
@@ -1931,14 +2151,16 @@ const AiPanel = (() => {
       if (Array.isArray(jobs) && jobs.length > 0) {
         const job = jobs[0];
         const summaryMode = (job.mode === 'pipeline_edit' || job.mode === 'edit') ? 'edit' : 'build';
-        activeJobId = job.id;
         if (job.status === 'waiting_input') {
-          // Resume a review that was interrupted mid-session
+          // Resume an interrupted review/apply card
           const fullJob = await Api.get('/v1/ai/jobs/' + job.id);
           const waitMode = fullJob.result?.wait_mode;
-          if (waitMode === 'intent_review') showIntentReviewFromJob(job.id, fullJob.result.intent, summaryMode);
-          else if (waitMode === 'edit_review') showEditReviewFromJob(job.id, fullJob.result.suggestions, summaryMode);
+          if (waitMode === 'intent_review') { activeJobId = job.id; showIntentReviewFromJob(job.id, fullJob.result.intent, summaryMode); }
+          else if (waitMode === 'edit_review') { activeJobId = job.id; showEditReviewFromJob(job.id, fullJob.result.suggestions, summaryMode); }
+          else if (waitMode === 'plan_review') showPlanReviewFromJob(job.id, fullJob.result.summary, summaryMode);
+          else if (waitMode === 'edit_apply') showEditApplyFromJob(job.id, fullJob.result.summary, summaryMode);
         } else {
+          activeJobId = job.id;
           showJobIndicator();
           startJobPolling(job.id, summaryMode, null);
         }
