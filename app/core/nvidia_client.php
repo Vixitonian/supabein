@@ -23,32 +23,38 @@ class NvidiaClient
     public function generateJson(string $systemPrompt, string $userPrompt): array
     {
         return $this->call([
-            ['role' => 'system', 'content' => $systemPrompt],
-            ['role' => 'user',   'content' => $userPrompt],
+            ['role' => 'system', 'content' => self::textContent($systemPrompt)],
+            ['role' => 'user',   'content' => self::textContent($userPrompt)],
         ]);
     }
 
     public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
     {
-        $messages = [['role' => 'system', 'content' => $systemPrompt]];
+        $messages = [['role' => 'system', 'content' => self::textContent($systemPrompt)]];
         foreach ($history as $turn) {
             if (!isset($turn['role'], $turn['text'])) continue;
             $messages[] = [
                 'role'    => ($turn['role'] === 'model' ? 'assistant' : 'user'),
-                'content' => $turn['text'],
+                'content' => self::textContent($turn['text']),
             ];
         }
-        $messages[] = ['role' => 'user', 'content' => $userPrompt];
+        $messages[] = ['role' => 'user', 'content' => self::textContent($userPrompt)];
         return $this->call($messages);
+    }
+
+    private static function textContent(string $text): array
+    {
+        return [['type' => 'text', 'text' => $text]];
     }
 
     private function call(array $messages): array
     {
         $body    = [
-            'model'      => $this->model,
-            'messages'   => $messages,
-            'max_tokens' => 8192,
-            'stream'     => false,
+            'model'                 => $this->model,
+            'messages'              => $messages,
+            'max_tokens'            => 8192,
+            'stream'                => false,
+            'chat_template_kwargs'  => ['enable_thinking' => false],
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
