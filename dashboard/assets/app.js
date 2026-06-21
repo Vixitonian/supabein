@@ -59,7 +59,7 @@ const Api = (() => {
     const json = await res.json().catch(() => ({}));
 
     if (!res.ok) {
-      const err = new ApiError(json.error || 'Request failed', res.status);
+      const err = new ApiError(json.error || 'Request failed', res.status, json);
       console.error('[SupaBein] API error', { method, path, status: res.status, message: err.message });
       throw err;
     }
@@ -68,9 +68,10 @@ const Api = (() => {
   }
 
   class ApiError extends Error {
-    constructor(msg, status) {
+    constructor(msg, status, data = {}) {
       super(msg);
       this.status = status;
+      this.data = data;
     }
   }
 
@@ -805,6 +806,7 @@ const AiPanel = (() => {
   let panelEl = null;
   let backdropEl = null;
   let sidebarVisible = false;
+  let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
 
   const AI_MODELS = [
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -812,18 +814,18 @@ const AiPanel = (() => {
     { label: 'GPT-4o',               provider: 'openrouter', model: 'openai/gpt-4o',                                     badge: 'OpenRouter' },
     { label: 'Claude Sonnet 4.5',    provider: 'openrouter', model: 'anthropic/claude-sonnet-4-5',                       badge: 'OpenRouter' },
     { label: 'Mistral Small 3.2',    provider: 'openrouter', model: 'mistralai/mistral-small-3.2-24b-instruct',          badge: 'OpenRouter' },
-    { label: 'Qwen3 Coder',          provider: 'openrouter', model: 'qwen/qwen3-coder:free',                             badge: 'Free' },
-    { label: 'Llama 3.3 70B',        provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free',            badge: 'Free' },
+    { label: 'Kimi K2',              provider: 'openrouter', model: 'moonshotai/kimi-k2',                                badge: 'OpenRouter' },
     { label: 'Gemma 4 31B',          provider: 'openrouter', model: 'google/gemma-4-31b-it:free',                        badge: 'Free' },
     { label: 'Gemma 4 26B (MoE)',    provider: 'openrouter', model: 'google/gemma-4-26b-a4b-it:free',                    badge: 'Free' },
     { label: 'GPT OSS 120B',         provider: 'openrouter', model: 'openai/gpt-oss-120b:free',                          badge: 'Free' },
     { label: 'GPT OSS 20B',          provider: 'openrouter', model: 'openai/gpt-oss-20b:free',                           badge: 'Free' },
-    { label: 'Nemotron Ultra 550B',  provider: 'openrouter', model: 'nvidia/nemotron-3-ultra-550b-a55b:free',            badge: 'Free' },
+    { label: 'Nemotron Super 120B',  provider: 'openrouter', model: 'nvidia/nemotron-3-super-120b-a12b:free',            badge: 'Free' },
     { label: 'Nemotron Nano Omni',   provider: 'openrouter', model: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', badge: 'Free' },
     { label: 'OWL Alpha',            provider: 'openrouter', model: 'openrouter/owl-alpha',                              badge: 'Free' },
     { label: 'Nex N2 Pro',           provider: 'openrouter', model: 'nex-agi/nex-n2-pro:free',                           badge: 'Free' },
-    { label: 'Laguna M.1',           provider: 'openrouter', model: 'poolside/laguna-m.1:free',                          badge: 'Free' },
     { label: 'Laguna XS.2',          provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                         badge: 'Free' },
+    { label: 'Qwen 3.5 122B',        provider: 'nvidia',     model: 'qwen/qwen3.5-122b-a10b',                            badge: 'NVIDIA' },
+    { label: 'Kimi K2.6 (NVIDIA)',   provider: 'nvidia',     model: 'moonshotai/kimi-k2.6',                              badge: 'NVIDIA' },
   ];
 
   function getSelectedModel() {
@@ -854,6 +856,7 @@ const AiPanel = (() => {
     edit:     ['Reading current schema…', 'Planning the changes…', 'Generating edits…', 'Almost done…'],
     diagnose: ['Analyzing the issue…', 'Checking schema & policies…', 'Preparing suggestions…', 'Almost done…'],
     chat:     ['Thinking…', 'Looking up your projects…', 'Formulating reply…'],
+    intent:   ['Analyzing your idea…', 'Identifying actors…', 'Distilling user stories…'],
     default:  ['Working on it…', 'Still going…', 'Almost done…'],
   };
 
@@ -1027,6 +1030,327 @@ const AiPanel = (() => {
     container.scrollTop = container.scrollHeight;
   }
 
+  function renderIntentCard(intent, onConfirm, onCancel) {
+    const actors  = [...(intent.actors  || [])];
+    const stories = [...(intent.stories || [])];
+
+    const actorsWrap  = el('div', { class: 'ai-intent-actors' });
+    const storiesWrap = el('div', { class: 'ai-intent-stories' });
+
+    function refreshActors() {
+      actorsWrap.innerHTML = '';
+      actors.forEach((a, i) => {
+        const textSpan = el('span', { class: 'ai-actor-text' }, a);
+        textSpan.addEventListener('click', () => {
+          const inp = el('input', { class: 'ai-actor-inline-input', type: 'text' });
+          inp.value = a;
+          inp.style.width = Math.max(60, a.length * 8) + 'px';
+          textSpan.replaceWith(inp);
+          inp.focus(); inp.select();
+          const save = () => {
+            const v = inp.value.trim();
+            if (v && v !== a) actors[i] = v;
+            refreshActors();
+          };
+          inp.addEventListener('blur', save);
+          inp.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
+            if (e.key === 'Escape') refreshActors();
+          });
+        });
+        const chip = el('span', { class: 'ai-actor-chip' },
+          textSpan,
+          el('button', { class: 'ai-chip-remove', title: 'Remove', onClick: () => { actors.splice(i, 1); refreshActors(); }}, '×')
+        );
+        actorsWrap.appendChild(chip);
+      });
+      const inp = el('input', { class: 'ai-intent-add-input', placeholder: '+ actor', type: 'text' });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const v = inp.value.trim();
+          if (v && !actors.includes(v)) { actors.push(v); refreshActors(); }
+        }
+      });
+      actorsWrap.appendChild(inp);
+    }
+
+    function refreshStories() {
+      storiesWrap.innerHTML = '';
+      stories.forEach((s, i) => {
+        const textSpan = el('span', { class: 'ai-story-text' }, s);
+        textSpan.addEventListener('click', () => {
+          const inp = el('input', { class: 'ai-story-inline-input', type: 'text' });
+          inp.value = s;
+          inp.style.width = '100%';
+          textSpan.replaceWith(inp);
+          inp.focus(); inp.select();
+          const save = () => {
+            const v = inp.value.trim();
+            if (v && v !== s) stories[i] = v;
+            refreshStories();
+          };
+          inp.addEventListener('blur', save);
+          inp.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
+            if (e.key === 'Escape') refreshStories();
+          });
+        });
+        storiesWrap.appendChild(el('div', { class: 'ai-story-item' },
+          el('button', { class: 'ai-story-remove', title: 'Remove', onClick: () => { stories.splice(i, 1); refreshStories(); }}, '−'),
+          textSpan
+        ));
+      });
+      const addRow = el('div', { class: 'ai-story-add-row' });
+      const inp = el('input', { class: 'ai-intent-add-input', placeholder: '+ add a story…', type: 'text' });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+          const v = inp.value.trim();
+          if (v) { stories.push(v); refreshStories(); }
+        }
+      });
+      addRow.appendChild(inp);
+      storiesWrap.appendChild(addRow);
+    }
+
+    refreshActors();
+    refreshStories();
+
+    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' },
+      el('div', { class: 'ai-intent-header' }, 'Intent — review before building'),
+      el('div', { class: 'ai-intent-section-label' }, 'Actors'),
+      actorsWrap,
+      el('div', { class: 'ai-intent-divider' }),
+      el('div', { class: 'ai-intent-section-label' }, 'User Stories'),
+      storiesWrap,
+      el('div', { class: 'ai-intent-actions' },
+        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
+        el('button', { class: 'btn btn-ai btn-sm', onClick: () => onConfirm({ actors, stories }) }, 'Build with this →')
+      )
+    );
+  }
+
+  function showIntentReviewCard(intent, body) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-intent-card');
+    if (existing) existing.remove();
+
+    const card = renderIntentCard(
+      intent,
+      async (confirmedIntent) => {
+        card.remove();
+        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
+        body.intent = confirmedIntent;
+        await proceedWithPlan(body);
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function proceedWithPlan(body) {
+    const sess = currentSession();
+    const stageMode = body.project_id ? 'edit' : 'build';
+    const thinkingId = 'thinking_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+    renderMessages();
+
+    try {
+      const response = await callWithFallback('/v1/ai/plan', body);
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await handlePlanResponse(response);
+    } catch(e) {
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+    }
+    renderSidebar();
+    renderMessages();
+  }
+
+  async function handlePlanResponse(response) {
+    if (response.mode === 'chat') {
+      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
+    } else if (response.mode === 'diagnose') {
+      await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
+    } else {
+      await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
+    }
+  }
+
+  function renderIntentSummaryCard(msg) {
+    const intent = msg.data || {};
+    const actors = intent.actors || [];
+    const stories = intent.stories || [];
+    const parts = [];
+    if (actors.length) {
+      parts.push(el('div', { class: 'ai-intent-summary-actors' },
+        el('span', { class: 'ai-intent-section-label', style: 'margin-right:6px' }, 'Actors:'),
+        ...actors.map(a => el('span', { class: 'ai-actor-chip' }, a))
+      ));
+    }
+    if (stories.length) {
+      parts.push(el('div', { class: 'ai-intent-summary-stories' },
+        ...stories.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s))
+      ));
+    }
+    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-summary' },
+      el('div', { class: 'ai-intent-summary-header' }, '✓ Intent confirmed'),
+      ...parts
+    );
+  }
+
+  function renderRecoveryCard(msg) {
+    const data = msg.data || {};
+    const options = data.options || [];
+    const optionBtns = [];
+
+    options.forEach(opt => {
+      const labelEl = el('div', { class: 'ai-recovery-option-label' }, opt.label || '');
+      const btn = el('button', { class: 'ai-recovery-option' },
+        labelEl,
+        el('div', { class: 'ai-recovery-option-desc' }, opt.description || '')
+      );
+      btn.addEventListener('click', async () => {
+        optionBtns.forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
+        labelEl.textContent = '⏳ Applying…';
+        await applyPlan(opt.plan, 'build');
+      });
+      optionBtns.push(btn);
+    });
+
+    const tokenEl = renderTokenUsage(data.usage || msg.usage);
+
+    return el('div', { class: 'ai-msg ai-msg-ai ai-recovery-card' },
+      el('div', { class: 'ai-recovery-header' }, '⚠ Build failed — here\'s what I can do:'),
+      el('div', { class: 'ai-recovery-diagnosis' }, data.diagnosis || ''),
+      ...(optionBtns.length ? [
+        el('div', { class: 'ai-recovery-options-label' }, 'Choose an option:'),
+        el('div', { class: 'ai-recovery-options' }, ...optionBtns),
+      ] : []),
+      ...(tokenEl ? [tokenEl] : [])
+    );
+  }
+
+  function renderEditReviewCard(suggestions, onConfirm, onCancel) {
+    const confirmed = new Set(suggestions.map(s => s.id));
+    const customItems = [];
+
+    const listEl = el('div', { class: 'ai-edit-review-list' });
+
+    function refreshList() {
+      listEl.innerHTML = '';
+      suggestions.forEach(s => {
+        const labelSpan = el('span', { class: 'ai-edit-review-label' }, s.label);
+        labelSpan.addEventListener('click', () => {
+          const inp = el('input', { class: 'ai-edit-review-inline-input', type: 'text' });
+          inp.value = s.label;
+          labelSpan.replaceWith(inp);
+          inp.focus(); inp.select();
+          const save = () => {
+            const v = inp.value.trim();
+            if (v) s.label = v;
+            refreshList();
+          };
+          inp.addEventListener('blur', save);
+          inp.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); save(); }
+            if (e.key === 'Escape') refreshList();
+          });
+        });
+
+        const cb = el('input', { class: 'ai-edit-review-check', type: 'checkbox' });
+        cb.checked = confirmed.has(s.id);
+        cb.addEventListener('change', () => { if (cb.checked) confirmed.add(s.id); else confirmed.delete(s.id); });
+
+        listEl.appendChild(el('div', { class: 'ai-edit-review-item' },
+          cb,
+          el('div', { class: 'ai-edit-review-text' },
+            labelSpan,
+            el('span', { class: 'ai-edit-review-desc' }, s.description || '')
+          )
+        ));
+      });
+
+      customItems.forEach((item, ci) => {
+        const cb = el('input', { class: 'ai-edit-review-check', type: 'checkbox' });
+        cb.checked = true;
+        cb.addEventListener('change', () => {
+          if (!cb.checked) { customItems.splice(ci, 1); refreshList(); }
+        });
+        listEl.appendChild(el('div', { class: 'ai-edit-review-item' },
+          cb,
+          el('div', { class: 'ai-edit-review-text' },
+            el('span', { class: 'ai-edit-review-label' }, item.label)
+          )
+        ));
+      });
+    }
+
+    refreshList();
+
+    const addInp = el('input', { class: 'ai-intent-add-input', placeholder: '+ add your own change…', type: 'text', style: 'margin-top:8px;width:100%' });
+    addInp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const v = addInp.value.trim();
+        if (v) { customItems.push({ id: 'custom_' + Date.now(), label: v, description: '' }); addInp.value = ''; refreshList(); }
+      }
+    });
+
+    return el('div', { class: 'ai-msg ai-msg-ai ai-edit-review-card' },
+      el('div', { class: 'ai-intent-header' }, 'Edit Review — select changes to apply'),
+      listEl,
+      addInp,
+      el('div', { class: 'ai-intent-actions' },
+        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
+        el('button', { class: 'btn btn-ai btn-sm', onClick: () => {
+          const selected = [
+            ...suggestions.filter(s => confirmed.has(s.id)),
+            ...customItems
+          ];
+          if (!selected.length) return;
+          onConfirm(selected);
+        }}, 'Apply selected →')
+      )
+    );
+  }
+
+  function showEditReviewCard(suggestions, body) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const existing = container.querySelector('.ai-edit-review-card');
+    if (existing) existing.remove();
+
+    const card = renderEditReviewCard(
+      suggestions,
+      async (selected) => {
+        card.remove();
+        const confirmedData = { confirmed: selected, original_prompt: body.prompt };
+        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: confirmedData });
+        const refinedPrompt = body.prompt
+          + '\n\nApply ONLY these specific changes (ignore everything else):\n'
+          + selected.map((s, i) => `${i + 1}. ${s.label}`).join('\n');
+        await proceedWithPlan({ ...body, prompt: refinedPrompt });
+      },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function renderEditIntentSummaryCard(msg) {
+    const data = msg.data || {};
+    const confirmed = data.confirmed || [];
+    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-summary' },
+      el('div', { class: 'ai-intent-summary-header' }, '✓ Edit changes confirmed'),
+      el('div', { class: 'ai-intent-summary-stories' },
+        ...confirmed.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s.label))
+      )
+    );
+  }
+
   function renderMessage(msg) {
     if (msg.role === 'user') {
       return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
@@ -1040,6 +1364,9 @@ const AiPanel = (() => {
       startThinkingStages(thinkingLabel, msg.stageMode || 'default');
       return bubble;
     }
+    if (msg.type === 'intent') return renderIntentSummaryCard(msg);
+    if (msg.type === 'edit-intent') return renderEditIntentSummaryCard(msg);
+    if (msg.type === 'recover') return renderRecoveryCard(msg);
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
@@ -1302,48 +1629,89 @@ const AiPanel = (() => {
     renderSidebar();
     renderMessages();
 
-    const thinkingId = 'thinking_' + Date.now();
     const sess = currentSession();
+
+    // Build conversation history for Gemini context
+    const body = { prompt };
+    if (selectedProjectId) body.project_id = selectedProjectId;
+    const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
+    if (priorMessages.length > 0) {
+      body.history = priorMessages.slice(-20).map(m => {
+        if (m.role === 'user') return { role: 'user', text: m.content };
+        if (m.type === 'plan') {
+          const s = m.data?.summary || {};
+          return { role: 'model', text: 'I proposed a plan. Summary: ' + JSON.stringify(s) };
+        }
+        if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
+        if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
+        if (m.type === 'intent') return { role: 'model', text: 'Intent confirmed — actors: [' + (m.data?.actors || []).join(', ') + '], stories: [' + (m.data?.stories || []).join('; ') + ']' };
+        if (m.type === 'edit-intent') return { role: 'model', text: 'Edit changes confirmed: ' + (m.data?.confirmed || []).map(s => s.label).join('; ') };
+        if (m.type === 'recover') return { role: 'model', text: 'Build failed and recovery was offered: ' + (m.data?.diagnosis || '') };
+        if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
+        return { role: 'model', text: m.content || '' };
+      }).filter(h => h.text.trim() !== '');
+    }
+
+    // ── Intent review pass (only for new builds, not edits) ──────────────────
+    if (reviewEnabled && !selectedProjectId) {
+      const thinkingId = 'intent_thinking_' + Date.now();
+      if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'intent' });
+      renderMessages();
+      try {
+        const intentResp = await callWithFallback('/v1/ai/intent', { prompt });
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        renderMessages();
+        showIntentReviewCard(intentResp.intent, body);
+      } catch(e) {
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request.` });
+        renderSidebar();
+        renderMessages();
+      }
+      return;
+    }
+
+    // ── Edit suggest/review pass (review on + project selected = editing) ─────
+    if (reviewEnabled && selectedProjectId) {
+      const thinkingId = 'suggest_thinking_' + Date.now();
+      if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'edit' });
+      renderMessages();
+      try {
+        const { provider: sProvider, model: sModel } = getSelectedModel();
+        const suggestResp = await callWithFallback('/v1/ai/plan', {
+          ...body, mode: 'suggest', provider: sProvider, model: sModel
+        });
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        renderMessages();
+        showEditReviewCard(suggestResp.suggestions || [], body);
+      } catch(e) {
+        stopThinkingStages?.();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request.` });
+        renderSidebar();
+        renderMessages();
+      }
+      return;
+    }
+
+    // ── Regular plan flow ─────────────────────────────────────────────────────
     const stageMode = selectedProjectId ? 'edit' : 'build';
+    const thinkingId = 'thinking_' + Date.now();
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
     renderMessages();
 
     try {
-      const body = { prompt };
-      if (selectedProjectId) body.project_id = selectedProjectId;
-
-      // Build conversation history for Gemini context (exclude current message and thinking placeholders)
-      const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking' && m.id !== thinkingId);
-      if (priorMessages.length > 0) {
-        body.history = priorMessages.slice(-20).map(m => {
-          if (m.role === 'user') return { role: 'user', text: m.content };
-          if (m.type === 'plan') {
-            const s = m.data?.summary || {};
-            return { role: 'model', text: 'I proposed a plan. Summary: ' + JSON.stringify(s) };
-          }
-          if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
-          if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
-          if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
-          return { role: 'model', text: m.content || '' };
-        }).filter(h => h.text.trim() !== '');
-      }
-
       const response = await callWithFallback('/v1/ai/plan', body);
-
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-
-      if (response.mode === 'chat') {
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
-      } else if (response.mode === 'diagnose') {
-        await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
-      } else {
-        await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
-      }
+      await handlePlanResponse(response);
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
     }
 
     renderSidebar();
@@ -1377,8 +1745,8 @@ const AiPanel = (() => {
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
     renderMessages();
 
+    const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
-      const { provider: aProvider, model: aModel } = getSelectedModel();
       const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
@@ -1387,7 +1755,31 @@ const AiPanel = (() => {
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+
+      if (mode === 'build' && e.data?.partial) {
+        const recoverThinkId = 'recover_' + Date.now();
+        if (sess) sess.messages.push({ id: recoverThinkId, role: 'ai', type: 'thinking', content: '', stageMode: 'diagnose' });
+        renderMessages();
+        try {
+          const recovery = await Api.post('/v1/ai/plan', {
+            mode: 'recover',
+            error: e.message,
+            plan,
+            partial: e.data.partial,
+            provider: aProvider,
+            model: aModel,
+          });
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== recoverThinkId);
+          await addMessage(currentSessionId, { role: 'ai', type: 'recover', content: '', data: recovery });
+        } catch(re) {
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== recoverThinkId);
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Build failed: ${e.message}` });
+        }
+      } else {
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+      }
     }
 
     renderMessages();
@@ -1430,11 +1822,22 @@ const AiPanel = (() => {
     const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '↑');
     sendBtn.disabled = true;
 
+    const reviewToggle = el('button', {
+      class: 'ai-review-toggle' + (reviewEnabled ? ' active' : ''),
+      title: 'Review intent before building',
+      onClick: () => {
+        reviewEnabled = !reviewEnabled;
+        localStorage.setItem('sb:ai_review', reviewEnabled ? '1' : '0');
+        reviewToggle.classList.toggle('active', reviewEnabled);
+      }
+    }, 'Review');
+
     const inputBar = el('div', { class: 'ai-input-bar' },
       el('div', { class: 'ai-input-card' },
         textarea,
         el('div', { class: 'ai-input-actions' },
           projectPicker,
+          reviewToggle,
           sendBtn
         )
       )

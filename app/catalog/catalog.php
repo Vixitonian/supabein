@@ -111,7 +111,7 @@ class Catalog
     public function listTables(int $projectId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, project_id, table_name, physical_name, created_at FROM project_tables WHERE project_id = ? ORDER BY created_at ASC'
+            'SELECT id, project_id, table_name, table_name AS logical_name, physical_name, created_at FROM project_tables WHERE project_id = ? ORDER BY created_at ASC'
         );
         $stmt->execute([$projectId]);
         return self::castRows($stmt->fetchAll(), ['id', 'project_id']);
@@ -173,7 +173,8 @@ class Catalog
     public function listColumns(int $tableId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, col_name, data_type, nullable, default_val, col_order
+            'SELECT id, col_name, col_name AS name, data_type, data_type AS type,
+                    nullable, default_val, default_val AS `default`, col_order
              FROM project_columns WHERE project_table_id = ? ORDER BY col_order ASC'
         );
         $stmt->execute([$tableId]);
