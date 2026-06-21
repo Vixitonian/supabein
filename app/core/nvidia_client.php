@@ -45,11 +45,9 @@ class NvidiaClient
     private function call(array $messages): array
     {
         $body    = [
-            'model'       => $this->model,
-            'messages'    => $messages,
-            'max_tokens'  => 16384,
-            'temperature' => 0.6,
-            'top_p'       => 0.95,
+            'model'      => $this->model,
+            'messages'   => $messages,
+            'max_tokens' => 16384,
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
@@ -83,7 +81,9 @@ class NvidiaClient
         }
 
         $envelope = json_decode($response, true);
-        $text     = $envelope['choices'][0]['message']['content'] ?? null;
+        $msg      = $envelope['choices'][0]['message'] ?? [];
+        // Some reasoning models put output in reasoning_content; prefer content
+        $text     = $msg['content'] ?? $msg['reasoning_content'] ?? null;
 
         $raw = $envelope['usage'] ?? [];
         $this->lastUsage = [
@@ -92,9 +92,13 @@ class NvidiaClient
             'total_tokens'      => (int)($raw['total_tokens'] ?? 0),
         ];
 
-        if ($text === null) {
+        if ($text === null || trim($text) === '') {
             throw new \RuntimeException('NVIDIA returned no content in response');
         }
+
+        // Strip <think>...</think> blocks that reasoning models prepend
+        $text = preg_replace('/<think>.*?<\/think>/s', '', $text);
+        $text = trim($text);
 
         $plan = json_decode($text, true);
         if (!is_array($plan)) {

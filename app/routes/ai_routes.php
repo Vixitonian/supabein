@@ -1438,7 +1438,6 @@ const AI_ALLOWED_MODELS = [
     ],
     'nvidia' => [
         'qwen/qwen3.5-122b-a10b',
-        'moonshotai/kimi-k2.6',
     ],
 ];
 

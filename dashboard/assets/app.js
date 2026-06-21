@@ -828,7 +828,6 @@ const AiPanel = (() => {
     { label: 'Nex N2 Pro',           provider: 'openrouter', model: 'nex-agi/nex-n2-pro:free',                           badge: 'Free' },
     { label: 'Laguna XS.2',          provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                         badge: 'Free' },
     { label: 'Qwen 3.5 122B',        provider: 'nvidia',     model: 'qwen/qwen3.5-122b-a10b',                            badge: 'NVIDIA' },
-    { label: 'Kimi K2.6 (NVIDIA)',   provider: 'nvidia',     model: 'moonshotai/kimi-k2.6',                              badge: 'NVIDIA' },
   ];
 
   function getSelectedModel() {
