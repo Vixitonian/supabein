@@ -201,18 +201,16 @@ class Schema
         $def = self::q($name) . ' ' . $ddlType;
         $def .= $nullable ? ' NULL' : ' NOT NULL';
 
-        if ($default !== null) {
+        if ($default !== null && $default !== '') {
             $default = (string)$default;
-            // Only allow safe literal defaults (no function calls or special chars)
-            if (!preg_match('/^[a-zA-Z0-9_.\-]+$/', $default)) {
-                throw new \InvalidArgumentException("Unsafe default value for column '$name'");
-            }
-            // Quote string defaults; leave bare numerics and SQL keywords unquoted
             $sqlKeywords = ['CURRENT_TIMESTAMP', 'NULL', 'TRUE', 'FALSE'];
             if (is_numeric($default) || in_array(strtoupper($default), $sqlKeywords, true)) {
                 $def .= ' DEFAULT ' . $default;
+            } elseif (preg_match('/^[a-zA-Z0-9_ .\-]+$/', $default)) {
+                // Safe string literal (letters, digits, spaces, underscores, dots, dashes)
+                $def .= " DEFAULT '" . str_replace("'", "''", $default) . "'";
             } else {
-                $def .= " DEFAULT '" . $default . "'";
+                throw new \InvalidArgumentException("Unsafe default value for column '$name'");
             }
         }
 

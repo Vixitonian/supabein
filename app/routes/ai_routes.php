@@ -1139,7 +1139,8 @@ function ai_execute_build(array $plan, int $userId): array
                 'name'     => \SupaBein\Schema::validateIdentifier($col['name']),
                 'type'     => \SupaBein\Schema::validateDataType($col['type']),
                 'nullable' => (bool)($col['nullable'] ?? true),
-                'default'  => isset($col['default']) ? (string)$col['default'] : null,
+                'default'  => (isset($col['default']) && $col['default'] !== null && $col['default'] !== false)
+                               ? (string)$col['default'] : null,
             ];
         }
 
