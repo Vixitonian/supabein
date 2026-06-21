@@ -1729,6 +1729,65 @@ PROMPT;
             ]);
         }
 
+        // ── Suggest mode: return proposed changes for user review ─────────────
+        if (($req['body']['mode'] ?? '') === 'suggest') {
+            $prompt    = trim($req['body']['prompt']     ?? '');
+            $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
+            if (!$prompt)    abort(422, 'prompt is required');
+            if (!$projectId) abort(422, 'project_id is required for suggest mode');
+
+            $project = $catalog->getProjectById($projectId, $userId);
+            if (!$project) abort(404, 'Project not found');
+
+            $gemini         = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+            $existingSchema = ai_schema_from_db($projectId, $catalog);
+            $schemaCtx      = ai_schema_to_context($existingSchema);
+            $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+
+            $suggestContext = "Project: " . $project['name']
+                . "\n\nExact schema:\n" . $schemaCtx
+                . $currentFiles
+                . "\n\nUser request: " . $prompt;
+
+            $suggestPrompt = <<<'PROMPT'
+You are a SupaBein full-stack AI assistant reviewing an edit request.
+Analyze the project schema, frontend files, and user request.
+Return a list of specific, concrete changes that should be made.
+Each suggestion should be a distinct, independently useful change.
+
+Return ONLY valid JSON:
+{
+  "suggestions": [
+    {
+      "id": "s1",
+      "label": "Short action title (max 60 chars)",
+      "description": "What exactly will change and why (1-2 sentences)"
+    }
+  ]
+}
+
+Rules:
+- 2-8 suggestions maximum
+- Each suggestion must reference actual column names from the schema
+- Be specific: "Add price column display to product cards" not "Update frontend"
+- Include both schema and frontend changes if applicable
+PROMPT;
+
+            try {
+                $result = $gemini->generateJson($suggestPrompt, $suggestContext);
+            } catch (\RuntimeException $e) {
+                $msg = $e->getMessage();
+                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
+                abort(502, 'AI suggest failed: ' . $msg);
+            }
+
+            json_out([
+                'mode'        => 'suggest',
+                'suggestions' => $result['suggestions'] ?? [],
+                'usage'       => $gemini->getLastUsage(),
+            ]);
+        }
+
         $prompt    = trim($req['body']['prompt'] ?? '');
         $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
 
@@ -1918,6 +1977,38 @@ CHAT;
                         $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
                     }
                     unset($file);
+                }
+
+                // ── Column audit pass: fix any hallucinated column names in frontend ──
+                if (!empty($delta['frontend']['files'])) {
+                    $allCols = [];
+                    foreach ($existingSchema['tables'] as $tbl) {
+                        foreach ($tbl['columns'] as $col) {
+                            $allCols[] = '"' . $col['name'] . '" (table "' . $tbl['name'] . '")';
+                        }
+                        $allCols[] = '"id" (auto, table "' . $tbl['name'] . '")';
+                        $allCols[] = '"created_at" (auto, table "' . $tbl['name'] . '")';
+                    }
+                    $colList   = implode(', ', $allCols);
+                    $filesJson = json_encode(['files' => $delta['frontend']['files']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+                    $auditMsg  = "EXACT column names: {$colList}\n\nFrontend files:\n{$filesJson}\n\n"
+                               . "Check every data property access (obj.field, obj['field'], row.field) against the exact column list. "
+                               . "Replace any hallucinated or incorrect column names with the correct ones from the exact list. "
+                               . "Return ONLY: {\"files\": [{\"path\": string, \"content\": string}]}";
+                    $auditSystem = "You are a code reviewer fixing frontend JS column name mismatches. "
+                                 . "Return only {\"files\":[...]} with corrected file contents.";
+                    try {
+                        $audited = $gemini->generateJson($auditSystem, $auditMsg);
+                        if (!empty($audited['files']) && is_array($audited['files'])) {
+                            foreach ($audited['files'] as &$aFile) {
+                                $aFile['path'] = ltrim(preg_replace('#^\./+#', '', $aFile['path'] ?? ''), '/');
+                            }
+                            unset($aFile);
+                            $delta['frontend']['files'] = $audited['files'];
+                        }
+                    } catch (\RuntimeException $e) {
+                        sb_log('ai_edit', 'Column audit skipped: ' . $e->getMessage());
+                    }
                 }
 
                 $summary = [

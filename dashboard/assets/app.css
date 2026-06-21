@@ -1090,6 +1090,29 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   padding: 3px 6px 3px 10px;
   font-size: 12px;
 }
+.ai-actor-text { cursor: pointer; }
+.ai-actor-text:hover { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+.ai-actor-inline-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 12px;
+  outline: none;
+  min-width: 40px;
+  padding: 0;
+}
+.ai-story-inline-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+  padding: 0;
+  flex: 1;
+}
 .ai-chip-remove {
   background: none;
   border: none;
@@ -1110,7 +1133,8 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   border-bottom: 1px solid var(--border);
   font-size: 13px;
 }
-.ai-story-text { flex: 1; line-height: 1.5; }
+.ai-story-text { flex: 1; line-height: 1.5; cursor: pointer; }
+.ai-story-text:hover { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
 .ai-story-remove {
   background: none;
   border: none;
@@ -1150,6 +1174,38 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-intent-summary-actors { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
 .ai-intent-summary-stories { display: flex; flex-direction: column; gap: 2px; }
 .ai-intent-summary-story { font-size: 12px; color: var(--muted); }
+
+/* ─── Edit review card ───────────────────────────────────────────────────── */
+.ai-edit-review-card { padding: 14px 16px; }
+.ai-edit-review-list { display: flex; flex-direction: column; margin-bottom: 4px; }
+.ai-edit-review-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+.ai-edit-review-check { margin-top: 3px; flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+.ai-edit-review-text { flex: 1; min-width: 0; }
+.ai-edit-review-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.ai-edit-review-label:hover { color: var(--accent); }
+.ai-edit-review-desc { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+.ai-edit-review-inline-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+  padding: 0;
+}
 
 /* ─── Recovery card ──────────────────────────────────────────────────────── */
 .ai-recovery-card { padding: 14px 16px; border-left: 3px solid #f87171; }
