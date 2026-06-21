@@ -807,9 +807,6 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
-  let activeJobId   = null;
-  let jobPollTimer  = null;
-  let jobIndicator  = null;
 
   const AI_MODELS = [
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -1366,13 +1363,6 @@ const AiPanel = (() => {
       startThinkingStages(thinkingLabel, msg.stageMode || 'default');
       return bubble;
     }
-    if (msg.type === 'job') {
-      const label = el('span', { class: 'ai-thinking-label' });
-      label.textContent = 'Working in the background…';
-      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
-        el('span', { class: 'ai-thinking-dots' }, '● ● ●'), label
-      );
-    }
     if (msg.type === 'intent') return renderIntentSummaryCard(msg);
     if (msg.type === 'edit-intent') return renderEditIntentSummaryCard(msg);
     if (msg.type === 'recover') return renderRecoveryCard(msg);
@@ -1671,48 +1661,44 @@ const AiPanel = (() => {
       return;
     }
 
-    // ── Review ON: sync intent/suggest (fast ~2-5s), then pipeline for plan+Apply ──
+    // ── Review ON: fetch intent/suggestions synchronously, show review card ──────
     if (reviewEnabled) {
-      await doReviewThenPipeline(prompt, body);
+      const thinkingId = 'review_' + Date.now();
+      if (!selectedProjectId) {
+        if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'intent' });
+        renderMessages();
+        try {
+          const res = await callWithFallback('/v1/ai/build', { review: true, prompt, history: body.history || [] });
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+          renderMessages();
+          if (res.mode === 'intent') showIntentReviewCard(res.intent, body);
+        } catch(e) {
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+          renderSidebar(); renderMessages();
+        }
+      } else {
+        if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'edit' });
+        renderMessages();
+        try {
+          const res = await callWithFallback('/v1/ai/plan', { mode: 'suggest', prompt, project_id: selectedProjectId, history: body.history || [] });
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+          renderMessages();
+          showEditReviewCard(res.suggestions, body);
+        } catch(e) {
+          stopThinkingStages?.();
+          if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+          renderSidebar(); renderMessages();
+        }
+      }
       return;
     }
 
-    // ── Review OFF: pipeline immediately (worker pauses at plan_review for Apply) ──
-    const stageMode = selectedProjectId ? 'edit' : 'build';
-    const { provider: pProvider, model: pModel } = getSelectedModel();
-    const thinkingId = 'pipeline_' + Date.now();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
-    renderMessages();
-
-    try {
-      const result = await Api.post('/v1/ai/apply', {
-        mode: 'pipeline',
-        prompt,
-        project_id: selectedProjectId || undefined,
-        review: false,
-        history: body.history || [],
-        provider: pProvider,
-        model: pModel,
-        async: true,
-      });
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-
-      if (result.job_id) {
-        activeJobId = result.job_id;
-        const jobMsgId = 'job_' + result.job_id;
-        await addMessage(currentSessionId, { id: jobMsgId, role: 'ai', type: 'job', content: '' });
-        showJobIndicator();
-        startJobPolling(result.job_id, stageMode, jobMsgId);
-      }
-    } catch(e) {
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
-    }
-
-    renderSidebar();
-    renderMessages();
+    await proceedWithPlan(body);
   }
 
   function buildApplySummary(result, mode) {
@@ -1744,20 +1730,12 @@ const AiPanel = (() => {
 
     const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
-      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel, async: true });
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
-      if (result.job_id) {
-        activeJobId = result.job_id;
-        const jobMsgId = 'job_' + result.job_id;
-        await addMessage(currentSessionId, { id: jobMsgId, role: 'ai', type: 'job', content: '' });
-        showJobIndicator();
-        startJobPolling(result.job_id, mode, jobMsgId);
-      } else {
-        await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
-      }
+      await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
     } catch(e) {
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
@@ -1789,383 +1767,6 @@ const AiPanel = (() => {
     }
 
     renderMessages();
-  }
-
-  // ── Review ON: sync intent/suggest, then start pipeline with the response ────
-
-  async function doReviewThenPipeline(prompt, body) {
-    const sess = currentSession();
-    const { provider, model } = getSelectedModel();
-    const stageMode = selectedProjectId ? 'edit' : 'build';
-    const thinkingId = 'review_fetch_' + Date.now();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: selectedProjectId ? 'edit' : 'intent' });
-    renderMessages();
-
-    try {
-      if (!selectedProjectId) {
-        const res = await Api.post('/v1/ai/intent', { prompt, history: body.history || [], provider, model });
-        stopThinkingStages?.();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        renderMessages();
-        showIntentReviewForPipeline(res.intent, prompt, body, stageMode);
-      } else {
-        const res = await Api.post('/v1/ai/plan', { mode: 'suggest', prompt, project_id: selectedProjectId, history: body.history || [], provider, model });
-        stopThinkingStages?.();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        renderMessages();
-        showEditReviewForPipeline(res.suggestions, prompt, body, stageMode);
-      }
-    } catch(e) {
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
-      renderSidebar();
-      renderMessages();
-    }
-  }
-
-  function showIntentReviewForPipeline(intent, prompt, body, stageMode) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const existing = container.querySelector('.ai-intent-card');
-    if (existing) existing.remove();
-    const card = renderIntentCard(
-      intent,
-      async (confirmedIntent) => {
-        card.remove();
-        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
-        renderMessages();
-        await startPipelineWithResponse(prompt, body, { intent: confirmedIntent }, stageMode);
-      },
-      () => { card.remove(); renderMessages(); }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
-    renderMessages();
-  }
-
-  function showEditReviewForPipeline(suggestions, prompt, body, stageMode) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const existing = container.querySelector('.ai-edit-review-card');
-    if (existing) existing.remove();
-    const card = renderEditReviewCard(
-      suggestions,
-      async (selected) => {
-        card.remove();
-        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: { confirmed: selected } });
-        renderMessages();
-        await startPipelineWithResponse(prompt, body, { suggestions: selected }, stageMode);
-      },
-      () => { card.remove(); renderMessages(); }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
-    renderMessages();
-  }
-
-  async function startPipelineWithResponse(prompt, body, userResponse, stageMode) {
-    const sess = currentSession();
-    const { provider, model } = getSelectedModel();
-    const thinkingId = 'pipeline_' + Date.now();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
-    renderMessages();
-
-    try {
-      const result = await Api.post('/v1/ai/apply', {
-        mode: 'pipeline',
-        prompt,
-        project_id: selectedProjectId || undefined,
-        review: true,
-        history: body.history || [],
-        provider,
-        model,
-        async: true,
-        user_response: userResponse,
-      });
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-
-      if (result.job_id) {
-        activeJobId = result.job_id;
-        const jobMsgId = 'job_' + result.job_id;
-        await addMessage(currentSessionId, { id: jobMsgId, role: 'ai', type: 'job', content: '' });
-        showJobIndicator();
-        startJobPolling(result.job_id, stageMode, jobMsgId);
-      }
-    } catch(e) {
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
-    }
-    renderSidebar();
-    renderMessages();
-  }
-
-  function renderPlanApplyCard(summary, onApply, onCancel) {
-    const lines = [];
-    if (summary.project_name) {
-      lines.push(el('div', { class: 'ai-plan-row' }, el('strong', {}, 'Project: '), summary.project_name));
-    }
-    if (summary.tables && summary.tables.length) {
-      lines.push(el('div', { class: 'ai-plan-section' }, 'Tables'));
-      summary.tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
-    }
-    if (summary.frontend_files) {
-      lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
-        el('strong', {}, 'Frontend: '), summary.frontend_files + ' file' + (summary.frontend_files !== 1 ? 's' : '')
-      ));
-    }
-    return el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' },
-      el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
-      ...lines,
-      el('div', { class: 'ai-plan-actions' },
-        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
-        el('button', { class: 'btn btn-ai btn-sm', onClick: onApply }, '✓ Apply')
-      )
-    );
-  }
-
-  function renderEditApplyCard(summary, onApply, onCancel) {
-    const lines = [];
-    if (summary.add_tables && summary.add_tables.length) {
-      lines.push(el('div', { class: 'ai-plan-section' }, 'New tables'));
-      summary.add_tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
-    }
-    if (summary.add_columns && summary.add_columns.length) {
-      lines.push(el('div', { class: 'ai-plan-section' }, 'New columns'));
-      summary.add_columns.forEach(c => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + c)));
-    }
-    if (summary.update_policies && summary.update_policies.length) {
-      lines.push(el('div', { class: 'ai-plan-section' }, 'Policy changes'));
-      summary.update_policies.forEach(p => lines.push(el('div', { class: 'ai-plan-item' }, '~ ' + p)));
-    }
-    if (summary.frontend_files) {
-      lines.push(el('div', { class: 'ai-plan-row', style: 'margin-top:6px' },
-        el('strong', {}, 'Frontend: '), summary.frontend_files + ' file' + (summary.frontend_files !== 1 ? 's' : '') + ' updated'
-      ));
-    }
-    if (!summary.add_tables?.length && !summary.add_columns?.length && !summary.update_policies?.length && !summary.frontend_files) {
-      lines.push(el('div', { class: 'text-muted', style: 'font-size:13px' }, 'No changes needed for this request.'));
-    }
-    return el('div', { class: 'ai-msg ai-msg-ai ai-plan-card' },
-      el('div', { class: 'ai-plan-title' }, "Here's my plan:"),
-      ...lines,
-      el('div', { class: 'ai-plan-actions' },
-        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
-        el('button', { class: 'btn btn-ai btn-sm', onClick: onApply }, '✓ Apply')
-      )
-    );
-  }
-
-  function showPlanReviewFromJob(jobId, summary, mode) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const card = renderPlanApplyCard(
-      summary || {},
-      async () => {
-        card.remove();
-        activeJobId = jobId;
-        await resumeJob(jobId, { approved: true }, mode);
-      },
-      () => {
-        card.remove();
-        activeJobId = null;
-        renderMessages();
-      }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
-    renderMessages();
-  }
-
-  function showEditApplyFromJob(jobId, summary, mode) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const card = renderEditApplyCard(
-      summary || {},
-      async () => {
-        card.remove();
-        activeJobId = jobId;
-        await resumeJob(jobId, { approved: true }, mode);
-      },
-      () => {
-        card.remove();
-        activeJobId = null;
-        renderMessages();
-      }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
-    renderMessages();
-  }
-
-  function startJobPolling(jobId, mode, jobMsgId) {
-    let polls = 0;
-    const MAX_POLLS = 240;
-    stopJobPolling();
-    jobPollTimer = setInterval(async () => {
-      polls++;
-      if (polls > MAX_POLLS) {
-        stopJobPolling();
-        hideJobIndicator();
-        const sess = currentSession();
-        if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'AI job timed out after 12 minutes.' });
-        renderMessages();
-        return;
-      }
-      try {
-        const job = await Api.get('/v1/ai/jobs/' + jobId);
-        if (job.status === 'waiting_input') {
-          stopJobPolling();
-          hideJobIndicator();
-          const sess = currentSession();
-          if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
-          renderMessages();
-          const waitMode = job.result?.wait_mode;
-          if (waitMode === 'intent_review') {
-            showIntentReviewFromJob(jobId, job.result.intent, mode);
-          } else if (waitMode === 'edit_review') {
-            showEditReviewFromJob(jobId, job.result.suggestions, mode);
-          } else if (waitMode === 'plan_review') {
-            showPlanReviewFromJob(jobId, job.result.summary, mode);
-          } else if (waitMode === 'edit_apply') {
-            showEditApplyFromJob(jobId, job.result.summary, mode);
-          }
-        } else if (job.status === 'done') {
-          stopJobPolling();
-          hideJobIndicator();
-          await handleJobDone(job, mode, jobMsgId);
-        } else if (job.status === 'failed') {
-          stopJobPolling();
-          hideJobIndicator();
-          await handleJobFailed(job, mode, jobMsgId);
-        }
-      } catch(e) { /* keep polling on network error */ }
-    }, 3000);
-  }
-
-  async function resumeJob(jobId, response, mode) {
-    try {
-      await Api.post('/v1/ai/jobs/' + jobId + '/resume', { response });
-      activeJobId = jobId;
-      const jobMsgId = 'job_resume_' + jobId;
-      const sess = currentSession();
-      if (sess) {
-        sess.messages.push({ id: jobMsgId, role: 'ai', type: 'job', content: '' });
-      }
-      showJobIndicator();
-      startJobPolling(jobId, mode, jobMsgId);
-      renderMessages();
-    } catch(e) {
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Failed to resume job: ${e.message}` });
-      renderMessages();
-    }
-  }
-
-  function showIntentReviewFromJob(jobId, intent, mode) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const existing = container.querySelector('.ai-intent-card');
-    if (existing) existing.remove();
-    const card = renderIntentCard(
-      intent,
-      async (confirmedIntent) => {
-        card.remove();
-        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
-        renderMessages();
-        await resumeJob(jobId, { intent: confirmedIntent }, mode);
-      },
-      () => { card.remove(); renderMessages(); }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
-    renderMessages();
-  }
-
-  function showEditReviewFromJob(jobId, suggestions, mode) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const existing = container.querySelector('.ai-edit-review-card');
-    if (existing) existing.remove();
-    const card = renderEditReviewCard(
-      suggestions,
-      async (selected) => {
-        card.remove();
-        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: { confirmed: selected } });
-        renderMessages();
-        await resumeJob(jobId, { suggestions: selected }, mode);
-      },
-      () => { card.remove(); renderMessages(); }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
-    renderMessages();
-  }
-
-  function stopJobPolling() {
-    if (jobPollTimer) { clearInterval(jobPollTimer); jobPollTimer = null; }
-  }
-
-  async function handleJobDone(job, mode, jobMsgId) {
-    const sess = currentSession();
-    if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
-    const result = job.result || {};
-    const summaryMode = (mode === 'pipeline_edit' || mode === 'edit') ? 'edit' : 'build';
-    await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
-    await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, summaryMode) });
-    renderMessages();
-    renderSidebar();
-    activeJobId = null;
-  }
-
-  async function handleJobFailed(job, mode, jobMsgId) {
-    const sess = currentSession();
-    if (sess && jobMsgId) sess.messages = sess.messages.filter(m => m.id !== jobMsgId);
-    await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `AI job failed: ${job.error || 'Unknown error'}` });
-    renderMessages();
-    activeJobId = null;
-  }
-
-  function showJobIndicator() {
-    if (!jobIndicator) {
-      jobIndicator = el('div', { class: 'ai-job-indicator' },
-        el('span', { class: 'ai-job-indicator-dot' }),
-        el('span', { class: 'ai-job-indicator-label' }, 'AI is building…'),
-        el('button', { class: 'ai-job-indicator-view', onClick: () => AiPanel.open() }, 'View')
-      );
-      document.body.appendChild(jobIndicator);
-    }
-    requestAnimationFrame(() => jobIndicator.classList.add('ai-job-indicator-visible'));
-  }
-
-  function hideJobIndicator() {
-    if (jobIndicator) jobIndicator.classList.remove('ai-job-indicator-visible');
-  }
-
-  async function checkForActiveJobs() {
-    if (activeJobId || jobPollTimer) return;
-    try {
-      const jobs = await Api.get('/v1/ai/jobs');
-      if (Array.isArray(jobs) && jobs.length > 0) {
-        const job = jobs[0];
-        const summaryMode = (job.mode === 'pipeline_edit' || job.mode === 'edit') ? 'edit' : 'build';
-        if (job.status === 'waiting_input') {
-          // Resume an interrupted review/apply card
-          const fullJob = await Api.get('/v1/ai/jobs/' + job.id);
-          const waitMode = fullJob.result?.wait_mode;
-          if (waitMode === 'intent_review') { activeJobId = job.id; showIntentReviewFromJob(job.id, fullJob.result.intent, summaryMode); }
-          else if (waitMode === 'edit_review') { activeJobId = job.id; showEditReviewFromJob(job.id, fullJob.result.suggestions, summaryMode); }
-          else if (waitMode === 'plan_review') showPlanReviewFromJob(job.id, fullJob.result.summary, summaryMode);
-          else if (waitMode === 'edit_apply') showEditApplyFromJob(job.id, fullJob.result.summary, summaryMode);
-        } else {
-          activeJobId = job.id;
-          showJobIndicator();
-          startJobPolling(job.id, summaryMode, null);
-        }
-      }
-    } catch(e) { /* ignore */ }
   }
 
   function buildPanel() {
@@ -2317,7 +1918,6 @@ const AiPanel = (() => {
     if (fab) fab.classList.add('ai-fab-hidden');
 
     setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
-    checkForActiveJobs();
   }
 
   function close() {
@@ -2335,7 +1935,7 @@ const AiPanel = (() => {
     if (isOpen) close(); else open(options);
   }
 
-  return { open, close, toggle, checkForActiveJobs };
+  return { open, close, toggle };
 })();
 
 function initAiFab() {
@@ -3877,4 +3477,4 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
 });
 
-document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); AiPanel.checkForActiveJobs(); });
+document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); });

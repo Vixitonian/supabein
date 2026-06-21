@@ -7,12 +7,6 @@ require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 
-function can_exec(): bool {
-    if (!function_exists('exec')) return false;
-    $disabled = array_map('trim', explode(',', (string)ini_get('disable_functions')));
-    return !in_array('exec', $disabled, true);
-}
-
 // ─── Gemini system prompts ───────────────────────────────────────────────────
 
 // ── Pass 1: schema only ──────────────────────────────────────────────────────
@@ -2220,7 +2214,6 @@ PROMPT;
 
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
-        $async   = !empty($req['body']['async']) && can_exec();
 
         $mode = $req['body']['mode'] ?? '';
         $plan = $req['body']['plan'] ?? [];
@@ -2232,17 +2225,6 @@ PROMPT;
             $validationError = ai_validate_plan($plan);
             if ($validationError) abort(422, 'Invalid plan: ' . $validationError);
 
-            if ($async) {
-                $job     = $catalog->createJob($userId, 'build', ['plan' => $plan]);
-                $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
-                $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
-                         . ' ' . (int)$job['id']
-                         . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
-                exec($cmd);
-                json_out(['job_id' => $job['id'], 'status' => 'queued'], 202);
-                return;
-            }
-
             $result = ai_execute_build($plan, $userId);
             json_out($result, 201);
 
@@ -2253,21 +2235,6 @@ PROMPT;
             if (!$project) abort(404, 'Project not found');
             $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
             if ($deltaError) abort(422, 'Invalid edit plan: ' . $deltaError);
-
-            if ($async) {
-                $jobPayload = ['delta' => $plan, 'project_id' => $projectId];
-                if (!empty($plan['frontend']['files'])) {
-                    $jobPayload['frontend_files'] = $plan['frontend']['files'];
-                }
-                $job     = $catalog->createJob($userId, 'edit', $jobPayload);
-                $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
-                $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
-                         . ' ' . (int)$job['id']
-                         . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
-                exec($cmd);
-                json_out(['job_id' => $job['id'], 'status' => 'queued'], 202);
-                return;
-            }
 
             $result = ai_execute_edit($plan, $projectId, $userId);
             if (!empty($plan['frontend']['files'])) {
@@ -2284,73 +2251,10 @@ PROMPT;
             }
             json_out($result);
 
-        } elseif ($mode === 'pipeline') {
-            $prompt    = trim($req['body']['prompt'] ?? '');
-            $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
-            $review    = !empty($req['body']['review']);
-            $history   = array_slice((array)($req['body']['history'] ?? []), 0, 20);
-            $provider  = $req['body']['provider'] ?? null;
-            $model     = $req['body']['model']    ?? null;
-
-            if (!$prompt) abort(422, 'prompt is required for pipeline mode');
-
-            if ($async) {
-                $userResponse = $req['body']['user_response'] ?? null;
-                $jobMode      = $projectId ? 'pipeline_edit' : 'pipeline_build';
-                $job          = $catalog->createJob($userId, $jobMode, [
-                    'prompt'        => $prompt,
-                    'project_id'    => $projectId,
-                    'review'        => $review,
-                    'history'       => $history,
-                    'provider'      => $provider,
-                    'model'         => $model,
-                    'user_response' => $userResponse,
-                ]);
-                $logFile = SUPABEIN_ROOT . '/storage/worker_' . $job['id'] . '.log';
-                $cmd     = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
-                         . ' ' . (int)$job['id']
-                         . ' > ' . escapeshellarg($logFile) . ' 2>&1 &';
-                exec($cmd);
-                json_out(['job_id' => $job['id'], 'status' => 'queued'], 202);
-                return;
-            }
-            abort(503, 'Pipeline mode requires background execution (exec() unavailable)');
-
         } else {
-            abort(422, 'mode must be build, edit, or pipeline');
+            abort(422, 'mode must be build or edit');
         }
 
-    }, ['auth_middleware']);
-
-    // ── Resume a waiting job ───────────────────────────────────────────────────
-    $router->post('/v1/ai/jobs/:id/resume', function (array $req): void {
-        $userId  = (int)$req['auth']['user_id'];
-        $jobId   = (int)$req['params']['id'];
-        $catalog = \SupaBein\Catalog::getInstance();
-        $db      = \App::get('db');
-
-        $job = $catalog->getJobById($jobId, $userId);
-        if (!$job || $job['status'] !== 'waiting_input') {
-            abort(404, 'Job not found or not awaiting input');
-        }
-
-        $payloadStmt = $db->prepare('SELECT payload FROM ai_jobs WHERE id=?');
-        $payloadStmt->execute([$jobId]);
-        $payload = json_decode($payloadStmt->fetchColumn(), true) ?: [];
-
-        $payload['user_response'] = $req['body']['response'] ?? null;
-
-        $db->prepare("UPDATE ai_jobs SET status='queued', result=NULL, payload=? WHERE id=?")
-           ->execute([json_encode($payload, JSON_UNESCAPED_UNICODE), $jobId]);
-
-        if (can_exec()) {
-            $logFile = SUPABEIN_ROOT . '/storage/worker_' . $jobId . '.log';
-            $cmd = PHP_BINARY . ' ' . escapeshellarg(SUPABEIN_ROOT . '/app/workers/ai_worker.php')
-                 . ' ' . $jobId . ' >> ' . escapeshellarg($logFile) . ' 2>&1 &';
-            exec($cmd);
-        }
-
-        json_out(['ok' => true, 'job_id' => $jobId]);
     }, ['auth_middleware']);
 
     // ── AI Sessions (DB-backed) ────────────────────────────────────────────────
@@ -2400,20 +2304,4 @@ PROMPT;
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
 
-    // ── AI Jobs ────────────────────────────────────────────────────────────────
-
-    $router->get('/v1/ai/jobs', function (array $req): void {
-        $userId  = (int)$req['auth']['user_id'];
-        $catalog = \SupaBein\Catalog::getInstance();
-        json_out($catalog->listActiveJobs($userId));
-    }, ['auth_middleware']);
-
-    $router->get('/v1/ai/jobs/:id', function (array $req): void {
-        $userId  = (int)$req['auth']['user_id'];
-        $jobId   = (int)$req['params']['id'];
-        $catalog = \SupaBein\Catalog::getInstance();
-        $job     = $catalog->getJobById($jobId, $userId);
-        if (!$job) abort(404, 'Job not found');
-        json_out($job);
-    }, ['auth_middleware']);
 }
