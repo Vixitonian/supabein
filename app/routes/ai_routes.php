@@ -427,7 +427,7 @@ function ai_deploy_files(
 
     // Substitution map — replace placeholders with real credentials.
     // Already-substituted files copied from current/ contain no placeholders.
-    $apiBase = rtrim($config['API_BASE_URL'], '/') . '/v1';
+    $apiBase = rtrim($config['API_BASE_URL'], '/') . '/api/v1';
     $replacements = [
         '__SB_URL__'      => $apiBase,
         '__SB_PID__'      => (string)$project['id'],
@@ -2192,7 +2192,7 @@ CHAT;
                 }
                 $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
 
-                $apiBase       = rtrim($config['API_BASE_URL'], '/') . '/v1';
+                $apiBase       = rtrim($config['API_BASE_URL'], '/') . '/api/v1';
                 $frontendFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
                 $context = "Project: " . $project['name'] . "\nAPI base: " . $apiBase . "\nSchema:\n" . $schemaContext . $frontendFiles . "\n\nIssue: " . $prompt;
 

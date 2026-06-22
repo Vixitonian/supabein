@@ -807,6 +807,10 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
+  let buildMode = localStorage.getItem('sb:ai_build') === '1';
+  let liveTraceMsg = null;
+  let operationInProgress = false;
+  let operationMode = null;
 
   const AI_MODELS = [
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -1160,25 +1164,67 @@ const AiPanel = (() => {
     const stageMode = body.project_id ? 'edit' : 'build';
     const thinkingId = 'thinking_' + Date.now();
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+
+    liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
+    if (sess) sess.messages.push(liveTraceMsg);
+    operationInProgress = true;
+    operationMode = stageMode;
     renderMessages();
 
-    const traceLog = [];
     const t0 = Date.now();
     try {
       const response = await callWithFallback('/v1/ai/plan', body);
-      traceLog.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
+      renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await handlePlanResponse(response);
     } catch(e) {
-      traceLog.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
+      renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.`, retryBody: body, retryType: 'plan' });
     }
-    if (sess && traceLog.length) {
-      await addMessage(currentSessionId, { role: 'ai', type: 'trace', data: traceLog });
+    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+    operationInProgress = false;
+    operationMode = null;
+    if (sess) await persistSession(sess);
+    renderSidebar();
+    renderMessages();
+  }
+
+  async function proceedWithBuildDirect(body) {
+    const sess = currentSession();
+    const stageMode = body.project_id ? 'edit' : 'build';
+    const thinkingId = 'direct_' + Date.now();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+
+    liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
+    if (sess) sess.messages.push(liveTraceMsg);
+    operationInProgress = true;
+    operationMode = stageMode;
+    renderMessages();
+
+    const t0 = Date.now();
+    try {
+      const response = await callWithFallback('/v1/ai/plan', body);
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
+      renderMessages();
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: response, settled: false });
+    } catch(e) {
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
+      renderMessages();
+      stopThinkingStages?.();
+      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
     }
+    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+    operationInProgress = false;
+    operationMode = null;
+    if (sess) await persistSession(sess);
     renderSidebar();
     renderMessages();
   }
@@ -1383,8 +1429,32 @@ const AiPanel = (() => {
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
+    if (msg.type === 'deploy-confirm') return renderDeployConfirmCard(msg);
     if (msg.type === 'error') {
-      return el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ ' + msg.content);
+      const div = el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' },
+        el('div', {}, '✗ ' + msg.content)
+      );
+      const actions = el('div', { class: 'ai-error-actions' });
+      if (msg.retryType === 'plan' && msg.retryBody) {
+        actions.appendChild(el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+          const sess = currentSession();
+          if (sess) { sess.messages = sess.messages.filter(m => m.id !== msg.id); saveSessions(); }
+          await proceedWithPlan(msg.retryBody);
+        }}, '↺ Retry'));
+      }
+      if (msg.retryType === 'apply' && msg.retryBody) {
+        actions.appendChild(el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+          const sess = currentSession();
+          if (sess) { sess.messages = sess.messages.filter(m => m.id !== msg.id); saveSessions(); }
+          await applyPlan(msg.retryBody.plan, msg.retryBody.mode, null);
+        }}, '↺ Retry'));
+      }
+      actions.appendChild(el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        const sess = currentSession();
+        if (sess) { sess.messages = sess.messages.filter(m => m.id !== msg.id); saveSessions(); renderMessages(); }
+      }}, 'Dismiss'));
+      div.appendChild(actions);
+      return div;
     }
     if (msg.type === 'trace') return renderTraceCard(msg);
     const bubble = el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
@@ -1602,6 +1672,38 @@ const AiPanel = (() => {
     return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
   }
 
+  function renderDeployConfirmCard(msg) {
+    const { plan, summary, mode } = msg.data;
+    const name = summary?.project_name || plan?.project_name || '';
+    const detail = mode === 'build'
+      ? `${summary?.tables?.length || 0} table(s), ${summary?.frontend_files || 0} file(s)`
+      : `${(summary?.add_tables?.length || 0) + (summary?.add_columns?.length || 0)} change(s), ${summary?.frontend_files || 0} file(s) updated`;
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-deploy-confirm-card' },
+      el('div', { class: 'ai-plan-title' }, mode === 'build' ? '🔨 Ready to build' : '✏️ Ready to update'),
+      el('div', { class: 'ai-plan-row' }, el('strong', {}, name ? name + ' — ' : ''), detail)
+    );
+    if (!msg.settled) {
+      const actionsDiv = el('div', { class: 'ai-plan-actions' });
+      const deployBtn = el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+        delete msg.applyError; msg.settled = true; saveSessions();
+        actionsDiv.innerHTML = ''; actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Deploying…'));
+        await applyPlan(plan, mode, msg);
+      }}, '🚀 Deploy');
+      const cancelBtn = el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        msg.settled = true; msg.cancelled = true; saveSessions(); renderMessages();
+      }}, 'Cancel');
+      if (msg.applyError) actionsDiv.appendChild(el('div', { class: 'ai-plan-error-notice' }, '✕ ' + msg.applyError));
+      actionsDiv.appendChild(cancelBtn);
+      actionsDiv.appendChild(deployBtn);
+      card.appendChild(actionsDiv);
+    } else if (msg.cancelled) {
+      card.appendChild(el('div', { class: 'ai-plan-actions' }, el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled')));
+    } else {
+      card.appendChild(el('div', { class: 'ai-plan-actions' }, el('span', { style: 'font-size:12px;color:var(--accent)' }, '✓ Deployed')));
+    }
+    return card;
+  }
+
   function renderTraceCard(msg) {
     const rows = (msg.data || []).map(entry => {
       const ok = entry.status === 200;
@@ -1621,8 +1723,11 @@ const AiPanel = (() => {
         reqDetails, resDetails
       );
     });
-    return el('details', { class: 'ai-msg ai-msg-ai ai-trace-card' },
-      el('summary', { class: 'ai-trace-top-summary' }, 'Session trace'),
+    const topAttrs = { class: 'ai-msg ai-msg-ai ai-trace-card' };
+    if (msg.live) topAttrs.open = true;
+    const liveDot = msg.live ? el('span', { class: 'ai-trace-live-dot' }) : null;
+    return el('details', topAttrs,
+      el('summary', { class: 'ai-trace-top-summary' }, ...(liveDot ? [liveDot] : []), 'Session trace'),
       ...rows
     );
   }
@@ -1721,17 +1826,13 @@ const AiPanel = (() => {
       }).filter(h => h.text.trim() !== '');
     }
 
-    // ── Chat detection: don't pipeline casual messages ───────────────────────
-    const isChat = /^(hi|hello|hey|yo|sup|howdy|hiya|thanks|thank\s+you|ok|okay|sure|cool|great|nice|perfect|lol|haha)[\s!.,?]*$/i.test(prompt)
-      || prompt.endsWith('?')
-      || (prompt.length < 30 && !/\b(app|application|website|site|build|create|make|blog|store|shop|todo|task|system|tool|dashboard|tracker|manager|platform|api|database)\b/i.test(prompt));
-
-    if (isChat) {
+    // ── Chat mode: route everything through the conversational plan endpoint ──
+    if (!buildMode) {
       await proceedWithPlan(body);
       return;
     }
 
-    // ── Review ON: fetch intent/suggestions synchronously, show review card ──────
+    // ── Build mode, Review ON: intent/suggestions review cards ──────────────
     if (reviewEnabled) {
       const thinkingId = 'review_' + Date.now();
       if (!selectedProjectId) {
@@ -1746,7 +1847,7 @@ const AiPanel = (() => {
         } catch(e) {
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
           renderSidebar(); renderMessages();
         }
       } else {
@@ -1761,14 +1862,15 @@ const AiPanel = (() => {
         } catch(e) {
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
           renderSidebar(); renderMessages();
         }
       }
       return;
     }
 
-    await proceedWithPlan(body);
+    // ── Build mode, Review OFF: fast path — deploy confirm card ─────────────
+    await proceedWithBuildDirect(body);
   }
 
   function buildApplySummary(result, mode) {
@@ -1796,21 +1898,29 @@ const AiPanel = (() => {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
+
+    if (!liveTraceMsg) {
+      liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
+      if (sess) sess.messages.push(liveTraceMsg);
+    }
+    operationInProgress = true;
+    operationMode = mode;
     renderMessages();
 
     const { provider: aProvider, model: aModel } = getSelectedModel();
-    const traceLog = [];
     try {
       const t0 = Date.now();
       const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
-      traceLog.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
+      renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
     } catch(e) {
-      traceLog.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
+      renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
@@ -1819,13 +1929,14 @@ const AiPanel = (() => {
         planMsg.applyError = e.message;
         saveSessions();
       } else {
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: { plan, mode }, retryType: 'apply' });
       }
     }
 
-    if (sess && traceLog.length) {
-      await addMessage(currentSessionId, { role: 'ai', type: 'trace', data: traceLog });
-    }
+    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+    operationInProgress = false;
+    operationMode = null;
+    if (sess) await persistSession(sess);
 
     renderMessages();
   }
@@ -1877,11 +1988,24 @@ const AiPanel = (() => {
       }
     }, 'Review');
 
+    const modeBtn = el('button', {
+      class: 'ai-mode-btn' + (buildMode ? ' active' : ''),
+      title: buildMode ? 'Switch to Chat mode' : 'Switch to Build mode',
+      onClick: () => {
+        buildMode = !buildMode;
+        localStorage.setItem('sb:ai_build', buildMode ? '1' : '0');
+        modeBtn.className = 'ai-mode-btn' + (buildMode ? ' active' : '');
+        modeBtn.title = buildMode ? 'Switch to Chat mode' : 'Switch to Build mode';
+        modeBtn.textContent = buildMode ? '🔨 Build' : '💬 Chat';
+      }
+    }, buildMode ? '🔨 Build' : '💬 Chat');
+
     const inputBar = el('div', { class: 'ai-input-bar' },
       el('div', { class: 'ai-input-card' },
         textarea,
         el('div', { class: 'ai-input-actions' },
           projectPicker,
+          modeBtn,
           reviewToggle,
           sendBtn
         )
@@ -1973,6 +2097,16 @@ const AiPanel = (() => {
     renderProjectPicker();
 
     await loadSessionMessages(currentSessionId);
+
+    if (operationInProgress) {
+      const sess = currentSession();
+      if (sess && !sess.messages.some(m => m.type === 'thinking')) {
+        sess.messages.push({ id: 'thinking_reopen', role: 'ai', type: 'thinking', content: '', stageMode: operationMode || 'default' });
+      }
+      if (liveTraceMsg && sess && !sess.messages.some(m => m.id === liveTraceMsg.id)) {
+        sess.messages.push(liveTraceMsg);
+      }
+    }
     renderMessages();
 
     panelEl.classList.add('ai-panel-open');

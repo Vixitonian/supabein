@@ -1401,7 +1401,7 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   border-radius: 6px;
   padding: 0;
   font-size: 12px;
-  overflow: hidden;
+  overflow: visible;
 }
 .ai-trace-top-summary {
   cursor: pointer;
@@ -1450,7 +1450,7 @@ details[open] > .ai-trace-sub > summary::before { content: '▾ '; }
   font-family: monospace;
   font-size: 11px;
   padding: 8px 16px;
-  overflow-x: auto;
+  overflow: auto;
   max-height: 260px;
   white-space: pre;
 }
@@ -1471,4 +1471,40 @@ details[open] > .ai-trace-sub > summary::before { content: '▾ '; }
 @keyframes fab-badge-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50%       { opacity: 0.5; transform: scale(0.75); }
+}
+
+/* Mode toggle button (Chat / Build) */
+.ai-mode-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ai-mode-btn.active {
+  background: rgba(62,207,142,0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ai-mode-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Deploy confirm card */
+.ai-deploy-confirm-card { border: 1px solid var(--border); }
+
+/* Error retry/dismiss actions */
+.ai-error-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+/* Live trace indicator dot */
+.ai-trace-live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  animation: fab-badge-pulse 1.2s ease-in-out infinite;
 }
