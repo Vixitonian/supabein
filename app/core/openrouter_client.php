@@ -49,7 +49,7 @@ class OpenRouterClient
             'model'           => $this->model,
             'messages'        => $messages,
             'response_format' => ['type' => 'json_object'],
-            'max_tokens'      => 16384,
+            'max_tokens'      => 32768,
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
