@@ -1370,3 +1370,105 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   cursor: pointer;
 }
 .ai-job-indicator-view:hover { background: rgba(62,207,142,0.1); }
+
+/* Inline plan name edit */
+.ai-plan-project-name {
+  cursor: pointer;
+  border-bottom: 1px dashed #555;
+  padding-bottom: 1px;
+}
+.ai-plan-project-name:hover { border-bottom-color: #aaa; }
+.ai-plan-name-input {
+  font-size: 13px;
+  padding: 1px 4px;
+  background: var(--bg2, #1e2130);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  width: 160px;
+  outline: none;
+}
+.ai-plan-error-notice {
+  color: #f87171;
+  font-size: 12px;
+  margin: 4px 0 2px;
+  width: 100%;
+}
+
+/* Session trace card */
+.ai-trace-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0;
+  font-size: 12px;
+  overflow: hidden;
+}
+.ai-trace-top-summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+  list-style: none;
+}
+.ai-trace-top-summary::before { content: '▸ '; font-size: 10px; }
+details[open] > .ai-trace-top-summary::before { content: '▾ '; }
+.ai-trace-row {
+  border-top: 1px solid var(--border);
+}
+.ai-trace-summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  user-select: none;
+  list-style: none;
+  gap: 8px;
+}
+.ai-trace-summary::before { content: '▸ '; font-size: 9px; color: var(--muted); }
+details[open] > .ai-trace-summary::before { content: '▾ '; }
+.ai-trace-call { font-family: monospace; color: var(--text); }
+.ai-trace-meta { color: var(--muted); white-space: nowrap; }
+.ai-trace-sub {
+  border-top: 1px solid var(--border);
+}
+.ai-trace-sub > summary {
+  cursor: pointer;
+  padding: 4px 16px;
+  color: var(--muted);
+  font-size: 11px;
+  user-select: none;
+  list-style: none;
+}
+.ai-trace-sub > summary::before { content: '▸ '; font-size: 9px; }
+details[open] > .ai-trace-sub > summary::before { content: '▾ '; }
+.ai-trace-json {
+  background: var(--bg, #0f1117);
+  color: #7dd3fc;
+  font-family: monospace;
+  font-size: 11px;
+  padding: 8px 16px;
+  overflow-x: auto;
+  max-height: 260px;
+  white-space: pre;
+}
+
+/* FAB badge — green dot when session has activity */
+.ai-fab { position: relative; }
+.ai-fab-active::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  background: #22c55e;
+  border-radius: 50%;
+  animation: fab-badge-pulse 2s ease-in-out infinite;
+}
+@keyframes fab-badge-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.75); }
+}
