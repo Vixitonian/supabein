@@ -50,7 +50,6 @@ class NvidiaClient
             'max_tokens'           => 8192,
             'stream'               => false,
             'chat_template_kwargs' => ['enable_thinking' => false],
-            'response_format'      => ['type' => 'json_object'],
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
