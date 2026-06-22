@@ -56,6 +56,10 @@ const Api = (() => {
       return null;
     }
 
+    // Sliding renewal: backend sends a fresh token when the current one is near expiry
+    const refreshed = res.headers.get('X-Refresh-Token');
+    if (refreshed) Auth.setToken(refreshed);
+
     const json = await res.json().catch(() => ({}));
 
     if (!res.ok) {
@@ -1010,13 +1014,54 @@ const AiPanel = (() => {
       return;
     }
     sessions.forEach(sess => {
+      const menuDot = el('button', { class: 'ai-session-menu-btn', title: 'Session options' }, '⋮');
+      const menuDrop = el('div', { class: 'ai-session-menu-drop hidden' });
+
+      const renameItem = el('div', { class: 'ai-session-menu-item' }, 'Rename');
+      renameItem.addEventListener('click', async e => {
+        e.stopPropagation();
+        menuDrop.classList.add('hidden');
+        const newName = prompt('Rename session:', sess.name);
+        if (newName && newName.trim()) {
+          sess.name = newName.trim();
+          await persistSession(sess);
+          renderSidebar();
+        }
+      });
+
+      const deleteItem = el('div', { class: 'ai-session-menu-item ai-session-menu-danger' }, 'Delete');
+      deleteItem.addEventListener('click', async e => {
+        e.stopPropagation();
+        menuDrop.classList.add('hidden');
+        try {
+          await Api.delete('/v1/ai/sessions/' + sess.id);
+          sessions = sessions.filter(s => s.id !== sess.id);
+          if (currentSessionId === sess.id) {
+            currentSessionId = sessions[0]?.id || null;
+            if (currentSessionId) await switchSession(currentSessionId);
+            else renderMessages();
+          }
+          renderSidebar();
+        } catch(e) { /* non-fatal */ }
+      });
+
+      menuDrop.appendChild(renameItem);
+      menuDrop.appendChild(deleteItem);
+
+      menuDot.addEventListener('click', e => {
+        e.stopPropagation();
+        document.querySelectorAll('.ai-session-menu-drop').forEach(d => { if (d !== menuDrop) d.classList.add('hidden'); });
+        menuDrop.classList.toggle('hidden');
+      });
+      document.addEventListener('click', () => menuDrop.classList.add('hidden'), { once: false, capture: false });
+
       const item = el('div', {
         class: 'ai-session-item' + (sess.id === currentSessionId ? ' active' : ''),
         onClick: () => {
           switchSession(sess.id);
           if (window.innerWidth < 768) toggleSidebar(false);
         }
-      }, sess.name);
+      }, el('span', { class: 'ai-session-item-name' }, sess.name), menuDot, menuDrop);
       container.appendChild(item);
     });
   }
@@ -1649,12 +1694,27 @@ const AiPanel = (() => {
 
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
 
+    const actions = el('div', { style: 'margin-top:10px;display:flex;gap:8px;flex-wrap:wrap' });
+
     if (data.project) {
-      card.appendChild(el('button', {
-        class: 'btn btn-primary btn-sm', style: 'margin-top:10px',
+      actions.appendChild(el('button', {
+        class: 'btn btn-primary btn-sm',
         onClick: () => { close(); Router.navigate('/projects/' + data.project.id); }
       }, 'Open Project →'));
     }
+
+    // View Site button — shown when the build deployed a live site
+    if (data.site && data.site.id) {
+      const siteUrl = `/sites/s${data.site.id}/current/`;
+      actions.appendChild(el('a', {
+        class: 'btn btn-secondary btn-sm',
+        href: siteUrl,
+        target: '_blank',
+        rel: 'noopener'
+      }, 'View Site →'));
+    }
+
+    if (actions.children.length) card.appendChild(actions);
     return card;
   }
 
@@ -1704,24 +1764,105 @@ const AiPanel = (() => {
     return card;
   }
 
+  function renderAiCallEntry(ai) {
+    const STAGE_LABELS = {
+      chat:            'Chat Response',
+      schema_pass_1:   'Schema Pass 1',
+      schema_retry:    '↩ Schema Retry (self-healing)',
+      frontend_pass_2: 'Frontend Pass 2',
+      edit_pass:       'Edit Pass',
+      edit_retry:      '↩ Edit Retry (self-healing)',
+      diagnose:        'Diagnose',
+    };
+    const label    = STAGE_LABELS[ai.stage] || ai.stage;
+    const msStr    = ai.ms ? `${(ai.ms / 1000).toFixed(1)}s` : '';
+    const tok      = ai.tokens || {};
+    const tokStr   = tok.total_tokens ? `${tok.total_tokens.toLocaleString()} tok` : '';
+    const retryBadge = ai.retry
+      ? el('span', { class: 'ai-trace-retry-badge' }, 'retry')
+      : null;
+
+    const children = [
+      el('summary', { class: 'ai-trace-ai-summary' },
+        el('span', { class: 'ai-trace-ai-stage' }, label),
+        el('span', { class: 'ai-trace-meta' }, [msStr, tokStr].filter(Boolean).join('  ')),
+        ...(retryBadge ? [retryBadge] : [])
+      )
+    ];
+
+    if (ai.error) {
+      children.push(el('div', { class: 'ai-trace-error-notice' }, 'Rejected: ' + ai.error));
+    }
+
+    if (ai.system) {
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, `System Prompt (${ai.system.length.toLocaleString()} chars)`),
+        el('pre', { class: 'ai-trace-json ai-trace-prompt' }, ai.system)
+      ));
+    }
+
+    if (ai.history && ai.history.length) {
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, `History (${ai.history.length} turn${ai.history.length !== 1 ? 's' : ''})`),
+        el('pre', { class: 'ai-trace-json' }, JSON.stringify(ai.history, null, 2))
+      ));
+    }
+
+    if (ai.user_msg) {
+      const truncNote = ai.user_msg_truncated
+        ? ` [showing 5 000 of ${(ai.user_msg_len || 0).toLocaleString()} chars]` : '';
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, `User Message${truncNote}`),
+        el('pre', { class: 'ai-trace-json' }, ai.user_msg)
+      ));
+    }
+
+    if (ai.response !== undefined) {
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, 'AI Response'),
+        el('pre', { class: 'ai-trace-json' }, JSON.stringify(ai.response, null, 2))
+      ));
+    }
+
+    if (tok.total_tokens) {
+      children.push(el('div', { class: 'ai-trace-tokens' },
+        `Tokens: ${(tok.prompt_tokens || 0).toLocaleString()} in + ${(tok.completion_tokens || 0).toLocaleString()} out = ${(tok.total_tokens || 0).toLocaleString()} total`
+      ));
+    }
+
+    return el('details', { class: 'ai-trace-ai-entry' }, ...children);
+  }
+
   function renderTraceCard(msg) {
     const rows = (msg.data || []).map(entry => {
       const ok = entry.status === 200;
-      const reqDetails = el('details', { class: 'ai-trace-sub' },
-        el('summary', {}, 'Request'),
-        el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.inputs, null, 2))
-      );
-      const resDetails = el('details', { class: 'ai-trace-sub' },
-        el('summary', {}, 'Response'),
-        el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.outputs, null, 2))
-      );
-      return el('details', { class: 'ai-trace-row' },
+      const rowChildren = [
         el('summary', { class: 'ai-trace-summary' },
           el('span', { class: 'ai-trace-call' }, entry.call),
           el('span', { class: 'ai-trace-meta' }, `${(entry.ms / 1000).toFixed(1)}s  ${ok ? '✓' : '✕'} ${entry.status}`)
         ),
-        reqDetails, resDetails
-      );
+        el('details', { class: 'ai-trace-sub' },
+          el('summary', {}, 'Request'),
+          el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.inputs, null, 2))
+        ),
+        el('details', { class: 'ai-trace-sub' },
+          el('summary', {}, 'Response'),
+          el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.outputs, null, 2))
+        ),
+      ];
+
+      // AI-internal call breakdown (schema pass, frontend pass, retries, etc.)
+      const aiCalls = entry.outputs?.aiTrace;
+      if (aiCalls && aiCalls.length) {
+        rowChildren.push(
+          el('div', { class: 'ai-trace-ai-section' },
+            el('div', { class: 'ai-trace-ai-header' }, `AI Calls (${aiCalls.length})`),
+            ...aiCalls.map(renderAiCallEntry)
+          )
+        );
+      }
+
+      return el('details', { class: 'ai-trace-row' }, ...rowChildren);
     });
     const topAttrs = { class: 'ai-msg ai-msg-ai ai-trace-card' };
     if (msg.live) topAttrs.open = true;
@@ -1828,6 +1969,7 @@ const AiPanel = (() => {
 
     // ── Chat mode: route everything through the conversational plan endpoint ──
     if (!buildMode) {
+      body.chatMode = true;  // tells the backend to skip build-intent detection
       await proceedWithPlan(body);
       return;
     }
@@ -1997,8 +2139,12 @@ const AiPanel = (() => {
         modeBtn.className = 'ai-mode-btn' + (buildMode ? ' active' : '');
         modeBtn.title = buildMode ? 'Switch to Chat mode' : 'Switch to Build mode';
         modeBtn.textContent = buildMode ? '🔨 Build' : '💬 Chat';
+        reviewToggle.style.display = buildMode ? '' : 'none';
       }
     }, buildMode ? '🔨 Build' : '💬 Chat');
+
+    // Hide review toggle when starting in chat mode
+    if (!buildMode) reviewToggle.style.display = 'none';
 
     const inputBar = el('div', { class: 'ai-input-bar' },
       el('div', { class: 'ai-input-card' },
@@ -2197,9 +2343,7 @@ async function renderProjects() {
         });
         dropdown.querySelector('button').addEventListener('click', async e => {
           e.preventDefault();
-          if (!confirm(`Delete project "${p.name}"? This cannot be undone.`)) return;
-          try { await Api.delete(`/v1/projects/${p.id}`); renderProjects(); }
-          catch (err) { alert(err.message); }
+          showDeleteProjectModal(p, () => renderProjects());
         });
 
         const card = el('a', { class: 'proj-card', href: `#/projects/${p.id}` },
@@ -2219,6 +2363,55 @@ async function renderProjects() {
   } catch (e) {
     document.getElementById('project-list').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
+}
+
+function showDeleteProjectModal(project, onDeleted) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+
+  const modal = document.createElement('div');
+  modal.className = 'modal';
+  modal.innerHTML = `
+    <div class="modal-title" style="color:var(--danger)">Delete Project</div>
+    <p style="margin:8px 0 16px;color:var(--text-muted);font-size:0.9rem">
+      This will permanently delete <strong>${project.name}</strong> including all tables, data, and deployed sites.<br>
+      Type the project name to confirm:
+    </p>
+    <div class="form-group">
+      <input type="text" id="delete-confirm-input" placeholder="${project.name}" autocomplete="off">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-delete">Cancel</button>
+      <button class="btn btn-danger" id="confirm-delete" disabled>Delete</button>
+    </div>
+  `;
+
+  const input = modal.querySelector('#delete-confirm-input');
+  const confirmBtn = modal.querySelector('#confirm-delete');
+
+  input.addEventListener('input', () => {
+    confirmBtn.disabled = input.value !== project.name;
+  });
+
+  modal.querySelector('#cancel-delete').addEventListener('click', () => overlay.remove());
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Deleting…';
+    try {
+      await Api.delete(`/v1/projects/${project.id}`);
+      overlay.remove();
+      onDeleted();
+    } catch (err) {
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Delete';
+      alert(err.message);
+    }
+  });
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  input.focus();
 }
 
 function showNewProjectModal() {

@@ -210,9 +210,15 @@ Every async render shows a loading indicator before the fetch, then real content
   try { const rows = await api.list('table'); el.innerHTML = /* content */; }
   catch (e) { el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`; }
 
-Always include a mobile hamburger:
-  <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
-  <nav id="nav-menu" class="hidden md:flex items-center gap-4">...links...</nav>
+NAVIGATION — choose based on app complexity:
+- For apps with ≤4 nav links: use a top bar with links hidden on mobile behind a hamburger toggle:
+    <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
+    <nav id="nav-menu" class="hidden md:flex items-center gap-4">...links...</nav>
+    JS: document.getElementById('nav-toggle').addEventListener('click', () => document.getElementById('nav-menu').classList.toggle('hidden'));
+- For apps with 5+ nav links or complex sections: use a sidebar nav instead of a horizontal bar.
+  Sidebar: fixed left column on desktop (w-56 bg-gray-900), slides in from left on mobile triggered by the ☰ hamburger.
+  Never use a horizontal nav that could overflow or wrap — choose one of the two patterns above.
+Always pair with a hamburger (☰) button visible only on mobile (md:hidden).
 
 ═══════════════════════════════════════════════════════
 STRUCTURE (define each name once, in its own file)
@@ -234,19 +240,37 @@ STYLING
     <script src="https://cdn.tailwindcss.com"></script>
     <script>tailwind.config = { darkMode: 'class' }</script>
   Add class="dark" to <html>. No separate CSS file.
-- Colours: bg-gray-950 (page), bg-gray-900 (cards), text-emerald-400 (accent),
-  text-gray-100 (primary), text-gray-400 (muted), text-red-400 (danger).
+- Base colours (always): bg-gray-950 (page), bg-gray-900 (cards),
+  text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger).
+- Accent colour — pick ONE based on the app's domain. Use it consistently for interactive
+  elements (links, primary buttons, focus rings, active states):
+    productivity / tasks / notes  → indigo  (text-indigo-400, bg-indigo-500 hover:bg-indigo-600, ring-indigo-500)
+    food / recipes / restaurant   → orange  (text-orange-400, bg-orange-500 hover:bg-orange-600, ring-orange-500)
+    finance / budget / invoices   → blue    (text-blue-400,   bg-blue-500   hover:bg-blue-600,   ring-blue-500)
+    health / fitness / wellness   → teal    (text-teal-400,   bg-teal-500   hover:bg-teal-600,   ring-teal-500)
+    education / learning / quiz   → violet  (text-violet-400, bg-violet-500 hover:bg-violet-600, ring-violet-500)
+    social / community / chat     → pink    (text-pink-400,   bg-pink-500   hover:bg-pink-600,   ring-pink-500)
+    inventory / logistics / shop  → amber   (text-amber-400,  bg-amber-500  hover:bg-amber-600,  ring-amber-500)
+    other / general               → emerald (text-emerald-400, bg-emerald-500 hover:bg-emerald-600, ring-emerald-500)
 - Buttons: rounded-lg px-4 py-2 font-medium transition.
-  Primary = bg-emerald-500 hover:bg-emerald-600 text-white.
+  Primary = bg-{accent}-500 hover:bg-{accent}-600 text-white.
 - Inputs: bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full
-  focus:outline-none focus:ring-2 focus:ring-emerald-500.
+  focus:outline-none focus:ring-2 focus:ring-{accent}-500.
+- Page wrapper: use min-h-[100dvh] (dynamic viewport height) instead of min-h-screen or h-screen
+  so the layout does not get clipped by the mobile virtual keyboard.
+- Mobile layout rules (apply to all grid/table/form layouts):
+    • Card grids: grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4
+    • Data tables: wrap in <div class="overflow-x-auto"> so they scroll horizontally on mobile
+    • Forms: always stack vertically (flex flex-col gap-4); inputs use w-full
+    • Flex rows with many items: add flex-wrap gap-2 so they wrap instead of overflow
 - Never hardcode the year (e.g. a "© 2023" footer). Use new Date().getFullYear().
 
 ═══════════════════════════════════════════════════════
 PLACEHOLDERS + OWNERSHIP
 ═══════════════════════════════════════════════════════
-- Placeholders ONLY in core/config.js (substituted at deploy time):
-    const SB_URL = '__SB_URL__';
+- In core/config.js use these EXACT two lines (SB_PID is substituted at deploy time;
+  SB_URL is derived at runtime so the app works on both HTTP and HTTPS):
+    const SB_URL = window.location.origin + '/api/v1';
     const SB_PID = '__SB_PID__';
   Declared once. Never redeclare anywhere. No SB_KEY — public requests need no auth token.
 - Auth (include features/auth/auth.js ONLY when the schema has a table with a PASSWORD column;
@@ -425,12 +449,11 @@ function ai_deploy_files(
         }
     }
 
-    // Substitution map — replace placeholders with real credentials.
-    // Already-substituted files copied from current/ contain no placeholders.
-    $apiBase = rtrim($config['API_BASE_URL'], '/') . '/api/v1';
+    // Substitution map — replace placeholders with real values.
+    // SB_URL is intentionally NOT substituted here; generated code uses
+    // window.location.origin + '/api/v1' at runtime for HTTP/HTTPS compatibility.
     $replacements = [
-        '__SB_URL__'      => $apiBase,
-        '__SB_PID__'      => (string)$project['id'],
+        '__SB_PID__' => (string)$project['id'],
     ];
 
     $errors = [];
@@ -1533,33 +1556,8 @@ function ai_generate_edit_plan(object $client, int $projectId, int $userId, stri
             $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
         }
         unset($file);
-
-        // Column audit pass
-        $allCols  = [];
-        foreach ($existingSchema['tables'] as $tbl) {
-            foreach ($tbl['columns'] as $col) {
-                $allCols[] = '"' . $col['name'] . '" (table "' . $tbl['name'] . '")';
-            }
-            $allCols[] = '"id" (auto, table "' . $tbl['name'] . '")';
-            $allCols[] = '"created_at" (auto, table "' . $tbl['name'] . '")';
-        }
-        try {
-            $audited = $client->generateJson(
-                "You are a code reviewer fixing frontend JS column name mismatches. Return only {\"files\":[...]} with corrected file contents.",
-                "EXACT column names: " . implode(', ', $allCols)
-                . "\n\nFrontend files:\n" . json_encode(['files' => $delta['frontend']['files']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
-                . "\n\nCheck every data property access and replace any hallucinated column names with the correct ones. Return ONLY: {\"files\": [{\"path\": string, \"content\": string}]}"
-            );
-            if (!empty($audited['files']) && is_array($audited['files'])) {
-                foreach ($audited['files'] as &$aFile) {
-                    $aFile['path'] = ltrim(preg_replace('#^\./+#', '', $aFile['path'] ?? ''), '/');
-                }
-                unset($aFile);
-                $delta['frontend']['files'] = $audited['files'];
-            }
-        } catch (\RuntimeException $e) {
-            sb_log('ai_pipeline', 'Column audit skipped: ' . $e->getMessage());
-        }
+        // Column names are injected as a hard constraint in the edit system prompt via
+        // ai_schema_to_context(), so a separate audit round-trip is not needed.
     }
 
     return array_merge($delta, ['project_id' => $projectId]);
@@ -1954,6 +1952,13 @@ PROMPT;
             $history[] = ['role' => $role, 'text' => $text];
         }
 
+        // ── If the frontend is in chat mode, skip build-intent detection ────────
+        // This prevents "build a notepad" from triggering an actual build when the
+        // user is just chatting and didn't flip the Build toggle.
+        if ($req['body']['chatMode'] ?? false) {
+            $isChat = true;
+        } else {
+
         // ── Detect explicit build/create requests ────────────────────────────
         $isBuildRequest = (bool)preg_match(
             '/\b(build|create|make)\b.{0,40}\b(app|application|website|site|system|tool|platform|dashboard|blog|store|shop|api)\b/i',
@@ -1972,6 +1977,8 @@ PROMPT;
             || (mb_strlen($prompt) < 30 && !preg_match('/\b(app|application|website|site|build|create|make|blog|store|shop|todo|task|system|tool|dashboard|tracker|manager|platform|api|database)\b/i', $prompt))
         );
 
+        } // end else (chatMode check)
+
         // Auto-detect mode
         $diagnoseKeywords = ['why', 'error', 'failing', 'broken', 'wrong', 'issue', 'problem', 'debug', 'not working', 'failed'];
         if ($projectId === null) {
@@ -1985,7 +1992,8 @@ PROMPT;
             $mode = $isDiagnose ? 'diagnose' : 'edit';
         }
 
-        $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $gemini  = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $aiTrace = [];   // AI-internal call log returned alongside the plan response
 
         // ── Handle chat / info mode ───────────────────────────────────────────
         if ($isChat) {
@@ -2042,7 +2050,9 @@ CHAT;
             $userQuestion = $globalContext . $projectContext . "\n\nQuestion: " . $prompt;
 
             try {
+                $_t0 = microtime(true);
                 $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
+                $aiTrace[] = ['stage' => 'chat', 'system' => $chatSystemPrompt, 'history' => $history, 'user_msg' => $userQuestion, 'response' => $res, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
             } catch (\RuntimeException $e) {
                 $msg = $e->getMessage();
                 if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
@@ -2052,6 +2062,7 @@ CHAT;
                 'mode'    => 'chat',
                 'message' => $res['message'] ?? 'Hi! How can I help you?',
                 'usage'   => $gemini->getLastUsage(),
+                'aiTrace' => $aiTrace,
             ]);
         }
 
@@ -2065,7 +2076,9 @@ CHAT;
                 $schemaUserMsg = $approvedIntent
                     ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
                     : $prompt;
+                $_t0 = microtime(true);
                 $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
+                $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
                 $schemaPlan['frontend'] = ['files' => []];
                 $schemaPlan = ai_sanitize_plan($schemaPlan);
 
@@ -2075,7 +2088,9 @@ CHAT;
                     $retryPrompt = $schemaUserMsg
                         . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
                         . "\nReturn a corrected schema that fixes exactly this problem.";
+                    $_t0 = microtime(true);
                     $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+                    $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
                     $schemaPlan['frontend'] = ['files' => []];
                     $schemaPlan = ai_sanitize_plan($schemaPlan);
                     $validationError = ai_validate_plan($schemaPlan);
@@ -2085,9 +2100,12 @@ CHAT;
                 }
 
                 // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
-                $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
-                             . ai_schema_to_context($schemaPlan);
-                $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
+                $frontendMsg          = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                                      . ai_schema_to_context($schemaPlan);
+                $_frontendSysPrompt   = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
+                $_t0 = microtime(true);
+                $frontendResult = $gemini->generateJson($_frontendSysPrompt, $frontendMsg);
+                $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 $plan = $schemaPlan;
                 $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
@@ -2102,18 +2120,20 @@ CHAT;
                     'frontend_files' => count($plan['frontend']['files'] ?? []),
                 ];
 
-                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
 
             } elseif ($mode === 'edit') {
                 $project = $catalog->getProjectById($projectId, $userId);
                 if (!$project) abort(404, 'Project not found');
 
-                $existingSchema = ai_schema_from_db($projectId, $catalog);
-                $schemaCtx    = ai_schema_to_context($existingSchema);
-                $currentFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
-                $userMessage  = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
+                $existingSchema   = ai_schema_from_db($projectId, $catalog);
+                $schemaCtx        = ai_schema_to_context($existingSchema);
+                $currentFiles     = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+                $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
                 $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+                $_t0 = microtime(true);
                 $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
+                $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'user_msg_len' => mb_strlen($userMessage), 'user_msg_truncated' => mb_strlen($userMessage) > 5000, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 // Validate the delta; one self-correcting retry with the reason fed back.
                 $deltaError = ai_validate_delta($delta, $existingSchema);
@@ -2121,7 +2141,9 @@ CHAT;
                     $retryMsg = $userMessage
                         . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
                         . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
+                    $_t0 = microtime(true);
                     $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg);
+                    $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'user_msg_len' => mb_strlen($retryMsg), 'user_msg_truncated' => mb_strlen($retryMsg) > 5000, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
                     $deltaError = ai_validate_delta($delta, $existingSchema);
                     if ($deltaError) abort(422, 'AI returned an invalid edit: ' . $deltaError);
                 }
@@ -2134,37 +2156,8 @@ CHAT;
                     unset($file);
                 }
 
-                // ── Column audit pass: fix any hallucinated column names in frontend ──
-                if (!empty($delta['frontend']['files'])) {
-                    $allCols = [];
-                    foreach ($existingSchema['tables'] as $tbl) {
-                        foreach ($tbl['columns'] as $col) {
-                            $allCols[] = '"' . $col['name'] . '" (table "' . $tbl['name'] . '")';
-                        }
-                        $allCols[] = '"id" (auto, table "' . $tbl['name'] . '")';
-                        $allCols[] = '"created_at" (auto, table "' . $tbl['name'] . '")';
-                    }
-                    $colList   = implode(', ', $allCols);
-                    $filesJson = json_encode(['files' => $delta['frontend']['files']], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
-                    $auditMsg  = "EXACT column names: {$colList}\n\nFrontend files:\n{$filesJson}\n\n"
-                               . "Check every data property access (obj.field, obj['field'], row.field) against the exact column list. "
-                               . "Replace any hallucinated or incorrect column names with the correct ones from the exact list. "
-                               . "Return ONLY: {\"files\": [{\"path\": string, \"content\": string}]}";
-                    $auditSystem = "You are a code reviewer fixing frontend JS column name mismatches. "
-                                 . "Return only {\"files\":[...]} with corrected file contents.";
-                    try {
-                        $audited = $gemini->generateJson($auditSystem, $auditMsg);
-                        if (!empty($audited['files']) && is_array($audited['files'])) {
-                            foreach ($audited['files'] as &$aFile) {
-                                $aFile['path'] = ltrim(preg_replace('#^\./+#', '', $aFile['path'] ?? ''), '/');
-                            }
-                            unset($aFile);
-                            $delta['frontend']['files'] = $audited['files'];
-                        }
-                    } catch (\RuntimeException $e) {
-                        sb_log('ai_edit', 'Column audit skipped: ' . $e->getMessage());
-                    }
-                }
+                // Column names are injected as a hard constraint in the edit system prompt via
+                // ai_schema_to_context(), so a separate audit round-trip is not needed.
 
                 $summary = [
                     'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
@@ -2176,7 +2169,7 @@ CHAT;
                 }
 
                 $editPlan = array_merge($delta, ['project_id' => $projectId]);
-                json_out(['mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+                json_out(['mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
 
             } else { // diagnose
                 $project = $catalog->getProjectById($projectId, $userId);
@@ -2202,13 +2195,16 @@ Analyze the project context and issue. Return ONLY valid JSON:
 { "diagnosis": "clear explanation", "suggestions": ["step 1", ...] }
 PROMPT;
 
+                $_t0 = microtime(true);
                 $result = $gemini->generateJsonWithHistory($diagnosePrompt, $history, $context);
+                $aiTrace[] = ['stage' => 'diagnose', 'system' => $diagnosePrompt, 'history' => $history, 'user_msg' => mb_strlen($context) > 5000 ? mb_substr($context, 0, 5000) : $context, 'user_msg_len' => mb_strlen($context), 'user_msg_truncated' => mb_strlen($context) > 5000, 'response' => $result, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 json_out([
                     'mode'        => 'diagnose',
                     'diagnosis'   => $result['diagnosis'] ?? '',
                     'suggestions' => $result['suggestions'] ?? [],
                     'usage'       => $gemini->getLastUsage(),
+                    'aiTrace'     => $aiTrace,
                 ]);
             }
         } catch (\RuntimeException $e) {

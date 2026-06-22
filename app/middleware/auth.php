@@ -68,6 +68,8 @@ function resolve_token(string $token): ?array
 /**
  * Strict auth middleware — aborts 401 if no valid user-level token.
  * Accepts user JWTs, PATs, and service_key. Rejects anon_key.
+ * Performs sliding renewal: if a platform-user JWT expires within 15 minutes,
+ * issues a fresh token and sends it back as X-Refresh-Token.
  */
 function auth_middleware(array $req, callable $next): void
 {
@@ -77,9 +79,38 @@ function auth_middleware(array $req, callable $next): void
         abort(401, 'Missing or malformed Authorization header');
     }
 
-    $auth = resolve_token($m[1]);
+    $rawToken = $m[1];
+    $auth = resolve_token($rawToken);
     if ($auth === null) {
         abort(401, 'Invalid or expired token');
+    }
+
+    // Sliding renewal for platform-user JWTs (not PATs, not project/service tokens)
+    if (
+        !str_starts_with($rawToken, 'sb_pat_')
+        && ($auth['role'] ?? '') === 'owner'
+        && ($auth['project_id'] ?? null) === null
+    ) {
+        try {
+            $config  = App::get('config');
+            $decoded = \Firebase\JWT\JWT::decode($rawToken, new \Firebase\JWT\Key($config['JWT_SECRET'], $config['JWT_ALGO']));
+            // Renew if expiring within 15 minutes
+            if (isset($decoded->exp) && ($decoded->exp - time()) < 900) {
+                $now     = time();
+                $payload = [
+                    'iss'   => 'supabein',
+                    'sub'   => (string)$decoded->sub,
+                    'email' => $decoded->email ?? '',
+                    'role'  => $decoded->role ?? 'owner',
+                    'iat'   => $now,
+                    'exp'   => $now + $config['JWT_TTL'],
+                ];
+                $fresh = \Firebase\JWT\JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
+                header('X-Refresh-Token: ' . $fresh);
+            }
+        } catch (\Throwable) {
+            // resolve_token already validated it; ignore decode errors here
+        }
     }
 
     $req['auth'] = $auth;
