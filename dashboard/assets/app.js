@@ -1162,15 +1162,22 @@ const AiPanel = (() => {
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
     renderMessages();
 
+    const traceLog = [];
+    const t0 = Date.now();
     try {
       const response = await callWithFallback('/v1/ai/plan', body);
+      traceLog.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await handlePlanResponse(response);
     } catch(e) {
+      traceLog.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+    }
+    if (sess && traceLog.length) {
+      await addMessage(currentSessionId, { role: 'ai', type: 'trace', data: traceLog });
     }
     renderSidebar();
     renderMessages();
@@ -1379,6 +1386,7 @@ const AiPanel = (() => {
     if (msg.type === 'error') {
       return el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ ' + msg.content);
     }
+    if (msg.type === 'trace') return renderTraceCard(msg);
     const bubble = el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
     const tokenEl = renderTokenUsage(msg.usage);
     if (tokenEl) bubble.appendChild(tokenEl);
@@ -1390,7 +1398,32 @@ const AiPanel = (() => {
     const lines = [];
 
     if (mode === 'build') {
-      lines.push(el('div', { class: 'ai-plan-row' }, el('strong', {}, 'Project: '), summary.project_name));
+      const nameSpan = el('span', { class: 'ai-plan-project-name' }, plan.project_name || summary.project_name || '');
+      nameSpan.addEventListener('click', () => {
+        const inp = document.createElement('input');
+        inp.className = 'ai-plan-name-input';
+        inp.value = plan.project_name || '';
+        const commit = () => {
+          const v = inp.value.trim();
+          if (v) {
+            plan.project_name = v;
+            plan.subdomain = v.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+            summary.project_name = v;
+            saveSessions();
+          }
+          nameSpan.textContent = plan.project_name || summary.project_name || '';
+          inp.replaceWith(nameSpan);
+        };
+        inp.addEventListener('blur', commit);
+        inp.addEventListener('keydown', e => {
+          if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+          if (e.key === 'Escape') { inp.value = plan.project_name || ''; inp.blur(); }
+        });
+        nameSpan.replaceWith(inp);
+        inp.focus();
+        inp.select();
+      });
+      lines.push(el('div', { class: 'ai-plan-row' }, el('strong', {}, 'Project: '), nameSpan));
       if (summary.tables && summary.tables.length) {
         lines.push(el('div', { class: 'ai-plan-section' }, 'Tables'));
         summary.tables.forEach(t => lines.push(el('div', { class: 'ai-plan-item' }, '+ ' + t)));
@@ -1502,20 +1535,23 @@ const AiPanel = (() => {
         msg.settled = true;
         msg.cancelled = true;
         saveSessions();
-        actionsDiv.innerHTML = '';
-        actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled'));
         card.classList.add('ai-plan-settled');
+        renderMessages();
       }}, 'Cancel');
 
       const applyBtn = el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+        delete msg.applyError;
         msg.settled = true;
         saveSessions();
         actionsDiv.innerHTML = '';
         actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Applying…'));
         card.classList.add('ai-plan-settled');
-        await applyPlan(plan, mode);
+        await applyPlan(plan, mode, msg);
       }}, '✓ Apply');
 
+      if (msg.applyError) {
+        actionsDiv.appendChild(el('div', { class: 'ai-plan-error-notice' }, '✕ ' + msg.applyError));
+      }
       actionsDiv.appendChild(cancelBtn);
       actionsDiv.appendChild(applyBtn);
       card.appendChild(actionsDiv);
@@ -1566,6 +1602,31 @@ const AiPanel = (() => {
     return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
   }
 
+  function renderTraceCard(msg) {
+    const rows = (msg.data || []).map(entry => {
+      const ok = entry.status === 200;
+      const reqDetails = el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, 'Request'),
+        el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.inputs, null, 2))
+      );
+      const resDetails = el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, 'Response'),
+        el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.outputs, null, 2))
+      );
+      return el('details', { class: 'ai-trace-row' },
+        el('summary', { class: 'ai-trace-summary' },
+          el('span', { class: 'ai-trace-call' }, entry.call),
+          el('span', { class: 'ai-trace-meta' }, `${(entry.ms / 1000).toFixed(1)}s  ${ok ? '✓' : '✕'} ${entry.status}`)
+        ),
+        reqDetails, resDetails
+      );
+    });
+    return el('details', { class: 'ai-msg ai-msg-ai ai-trace-card' },
+      el('summary', { class: 'ai-trace-top-summary' }, 'Session trace'),
+      ...rows
+    );
+  }
+
   function renderProjectPicker() {
     if (!panelEl) return;
     const picker = panelEl.querySelector('#ai-project-picker');
@@ -1591,6 +1652,7 @@ const AiPanel = (() => {
 
   async function switchSession(id) {
     currentSessionId = id;
+    localStorage.setItem('sb:ai_sid', id);
     const sess = getSession(id);
     if (sess) selectedProjectId = sess.projectId;
     renderSidebar();
@@ -1603,6 +1665,7 @@ const AiPanel = (() => {
   async function newSession() {
     const sess = await createSession(selectedProjectId);
     currentSessionId = sess.id;
+    localStorage.setItem('sb:ai_sid', sess.id);
     renderSidebar();
     renderMessages();
   }
@@ -1729,48 +1792,39 @@ const AiPanel = (() => {
     return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
   }
 
-  async function applyPlan(plan, mode) {
+  async function applyPlan(plan, mode, planMsg) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
     renderMessages();
 
     const { provider: aProvider, model: aModel } = getSelectedModel();
+    const traceLog = [];
     try {
+      const t0 = Date.now();
       const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
+      traceLog.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
     } catch(e) {
+      traceLog.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
-      if (mode === 'build' && e.data?.partial) {
-        const recoverThinkId = 'recover_' + Date.now();
-        if (sess) sess.messages.push({ id: recoverThinkId, role: 'ai', type: 'thinking', content: '', stageMode: 'diagnose' });
-        renderMessages();
-        try {
-          const recovery = await Api.post('/v1/ai/plan', {
-            mode: 'recover',
-            error: e.message,
-            plan,
-            partial: e.data.partial,
-            provider: aProvider,
-            model: aModel,
-          });
-          stopThinkingStages?.();
-          if (sess) sess.messages = sess.messages.filter(m => m.id !== recoverThinkId);
-          await addMessage(currentSessionId, { role: 'ai', type: 'recover', content: '', data: recovery });
-        } catch(re) {
-          stopThinkingStages?.();
-          if (sess) sess.messages = sess.messages.filter(m => m.id !== recoverThinkId);
-          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Build failed: ${e.message}` });
-        }
+      if (planMsg) {
+        planMsg.settled = false;
+        planMsg.applyError = e.message;
+        saveSessions();
       } else {
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.` });
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}` });
       }
+    }
+
+    if (sess && traceLog.length) {
+      await addMessage(currentSessionId, { role: 'ai', type: 'trace', data: traceLog });
     }
 
     renderMessages();
@@ -1900,9 +1954,12 @@ const AiPanel = (() => {
     await Promise.all([loadSessions(), loadProjects()]);
     renderProjectPicker();
 
+    if (!currentSessionId) currentSessionId = localStorage.getItem('sb:ai_sid');
+
     if (!currentSessionId || !getSession(currentSessionId)) {
       if (sessions.length) {
         currentSessionId = sessions[0].id;
+        localStorage.setItem('sb:ai_sid', currentSessionId);
         const sess = getSession(currentSessionId);
         if (sess) selectedProjectId = sess.projectId || selectedProjectId;
       } else {
@@ -1927,6 +1984,14 @@ const AiPanel = (() => {
     setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
   }
 
+  function updateFabBadge() {
+    const fab = document.getElementById('ai-fab');
+    if (!fab) return;
+    const sess = currentSession();
+    const hasActivity = sess && sess.messages.some(m => m.role === 'ai' || m.role === 'user');
+    fab.classList.toggle('ai-fab-active', !!hasActivity && !isOpen);
+  }
+
   function close() {
     if (!panelEl) return;
     panelEl.classList.remove('ai-panel-open');
@@ -1936,6 +2001,7 @@ const AiPanel = (() => {
     toggleSidebar(false);
     const fab = document.getElementById('ai-fab');
     if (fab) fab.classList.remove('ai-fab-hidden');
+    updateFabBadge();
   }
 
   function toggle(options) {
