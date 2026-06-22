@@ -1764,24 +1764,105 @@ const AiPanel = (() => {
     return card;
   }
 
+  function renderAiCallEntry(ai) {
+    const STAGE_LABELS = {
+      chat:            'Chat Response',
+      schema_pass_1:   'Schema Pass 1',
+      schema_retry:    '↩ Schema Retry (self-healing)',
+      frontend_pass_2: 'Frontend Pass 2',
+      edit_pass:       'Edit Pass',
+      edit_retry:      '↩ Edit Retry (self-healing)',
+      diagnose:        'Diagnose',
+    };
+    const label    = STAGE_LABELS[ai.stage] || ai.stage;
+    const msStr    = ai.ms ? `${(ai.ms / 1000).toFixed(1)}s` : '';
+    const tok      = ai.tokens || {};
+    const tokStr   = tok.total_tokens ? `${tok.total_tokens.toLocaleString()} tok` : '';
+    const retryBadge = ai.retry
+      ? el('span', { class: 'ai-trace-retry-badge' }, 'retry')
+      : null;
+
+    const children = [
+      el('summary', { class: 'ai-trace-ai-summary' },
+        el('span', { class: 'ai-trace-ai-stage' }, label),
+        el('span', { class: 'ai-trace-meta' }, [msStr, tokStr].filter(Boolean).join('  ')),
+        ...(retryBadge ? [retryBadge] : [])
+      )
+    ];
+
+    if (ai.error) {
+      children.push(el('div', { class: 'ai-trace-error-notice' }, 'Rejected: ' + ai.error));
+    }
+
+    if (ai.system) {
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, `System Prompt (${ai.system.length.toLocaleString()} chars)`),
+        el('pre', { class: 'ai-trace-json ai-trace-prompt' }, ai.system)
+      ));
+    }
+
+    if (ai.history && ai.history.length) {
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, `History (${ai.history.length} turn${ai.history.length !== 1 ? 's' : ''})`),
+        el('pre', { class: 'ai-trace-json' }, JSON.stringify(ai.history, null, 2))
+      ));
+    }
+
+    if (ai.user_msg) {
+      const truncNote = ai.user_msg_truncated
+        ? ` [showing 5 000 of ${(ai.user_msg_len || 0).toLocaleString()} chars]` : '';
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, `User Message${truncNote}`),
+        el('pre', { class: 'ai-trace-json' }, ai.user_msg)
+      ));
+    }
+
+    if (ai.response !== undefined) {
+      children.push(el('details', { class: 'ai-trace-sub' },
+        el('summary', {}, 'AI Response'),
+        el('pre', { class: 'ai-trace-json' }, JSON.stringify(ai.response, null, 2))
+      ));
+    }
+
+    if (tok.total_tokens) {
+      children.push(el('div', { class: 'ai-trace-tokens' },
+        `Tokens: ${(tok.prompt_tokens || 0).toLocaleString()} in + ${(tok.completion_tokens || 0).toLocaleString()} out = ${(tok.total_tokens || 0).toLocaleString()} total`
+      ));
+    }
+
+    return el('details', { class: 'ai-trace-ai-entry' }, ...children);
+  }
+
   function renderTraceCard(msg) {
     const rows = (msg.data || []).map(entry => {
       const ok = entry.status === 200;
-      const reqDetails = el('details', { class: 'ai-trace-sub' },
-        el('summary', {}, 'Request'),
-        el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.inputs, null, 2))
-      );
-      const resDetails = el('details', { class: 'ai-trace-sub' },
-        el('summary', {}, 'Response'),
-        el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.outputs, null, 2))
-      );
-      return el('details', { class: 'ai-trace-row' },
+      const rowChildren = [
         el('summary', { class: 'ai-trace-summary' },
           el('span', { class: 'ai-trace-call' }, entry.call),
           el('span', { class: 'ai-trace-meta' }, `${(entry.ms / 1000).toFixed(1)}s  ${ok ? '✓' : '✕'} ${entry.status}`)
         ),
-        reqDetails, resDetails
-      );
+        el('details', { class: 'ai-trace-sub' },
+          el('summary', {}, 'Request'),
+          el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.inputs, null, 2))
+        ),
+        el('details', { class: 'ai-trace-sub' },
+          el('summary', {}, 'Response'),
+          el('pre', { class: 'ai-trace-json' }, JSON.stringify(entry.outputs, null, 2))
+        ),
+      ];
+
+      // AI-internal call breakdown (schema pass, frontend pass, retries, etc.)
+      const aiCalls = entry.outputs?.aiTrace;
+      if (aiCalls && aiCalls.length) {
+        rowChildren.push(
+          el('div', { class: 'ai-trace-ai-section' },
+            el('div', { class: 'ai-trace-ai-header' }, `AI Calls (${aiCalls.length})`),
+            ...aiCalls.map(renderAiCallEntry)
+          )
+        );
+      }
+
+      return el('details', { class: 'ai-trace-row' }, ...rowChildren);
     });
     const topAttrs = { class: 'ai-msg ai-msg-ai ai-trace-card' };
     if (msg.live) topAttrs.open = true;

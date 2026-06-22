@@ -1992,7 +1992,8 @@ PROMPT;
             $mode = $isDiagnose ? 'diagnose' : 'edit';
         }
 
-        $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $gemini  = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $aiTrace = [];   // AI-internal call log returned alongside the plan response
 
         // ── Handle chat / info mode ───────────────────────────────────────────
         if ($isChat) {
@@ -2049,7 +2050,9 @@ CHAT;
             $userQuestion = $globalContext . $projectContext . "\n\nQuestion: " . $prompt;
 
             try {
+                $_t0 = microtime(true);
                 $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
+                $aiTrace[] = ['stage' => 'chat', 'system' => $chatSystemPrompt, 'history' => $history, 'user_msg' => $userQuestion, 'response' => $res, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
             } catch (\RuntimeException $e) {
                 $msg = $e->getMessage();
                 if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
@@ -2059,6 +2062,7 @@ CHAT;
                 'mode'    => 'chat',
                 'message' => $res['message'] ?? 'Hi! How can I help you?',
                 'usage'   => $gemini->getLastUsage(),
+                'aiTrace' => $aiTrace,
             ]);
         }
 
@@ -2072,7 +2076,9 @@ CHAT;
                 $schemaUserMsg = $approvedIntent
                     ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
                     : $prompt;
+                $_t0 = microtime(true);
                 $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
+                $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
                 $schemaPlan['frontend'] = ['files' => []];
                 $schemaPlan = ai_sanitize_plan($schemaPlan);
 
@@ -2082,7 +2088,9 @@ CHAT;
                     $retryPrompt = $schemaUserMsg
                         . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
                         . "\nReturn a corrected schema that fixes exactly this problem.";
+                    $_t0 = microtime(true);
                     $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+                    $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
                     $schemaPlan['frontend'] = ['files' => []];
                     $schemaPlan = ai_sanitize_plan($schemaPlan);
                     $validationError = ai_validate_plan($schemaPlan);
@@ -2092,9 +2100,12 @@ CHAT;
                 }
 
                 // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
-                $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
-                             . ai_schema_to_context($schemaPlan);
-                $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
+                $frontendMsg          = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                                      . ai_schema_to_context($schemaPlan);
+                $_frontendSysPrompt   = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
+                $_t0 = microtime(true);
+                $frontendResult = $gemini->generateJson($_frontendSysPrompt, $frontendMsg);
+                $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 $plan = $schemaPlan;
                 $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
@@ -2109,18 +2120,20 @@ CHAT;
                     'frontend_files' => count($plan['frontend']['files'] ?? []),
                 ];
 
-                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+                json_out(['mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
 
             } elseif ($mode === 'edit') {
                 $project = $catalog->getProjectById($projectId, $userId);
                 if (!$project) abort(404, 'Project not found');
 
-                $existingSchema = ai_schema_from_db($projectId, $catalog);
-                $schemaCtx    = ai_schema_to_context($existingSchema);
-                $currentFiles = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
-                $userMessage  = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
+                $existingSchema   = ai_schema_from_db($projectId, $catalog);
+                $schemaCtx        = ai_schema_to_context($existingSchema);
+                $currentFiles     = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+                $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
                 $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+                $_t0 = microtime(true);
                 $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
+                $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'user_msg_len' => mb_strlen($userMessage), 'user_msg_truncated' => mb_strlen($userMessage) > 5000, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 // Validate the delta; one self-correcting retry with the reason fed back.
                 $deltaError = ai_validate_delta($delta, $existingSchema);
@@ -2128,7 +2141,9 @@ CHAT;
                     $retryMsg = $userMessage
                         . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
                         . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
+                    $_t0 = microtime(true);
                     $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg);
+                    $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'user_msg_len' => mb_strlen($retryMsg), 'user_msg_truncated' => mb_strlen($retryMsg) > 5000, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
                     $deltaError = ai_validate_delta($delta, $existingSchema);
                     if ($deltaError) abort(422, 'AI returned an invalid edit: ' . $deltaError);
                 }
@@ -2154,7 +2169,7 @@ CHAT;
                 }
 
                 $editPlan = array_merge($delta, ['project_id' => $projectId]);
-                json_out(['mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage()]);
+                json_out(['mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
 
             } else { // diagnose
                 $project = $catalog->getProjectById($projectId, $userId);
@@ -2180,13 +2195,16 @@ Analyze the project context and issue. Return ONLY valid JSON:
 { "diagnosis": "clear explanation", "suggestions": ["step 1", ...] }
 PROMPT;
 
+                $_t0 = microtime(true);
                 $result = $gemini->generateJsonWithHistory($diagnosePrompt, $history, $context);
+                $aiTrace[] = ['stage' => 'diagnose', 'system' => $diagnosePrompt, 'history' => $history, 'user_msg' => mb_strlen($context) > 5000 ? mb_substr($context, 0, 5000) : $context, 'user_msg_len' => mb_strlen($context), 'user_msg_truncated' => mb_strlen($context) > 5000, 'response' => $result, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 json_out([
                     'mode'        => 'diagnose',
                     'diagnosis'   => $result['diagnosis'] ?? '',
                     'suggestions' => $result['suggestions'] ?? [],
                     'usage'       => $gemini->getLastUsage(),
+                    'aiTrace'     => $aiTrace,
                 ]);
             }
         } catch (\RuntimeException $e) {
