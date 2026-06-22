@@ -2055,17 +2055,24 @@ CHAT;
             ]);
         }
 
+        // Read confirmed intent (sent by frontend after user reviews it)
+        $approvedIntent = (isset($req['body']['intent']) && is_array($req['body']['intent']))
+            ? $req['body']['intent'] : null;
+
         try {
             if ($mode === 'build') {
-                // Pass 1 — schema only (uses conversation history for context)
-                $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $prompt);
+                // Pass 1 — schema only; lock in confirmed intent scope when available
+                $schemaUserMsg = $approvedIntent
+                    ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
+                    : $prompt;
+                $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
                 $schemaPlan['frontend'] = ['files' => []];
                 $schemaPlan = ai_sanitize_plan($schemaPlan);
 
                 $validationError = ai_validate_plan($schemaPlan);
                 if ($validationError) {
                     // One self-correcting retry with the rejection reason fed back.
-                    $retryPrompt = $prompt
+                    $retryPrompt = $schemaUserMsg
                         . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
                         . "\nReturn a corrected schema that fixes exactly this problem.";
                     $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);

@@ -93,9 +93,11 @@ class NvidiaClient
                 throw $lastError;
             }
 
-            $envelope = json_decode($response, true);
-            $msg      = $envelope['choices'][0]['message'] ?? [];
-            $text     = $msg['content'] ?? $msg['reasoning_content'] ?? null;
+            $envelope     = json_decode($response, true);
+            $choice       = $envelope['choices'][0] ?? [];
+            $msg          = $choice['message'] ?? [];
+            $text         = $msg['content'] ?? $msg['reasoning_content'] ?? null;
+            $finishReason = $choice['finish_reason'] ?? null;
 
             $raw = $envelope['usage'] ?? [];
             $this->lastUsage = [
@@ -106,6 +108,10 @@ class NvidiaClient
 
             if ($text === null || trim($text) === '') {
                 throw new \RuntimeException('NVIDIA returned no content in response');
+            }
+
+            if ($finishReason === 'length') {
+                throw new \RuntimeException('NVIDIA output was cut off (too long). Try a simpler description or use Gemini for large builds.');
             }
 
             // Strip <think>...</think> blocks that reasoning models prepend
