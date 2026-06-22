@@ -855,7 +855,7 @@ const AiPanel = (() => {
   }
 
   const THINKING_STAGES = {
-    build:    ['Analyzing your idea…', 'Designing data schema…', 'Writing frontend code…', 'Polishing the output…', 'Almost done…'],
+    build:    ['Analyzing your idea…', 'Designing data schema…', 'Writing frontend code…', 'Generating pages and API calls…', 'Polishing the output…', 'Finalizing your app…'],
     edit:     ['Reading current schema…', 'Planning the changes…', 'Generating edits…', 'Almost done…'],
     diagnose: ['Analyzing the issue…', 'Checking schema & policies…', 'Preparing suggestions…', 'Almost done…'],
     chat:     ['Thinking…', 'Looking up your projects…', 'Formulating reply…'],
@@ -872,8 +872,11 @@ const AiPanel = (() => {
     labelEl.textContent = stages[0];
     const timer = setInterval(() => {
       i++;
-      if (i < stages.length) labelEl.textContent = stages[i];
-      if (i >= stages.length - 1) clearInterval(timer);
+      if (i < stages.length) {
+        labelEl.textContent = stages[i];
+      } else {
+        labelEl.textContent = 'Still working — this can take a few minutes…';
+      }
     }, 6000);
     stopThinkingStages = () => { clearInterval(timer); stopThinkingStages = null; };
   }
