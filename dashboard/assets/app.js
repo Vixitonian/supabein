@@ -1893,8 +1893,15 @@ const AiPanel = (() => {
     const topAttrs = { class: 'ai-msg ai-msg-ai ai-trace-card' };
     if (msg.live) topAttrs.open = true;
     const liveDot = msg.live ? el('span', { class: 'ai-trace-live-dot' }) : null;
+
+    const dlBtn = el('button', { class: 'ai-trace-dl-btn', title: 'Download trace as JSON', onClick: (e) => {
+      e.preventDefault(); e.stopPropagation();
+      downloadText('trace-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.json',
+        JSON.stringify(msg.data || [], null, 2));
+    }}, '⬇');
+
     return el('details', topAttrs,
-      el('summary', { class: 'ai-trace-top-summary' }, ...(liveDot ? [liveDot] : []), 'Session trace'),
+      el('summary', { class: 'ai-trace-top-summary' }, ...(liveDot ? [liveDot] : []), 'Session trace', dlBtn),
       ...rows
     );
   }
