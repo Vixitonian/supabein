@@ -13,6 +13,7 @@ $origin = $config['CORS_ORIGIN'] ?? '*';
 header("Access-Control-Allow-Origin: $origin");
 header('Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, PUT, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
+header('Access-Control-Expose-Headers: X-Refresh-Token');
 header('Access-Control-Allow-Credentials: true');
 
 // OPTIONS preflight
