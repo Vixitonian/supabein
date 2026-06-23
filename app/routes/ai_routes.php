@@ -30,6 +30,45 @@ The user will describe an application. Return ONLY a single valid JSON object �
   ]
 }
 
+OUTPUT FORMAT — include these alongside "tables":
+
+  "seed_data": {
+    "<table_name>": [
+      { "<col>": <value>, ... }
+    ]
+  }
+
+Seed rules:
+- Include 3–8 realistic, domain-appropriate rows for every table that would look empty and
+  meaningless without data (products, articles, menu items, portfolio items, testimonials, etc.)
+- Do NOT seed auth/users tables or tables that use :current_user_id ownership (e.g. carts, orders
+  belonging to a user). Only seed "global" or "public catalogue" tables.
+- Omit "id" and "created_at" — SupaBein inserts them automatically
+- Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL,
+  null for nullable columns with no obvious value)
+- For image_url columns leave null — the frontend substitutes a Picsum placeholder at runtime
+- If no table needs seeding, return "seed_data": {}
+
+IMAGE COLUMNS:
+- If a table naturally displays images (products, portfolio items, blog posts, recipes, team members,
+  menu items, properties, etc.), include an image_url column:
+  {"name": "image_url", "type": "VARCHAR(255)", "nullable": true, "default": null}
+- Do NOT add image_url to users tables, transactional tables (orders, payments, logs), or pure
+  junction/relation tables.
+
+CONTENT BLOCKS (public-facing / marketing sites only):
+- If the app has a public landing page or a section a non-technical owner would update (hero copy,
+  about text, feature highlights), add a "content_blocks" table:
+  columns: section_key VARCHAR(64) NOT NULL, heading VARCHAR(255) NULL, body_text MEDIUMTEXT NULL,
+           display_order INT NOT NULL DEFAULT 0
+  policies: anon SELECT allowed; authenticated INSERT/UPDATE/DELETE
+  Seed it with realistic copy that matches the app's domain (3–5 rows covering hero, features, etc.)
+
+FORMS MUST BE BACKED BY TABLES:
+- Every user-submitted form (contact, booking, review, inquiry, newsletter signup) MUST have a
+  corresponding table that persists the data. Never design a form without a matching table.
+  Example: a "Contact Us" form → a "contact_submissions" table with columns for each form field.
+
 Rules:
 - project_name: human-readable, 1-80 chars
 - subdomain: 3-30 lowercase alphanumeric + hyphens (e.g. "my-blog")
@@ -264,6 +303,60 @@ STYLING
     • Forms: always stack vertically (flex flex-col gap-4); inputs use w-full
     • Flex rows with many items: add flex-wrap gap-2 so they wrap instead of overflow
 - Never hardcode the year (e.g. a "© 2023" footer). Use new Date().getFullYear().
+
+═══════════════════════════════════════════════════════
+RULE 8 — IMAGE COLUMNS: PICSUM RUNTIME FALLBACK
+═══════════════════════════════════════════════════════
+Some tables have an "image_url" VARCHAR(255) column that is null in seeded rows.
+When rendering any image_url field ALWAYS supply a deterministic Picsum fallback:
+  const src = row.image_url || `https://picsum.photos/seed/${tableName}-${row.id}/800/600`;
+  imgEl.src = src;
+The seed string (tableName + row.id) must be deterministic so the same row always shows the
+same placeholder image. NEVER render a broken <img> or hide the image slot — always show something.
+
+═══════════════════════════════════════════════════════
+RULE 9 — CONTENT BLOCKS: RENDER FROM DATABASE
+═══════════════════════════════════════════════════════
+If the schema includes a "content_blocks" table, its rows MUST drive the public landing content.
+Do NOT hardcode marketing copy — fetch from the DB:
+  const blocks = await api.list('content_blocks');
+  blocks.sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
+  // render each block's heading + body_text
+This lets the site owner update copy without touching code.
+
+═══════════════════════════════════════════════════════
+RULE 10 — FORMS: ALWAYS PERSIST VIA api.create()
+═══════════════════════════════════════════════════════
+Every <form> in the app MUST submit its data via api.create() to its backing table.
+Never console.log(), alert(), or silently discard form data — it must reach the database.
+Pattern for every form submit handler:
+  formEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = formEl.querySelector('button[type=submit]');
+    btn.disabled = true;
+    try {
+      await api.create('table_name', { field1: input1.value.trim(), field2: input2.value.trim() });
+      // show inline success (e.g. green text, reset form)
+      formEl.reset();
+    } catch (err) {
+      errorEl.textContent = 'Failed: ' + err.message;  // text-red-400
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+═══════════════════════════════════════════════════════
+RULE 11 — HTML HEAD + QUALITY FLOOR
+═══════════════════════════════════════════════════════
+Every index.html <head> MUST include ALL of the following:
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="[specific 8-15 word description of THIS app]">
+  <title>[App Name] — [4-6 word tagline specific to this app]</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>[one relevant emoji]</text></svg>">
+- Title must name the app and its purpose — never "My App", "SupaBein App", or a generic placeholder
+- Meta description must describe what this specific app does
+- Favicon MUST use the inline SVG emoji data URL (no external file dependency)
 
 ═══════════════════════════════════════════════════════
 PLACEHOLDERS + OWNERSHIP
@@ -1209,6 +1302,32 @@ function ai_execute_build(array $plan, int $userId): array
         $partial['tables'][] = ['name' => $tableName, 'columns' => count($columns)];
     }
 
+    // ── Seed data insertion ───────────────────────────────────────────────────
+    if (!empty($plan['seed_data']) && is_array($plan['seed_data'])) {
+        foreach ($plan['seed_data'] as $seedTable => $rows) {
+            if (!is_array($rows) || empty($rows)) continue;
+            $tbl = $catalog->getTable($projectId, (string)$seedTable);
+            if (!$tbl) continue;
+
+            $physical = $tbl['physical_name'];
+            foreach (array_slice($rows, 0, 20) as $row) {
+                if (!is_array($row) || empty($row)) continue;
+                unset($row['id'], $row['created_at']);
+                if (empty($row)) continue;
+
+                $cols         = array_keys($row);
+                $colList      = implode(', ', array_map(fn($c) => "`{$c}`", $cols));
+                $placeholders = implode(', ', array_fill(0, count($cols), '?'));
+                try {
+                    $pdo->prepare("INSERT INTO `{$physical}` ({$colList}) VALUES ({$placeholders})")
+                        ->execute(array_values($row));
+                } catch (\Throwable $e) {
+                    sb_log('ai_build', 'Seed insert failed (non-fatal): ' . $e->getMessage(), ['table' => $seedTable]);
+                }
+            }
+        }
+    }
+
     $subdomain = $plan['subdomain'];
     $site      = null;
     $deploy    = null;
@@ -1492,6 +1611,63 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
     return new \SupaBein\GeminiClient($key, $model);
 }
 
+// ─── Design brief (pass 1.5) ─────────────────────────────────────────────────
+
+const AI_DESIGN_BRIEF_PROMPT = <<<'PROMPT'
+You are a UI/UX director commissioning a web app. Based on the app description and its database
+schema, commit to a specific visual design direction.
+Return ONLY valid JSON — no markdown fences, no explanation:
+
+{
+  "personality": "2-4 words for the brand vibe, e.g. 'clean and minimal', 'bold and energetic'",
+  "accent_color": "ONE Tailwind color name (no shade): indigo | orange | blue | teal | violet | pink | amber | emerald | rose | cyan | lime | fuchsia",
+  "font_choice": "system-sans | mono | or a Google Fonts import line, e.g. \"<link rel='stylesheet' href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap'>\"",
+  "card_style": "rounded-xl shadow-lg | rounded-2xl shadow-md | rounded-sm shadow | rounded-none border border-gray-700",
+  "layout": "sidebar-nav | top-nav-hamburger | landing-then-dashboard | single-page-scroll",
+  "hero_style": "gradient-text-hero | split-text-image | large-image-banner | stats-bar | none",
+  "unique_detail": "ONE concrete distinctive UI element for this domain, e.g. 'Star ratings rendered as ★ emoji', 'Price tags with a colored badge', 'Progress bar on each task card'"
+}
+
+Rules:
+- accent_color MUST match the app domain (finance→blue, food→orange, health→teal, tasks→indigo, social→pink, shop→amber, etc.)
+- layout depends on table count: 1-2 tables → single-page-scroll or top-nav-hamburger; 3+ tables → sidebar-nav or landing-then-dashboard
+- Avoid the defaults (dark+emerald+top-nav) — pick something that gives this specific app a distinct personality
+- unique_detail must be specific to this app's domain, not generic ("add animations" is banned)
+PROMPT;
+
+function ai_generate_design_brief(object $client, string $prompt, array $schemaPlan): array
+{
+    $schemaCtx = ai_schema_to_context($schemaPlan);
+    $userMsg   = "App description: {$prompt}\n\nSchema:\n{$schemaCtx}";
+    try {
+        $brief = $client->generateJson(AI_DESIGN_BRIEF_PROMPT, $userMsg);
+    } catch (\Throwable) {
+        return [];
+    }
+    return is_array($brief) ? $brief : [];
+}
+
+function ai_brief_to_context(array $brief): string
+{
+    if (empty($brief)) return '';
+    $lines = ['Design brief — implement these choices exactly:'];
+    $labels = [
+        'personality'   => 'Brand personality',
+        'accent_color'  => 'Accent color (Tailwind name)',
+        'font_choice'   => 'Font',
+        'card_style'    => 'Card style (Tailwind classes)',
+        'layout'        => 'Layout pattern',
+        'hero_style'    => 'Hero element',
+        'unique_detail' => 'Unique UI detail',
+    ];
+    foreach ($labels as $k => $label) {
+        if (!empty($brief[$k]) && is_string($brief[$k])) {
+            $lines[] = "  {$label}: {$brief[$k]}";
+        }
+    }
+    return implode("\n", $lines);
+}
+
 // ─── Pipeline plan-generation helpers (used by background worker) ────────────
 
 function ai_generate_build_plan(object $client, string $prompt, ?array $approvedIntent, array $history): array
@@ -1517,7 +1693,13 @@ function ai_generate_build_plan(object $client, string $prompt, ?array $approved
         }
     }
 
-    $frontendMsg    = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+    // Pass 1.5 — design brief (best-effort; skip silently if it fails)
+    $brief    = ai_generate_design_brief($client, $prompt, $schemaPlan);
+    $briefCtx = ai_brief_to_context($brief);
+
+    $frontendMsg    = "App description: {$prompt}\n\n"
+                    . ($briefCtx ? "{$briefCtx}\n\n" : '')
+                    . "Exact validated schema — use ONLY these column names in JS:\n"
                     . ai_schema_to_context($schemaPlan);
     $frontendResult = $client->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
 
@@ -1686,9 +1868,16 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(422, 'AI returned an invalid schema: ' . $validationError);
         }
 
+        // Pass 1.5 — design brief (best-effort)
+        sb_log('ai_build', 'Calling AI (pass 1.5: design brief)', ['user_id' => $userId]);
+        $brief    = ai_generate_design_brief($gemini, $prompt, $schemaPlan);
+        $briefCtx = ai_brief_to_context($brief);
+
         // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
         sb_log('ai_build', 'Calling AI (pass 2: frontend)', ['user_id' => $userId]);
-        $frontendMsg = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+        $frontendMsg = "App description: {$prompt}\n\n"
+                     . ($briefCtx ? "{$briefCtx}\n\n" : '')
+                     . "Exact validated schema — use ONLY these column names in JS:\n"
                      . ai_schema_to_context($schemaPlan);
         try {
             $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
@@ -2099,8 +2288,18 @@ CHAT;
                     }
                 }
 
+                // Pass 1.5 — design brief (best-effort; skip silently on failure)
+                $_t0   = microtime(true);
+                $brief = ai_generate_design_brief($gemini, $prompt, $schemaPlan);
+                if (!empty($brief)) {
+                    $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+                }
+                $briefCtx = ai_brief_to_context($brief);
+
                 // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
-                $frontendMsg          = "App description: {$prompt}\n\nExact validated schema — use ONLY these column names in JS:\n"
+                $frontendMsg          = "App description: {$prompt}\n\n"
+                                      . ($briefCtx ? "{$briefCtx}\n\n" : '')
+                                      . "Exact validated schema — use ONLY these column names in JS:\n"
                                       . ai_schema_to_context($schemaPlan);
                 $_frontendSysPrompt   = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
                 $_t0 = microtime(true);
