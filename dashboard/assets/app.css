@@ -1494,9 +1494,26 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   font-size: 12px;
   user-select: none;
   list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .ai-trace-top-summary::before { content: '▸ '; font-size: 10px; }
 details[open] > .ai-trace-top-summary::before { content: '▾ '; }
+.ai-trace-dl-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 1px 7px;
+  cursor: pointer;
+  line-height: 1.6;
+  transition: background 0.12s, color 0.12s;
+  flex-shrink: 0;
+}
+.ai-trace-dl-btn:hover { background: rgba(255,255,255,0.06); color: var(--text); }
 .ai-trace-row {
   border-top: 1px solid var(--border);
 }
