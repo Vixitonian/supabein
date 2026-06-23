@@ -37,9 +37,9 @@ a:hover { text-decoration: underline; }
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  height: 100vh;
+  height: calc(100vh - 52px);
   position: sticky;
-  top: 0;
+  top: 52px;
   overflow-y: auto;
 }
 
@@ -357,24 +357,52 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   white-space: nowrap;
 }
 
-/* ── Mobile top bar ─────────────────────────────────────────────── */
+/* ── Top bar (always visible) ────────────────────────────────────── */
 .sb-topbar {
-  display: none;
+  display: flex;
   position: sticky;
   top: 0;
-  z-index: 150;
-  height: 56px;
+  z-index: 200;
+  height: 52px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 0 16px;
   flex-shrink: 0;
+  transition: transform 0.25s ease;
+}
+.sb-topbar.sb-topbar-hidden {
+  transform: translateY(-100%);
 }
 .sb-topbar-brand {
-  display: flex;
+  display: none;
   align-items: center;
   gap: 9px;
+}
+.sb-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sb-ai-topbar-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 15px;
+  background: linear-gradient(135deg, #3ecf8e, #2a8f62);
+  color: #0f1117;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  letter-spacing: 0.01em;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+.sb-ai-topbar-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(62,207,142,0.4);
 }
 
 /* Hamburger button */
@@ -418,11 +446,18 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 .sb-overlay.open { display: block; }
 
+/* ── Desktop: hide hamburger, show brand in sidebar only ──────────── */
+@media (min-width: 768px) {
+  .sb-hamburger { display: none; }
+  .sb-topbar { justify-content: flex-end; }
+}
+
 /* ── Mobile breakpoint: slide-in drawer ─────────────────────────── */
 @media (max-width: 767px) {
   .layout { flex-direction: column; min-height: 0; }
 
-  .sb-topbar { display: flex; }
+  .sb-topbar { justify-content: space-between; }
+  .sb-topbar-brand { display: flex; }
 
   /* Sidebar hidden off-screen; slides in when .open is added */
   .sidebar {
@@ -654,8 +689,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .pat-name { font-size: 0.85rem; font-weight: 500; }
 .pat-meta { font-size: 0.75rem; flex: 1; }
 
-/* ─── AI FAB ─────────────────────────────────────────────────────────────── */
+/* ─── AI FAB (replaced by topbar button) ─────────────────────────────────── */
 .ai-fab {
+  display: none !important;
   position: fixed;
   bottom: 28px;
   right: 28px;

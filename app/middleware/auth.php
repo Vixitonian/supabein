@@ -85,7 +85,8 @@ function auth_middleware(array $req, callable $next): void
         abort(401, 'Invalid or expired token');
     }
 
-    // Sliding renewal for platform-user JWTs (not PATs, not project/service tokens)
+    // Sliding renewal for platform-user JWTs — renew on every request so the session
+    // never expires while the user is active (no logout until explicit sign-out).
     if (
         !str_starts_with($rawToken, 'sb_pat_')
         && ($auth['role'] ?? '') === 'owner'
@@ -94,20 +95,17 @@ function auth_middleware(array $req, callable $next): void
         try {
             $config  = App::get('config');
             $decoded = \Firebase\JWT\JWT::decode($rawToken, new \Firebase\JWT\Key($config['JWT_SECRET'], $config['JWT_ALGO']));
-            // Renew if expiring within 15 minutes
-            if (isset($decoded->exp) && ($decoded->exp - time()) < 900) {
-                $now     = time();
-                $payload = [
-                    'iss'   => 'supabein',
-                    'sub'   => (string)$decoded->sub,
-                    'email' => $decoded->email ?? '',
-                    'role'  => $decoded->role ?? 'owner',
-                    'iat'   => $now,
-                    'exp'   => $now + $config['JWT_TTL'],
-                ];
-                $fresh = \Firebase\JWT\JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
-                header('X-Refresh-Token: ' . $fresh);
-            }
+            $now     = time();
+            $payload = [
+                'iss'   => 'supabein',
+                'sub'   => (string)$decoded->sub,
+                'email' => $decoded->email ?? '',
+                'role'  => $decoded->role ?? 'owner',
+                'iat'   => $now,
+                'exp'   => $now + $config['JWT_TTL'],
+            ];
+            $fresh = \Firebase\JWT\JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
+            header('X-Refresh-Token: ' . $fresh);
         } catch (\Throwable) {
             // resolve_token already validated it; ignore decode errors here
         }
