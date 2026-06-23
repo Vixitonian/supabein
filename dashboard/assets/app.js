@@ -48,7 +48,15 @@ const Api = (() => {
       body = JSON.stringify(data);
     }
 
-    const res = await fetch(BASE + path, { method, headers, body });
+    let res;
+    try {
+      res = await fetch(BASE + path, { method, headers, body, signal: AbortSignal.timeout(600000) });
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+        throw new ApiError('Request timed out after 10 minutes — the server took too long. Try a simpler prompt or check server health.', 408, {});
+      }
+      throw e;
+    }
 
     if (res.status === 401) {
       Auth.clear();
@@ -56,7 +64,7 @@ const Api = (() => {
       return null;
     }
 
-    // Sliding renewal: backend sends a fresh token when the current one is near expiry
+    // Sliding renewal: backend sends a fresh token on every authenticated call
     const refreshed = res.headers.get('X-Refresh-Token');
     if (refreshed) Auth.setToken(refreshed);
 
@@ -576,13 +584,25 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
   const burger = el('button', { class: 'sb-hamburger', 'aria-label': 'Toggle menu' },
     el('span'), el('span'), el('span')
   );
+  const aiTopbarBtn = el('button', { class: 'sb-ai-topbar-btn', onClick: () => AiPanel.toggle() }, '✦ AI');
   const topbar = el('div', { class: 'sb-topbar' },
     el('div', { class: 'sb-topbar-brand' },
       el('span', { class: 'sb-logo-mark' }, 'SB'),
       el('span', { class: 'sb-logo-text' }, 'SupaBein')
     ),
-    burger
+    el('div', { class: 'sb-topbar-right' }, aiTopbarBtn, burger)
   );
+
+  // Smart sticky: hide on scroll down, reveal on scroll up
+  if (window._sbScrollHandler) window.removeEventListener('scroll', window._sbScrollHandler, { passive: true });
+  let _lastScrollY = window.scrollY;
+  window._sbScrollHandler = () => {
+    const y = window.scrollY;
+    if (y > _lastScrollY + 4) topbar.classList.add('sb-topbar-hidden');
+    else if (y < _lastScrollY - 2) topbar.classList.remove('sb-topbar-hidden');
+    _lastScrollY = y;
+  };
+  window.addEventListener('scroll', window._sbScrollHandler, { passive: true });
 
   // Dark overlay behind the open drawer
   const overlay = el('div', { class: 'sb-overlay' });
@@ -1225,11 +1245,12 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await handlePlanResponse(response);
     } catch(e) {
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
+      const code = e.status ? ` [HTTP ${e.status}]` : '';
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, details: e.data }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message} — try rephrasing your request or check the project for partial changes.`, retryBody: body, retryType: 'plan' });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong${code}: ${e.message} — try rephrasing your request or check the project for partial changes.`, retryBody: body, retryType: 'plan' });
     }
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
@@ -1260,11 +1281,12 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: response, settled: false });
     } catch(e) {
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
+      const code = e.status ? ` [HTTP ${e.status}]` : '';
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, details: e.data }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong${code}: ${e.message}`, retryBody: body, retryType: 'plan' });
     }
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
@@ -1275,6 +1297,10 @@ const AiPanel = (() => {
   }
 
   async function handlePlanResponse(response) {
+    if (!response) {
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'Received an empty response from the server — the AI may have timed out or returned no content. Please try again.' });
+      return;
+    }
     if (response.mode === 'chat') {
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
     } else if (response.mode === 'diagnose') {
@@ -2218,6 +2244,13 @@ const AiPanel = (() => {
       document.body.appendChild(panelEl);
     }
 
+    // Show panel immediately so animation starts without waiting for data
+    panelEl.classList.add('ai-panel-open');
+    getOrCreateBackdrop().classList.add('active');
+    const fab = document.getElementById('ai-fab');
+    if (fab) fab.classList.add('ai-fab-hidden');
+    setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
+
     const autoProject = detectCurrentProject();
     selectedProjectId = (options.projectId !== undefined) ? options.projectId : autoProject;
 
@@ -2254,14 +2287,6 @@ const AiPanel = (() => {
       }
     }
     renderMessages();
-
-    panelEl.classList.add('ai-panel-open');
-    getOrCreateBackdrop().classList.add('active');
-
-    const fab = document.getElementById('ai-fab');
-    if (fab) fab.classList.add('ai-fab-hidden');
-
-    setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
   }
 
   function updateFabBadge() {
@@ -2493,16 +2518,26 @@ async function renderProject({ id }) {
       }
     });
 
-    // Async: fetch site to show "View Site" in header if a live deploy exists
+    // Async: fetch site to show "View Site" / "View Staging" in header
     Api.get(`/v1/projects/${id}/sites`).then(sites => {
-      const liveSite = Array.isArray(sites) && sites.find(s => s.current_deploy_id);
-      if (!liveSite) return;
+      if (!Array.isArray(sites) || !sites.length) return;
       const hdr = document.querySelector('.page-header');
-      if (hdr && !hdr.querySelector('#proj-view-site-btn')) {
+      if (!hdr) return;
+      const site = sites[0];
+      if (site.staging_deploy_id && !hdr.querySelector('#proj-view-staging-btn')) {
+        hdr.appendChild(el('a', {
+          id: 'proj-view-staging-btn',
+          class: 'btn btn-secondary btn-sm',
+          href: `/sites/s${site.id}/staging/`,
+          target: '_blank',
+          rel: 'noopener'
+        }, 'View Staging →'));
+      }
+      if (site.current_deploy_id && !hdr.querySelector('#proj-view-site-btn')) {
         hdr.appendChild(el('a', {
           id: 'proj-view-site-btn',
           class: 'btn btn-primary btn-sm',
-          href: `/sites/s${liveSite.id}/current/`,
+          href: `/sites/s${site.id}/current/`,
           target: '_blank',
           rel: 'noopener'
         }, 'View Site →'));
