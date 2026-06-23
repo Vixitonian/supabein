@@ -1448,26 +1448,50 @@ const AiPanel = (() => {
   }
 
   function showEditReviewCard(suggestions, body) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const existing = container.querySelector('.ai-edit-review-card');
-    if (existing) existing.remove();
+    addMessage(currentSessionId, {
+      role: 'ai',
+      type: 'edit-review',
+      data: { suggestions, body },
+      settled: false,
+    });
+    renderMessages();
+  }
 
-    const card = renderEditReviewCard(
-      suggestions,
+  function renderEditReviewInlineCard(msg) {
+    if (msg.settled) {
+      if (msg.cancelled) {
+        return el('div', { class: 'ai-msg ai-msg-ai ai-edit-review-card ai-plan-settled' },
+          el('div', { class: 'ai-intent-header' }, 'Edit review — cancelled')
+        );
+      }
+      const selected = msg.data?.finalSelected || [];
+      return el('div', { class: 'ai-msg ai-msg-ai ai-edit-review-card ai-plan-settled' },
+        el('div', { class: 'ai-intent-header' }, '✓ Edit review — confirmed'),
+        el('div', { class: 'ai-intent-summary-stories' },
+          ...selected.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s.label))
+        )
+      );
+    }
+    return renderEditReviewCard(
+      msg.data?.suggestions || [],
       async (selected) => {
-        card.remove();
-        const confirmedData = { confirmed: selected, original_prompt: body.prompt };
-        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: confirmedData });
-        const refinedPrompt = body.prompt
+        msg.data.finalSelected = selected;
+        msg.settled = true;
+        saveSessions();
+        renderMessages();
+        await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: { confirmed: selected, original_prompt: msg.data.body?.prompt } });
+        const refinedPrompt = (msg.data.body?.prompt || '')
           + '\n\nApply ONLY these specific changes (ignore everything else):\n'
           + selected.map((s, i) => `${i + 1}. ${s.label}`).join('\n');
-        await proceedWithPlan({ ...body, prompt: refinedPrompt });
+        await proceedWithPlan({ ...msg.data.body, prompt: refinedPrompt });
       },
-      () => { card.remove(); renderMessages(); }
+      () => {
+        msg.settled = true;
+        msg.cancelled = true;
+        saveSessions();
+        renderMessages();
+      }
     );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
   }
 
   function renderEditIntentSummaryCard(msg) {
@@ -1500,6 +1524,7 @@ const AiPanel = (() => {
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
+    if (msg.type === 'edit-review') return renderEditReviewInlineCard(msg);
     if (msg.type === 'deploy-confirm') return renderDeployConfirmCard(msg);
     if (msg.type === 'error') {
       const div = el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' },
