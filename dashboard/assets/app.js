@@ -61,7 +61,7 @@ const Api = (() => {
     if (res.status === 401) {
       Auth.clear();
       Router.navigate('/login');
-      return null;
+      throw new ApiError('Session expired — please log in again', 401, {});
     }
 
     // Sliding renewal: backend sends a fresh token on every authenticated call
@@ -1245,6 +1245,7 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await handlePlanResponse(response);
     } catch(e) {
+      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; return; }
       const code = e.status ? ` [HTTP ${e.status}]` : '';
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, details: e.data }, ms: Date.now() - t0 });
       renderMessages();
@@ -1281,6 +1282,7 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: response, settled: false });
     } catch(e) {
+      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; return; }
       const code = e.status ? ` [HTTP ${e.status}]` : '';
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, details: e.data }, ms: Date.now() - t0 });
       renderMessages();
