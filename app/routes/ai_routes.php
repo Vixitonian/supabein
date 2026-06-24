@@ -1635,6 +1635,28 @@ Rules:
 - unique_detail must be specific to this app's domain, not generic ("add animations" is banned)
 PROMPT;
 
+function ai_classify_error(string $msg): string
+{
+    $lower = strtolower($msg);
+    if (str_contains($lower, '429') || str_contains($lower, 'rate limit') || str_contains($lower, 'too many requests')) return 'rate_limit';
+    if (str_contains($lower, '401') || str_contains($lower, 'invalid key') || str_contains($lower, 'api key')) return 'api_key';
+    if (str_contains($lower, '403') || str_contains($lower, 'permission denied')) return 'permission';
+    if (str_contains($lower, 'no content') || str_contains($lower, 'content filter') || str_contains($lower, 'safety') || str_contains($lower, 'blocked')) return 'content_filter';
+    if (str_contains($lower, 'not valid json') || str_contains($lower, 'invalid json') || str_contains($lower, 'unexpected response')) return 'invalid_json';
+    if (str_contains($lower, 'timeout') || str_contains($lower, 'timed out')) return 'timeout';
+    if (str_contains($lower, 'network') || str_contains($lower, 'curl') || str_contains($lower, 'connection')) return 'network';
+    if (str_contains($lower, '500') || str_contains($lower, '503') || str_contains($lower, 'internal server error')) return 'provider_error';
+    return 'unknown';
+}
+
+function ai_abort_error(string $stage, string $msg): never
+{
+    if (str_contains(strtolower($msg), 'credits') || str_contains(strtolower($msg), 'quota')) {
+        abort(402, $msg, ['stage' => $stage, 'code' => 'rate_limit', 'raw' => $msg]);
+    }
+    abort(502, 'AI error', ['stage' => $stage, 'code' => ai_classify_error($msg), 'raw' => $msg]);
+}
+
 function ai_generate_design_brief(object $client, string $prompt, array $schemaPlan): array
 {
     $schemaCtx = ai_schema_to_context($schemaPlan);
@@ -1817,9 +1839,7 @@ function register_ai_routes(\SupaBein\Router $router): void
             try {
                 $intent = ai_generate_intent($gemini, $prompt);
             } catch (\RuntimeException $e) {
-                $msg = $e->getMessage();
-                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-                abort(502, 'AI generation failed: ' . $msg);
+                ai_abort_error('intent', $e->getMessage());
             }
             json_out(['mode' => 'intent', 'intent' => $intent, 'usage' => $gemini->getLastUsage()]);
             return;
@@ -1839,8 +1859,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             sb_log('ai_build', 'AI error (pass 1): ' . $msg, ['user_id' => $userId]);
-            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-            abort(502, 'AI generation failed: ' . $msg);
+            ai_abort_error('schema', $msg);
         }
 
         // ── 3. Validate schema (sanitize → validate → retry once with the error) ──
@@ -1858,9 +1877,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                 $schemaPlan = ai_sanitize_plan($schemaPlan);
                 $validationError = ai_validate_plan($schemaPlan);
             } catch (\RuntimeException $e) {
-                $msg = $e->getMessage();
-                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-                abort(502, 'AI generation failed: ' . $msg);
+                ai_abort_error('schema_retry', $e->getMessage());
             }
         }
         if ($validationError) {
@@ -1884,8 +1901,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             sb_log('ai_build', 'AI error (pass 2): ' . $msg, ['user_id' => $userId]);
-            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-            abort(502, 'AI frontend generation failed: ' . $msg);
+            ai_abort_error('frontend', $msg);
         }
 
         $plan = $schemaPlan;
@@ -2051,9 +2067,7 @@ PROMPT;
             try {
                 $result = $gemini->generateJson($recoverPrompt, $context);
             } catch (\RuntimeException $e) {
-                $msg = $e->getMessage();
-                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-                abort(502, 'AI recovery failed: ' . $msg);
+                ai_abort_error('recover', $e->getMessage());
             }
 
             json_out([
@@ -2111,9 +2125,7 @@ PROMPT;
             try {
                 $result = $gemini->generateJson($suggestPrompt, $suggestContext);
             } catch (\RuntimeException $e) {
-                $msg = $e->getMessage();
-                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-                abort(502, 'AI suggest failed: ' . $msg);
+                ai_abort_error('suggest', $e->getMessage());
             }
 
             json_out([
@@ -2243,9 +2255,7 @@ CHAT;
                 $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
                 $aiTrace[] = ['stage' => 'chat', 'system' => $chatSystemPrompt, 'history' => $history, 'user_msg' => $userQuestion, 'response' => $res, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
             } catch (\RuntimeException $e) {
-                $msg = $e->getMessage();
-                if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-                abort(502, 'AI generation failed: ' . $msg);
+                ai_abort_error('chat', $e->getMessage());
             }
             json_out([
                 'mode'    => 'chat',
@@ -2266,7 +2276,8 @@ CHAT;
                     ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
                     : $prompt;
                 $_t0 = microtime(true);
-                $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
+                try { $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg); }
+                catch (\RuntimeException $e) { ai_abort_error('schema', $e->getMessage()); }
                 $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
                 $schemaPlan['frontend'] = ['files' => []];
                 $schemaPlan = ai_sanitize_plan($schemaPlan);
@@ -2278,7 +2289,8 @@ CHAT;
                         . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
                         . "\nReturn a corrected schema that fixes exactly this problem.";
                     $_t0 = microtime(true);
-                    $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+                    try { $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt); }
+                    catch (\RuntimeException $e) { ai_abort_error('schema_retry', $e->getMessage()); }
                     $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
                     $schemaPlan['frontend'] = ['files' => []];
                     $schemaPlan = ai_sanitize_plan($schemaPlan);
@@ -2303,7 +2315,8 @@ CHAT;
                                       . ai_schema_to_context($schemaPlan);
                 $_frontendSysPrompt   = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
                 $_t0 = microtime(true);
-                $frontendResult = $gemini->generateJson($_frontendSysPrompt, $frontendMsg);
+                try { $frontendResult = $gemini->generateJson($_frontendSysPrompt, $frontendMsg); }
+                catch (\RuntimeException $e) { ai_abort_error('frontend', $e->getMessage()); }
                 $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 $plan = $schemaPlan;
@@ -2331,7 +2344,8 @@ CHAT;
                 $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
                 $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
                 $_t0 = microtime(true);
-                $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
+                try { $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage); }
+                catch (\RuntimeException $e) { ai_abort_error('edit', $e->getMessage()); }
                 $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'user_msg_len' => mb_strlen($userMessage), 'user_msg_truncated' => mb_strlen($userMessage) > 5000, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 // Validate the delta; one self-correcting retry with the reason fed back.
@@ -2341,7 +2355,8 @@ CHAT;
                         . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
                         . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
                     $_t0 = microtime(true);
-                    $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg);
+                    try { $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg); }
+                    catch (\RuntimeException $e) { ai_abort_error('edit_retry', $e->getMessage()); }
                     $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'user_msg_len' => mb_strlen($retryMsg), 'user_msg_truncated' => mb_strlen($retryMsg) > 5000, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
                     $deltaError = ai_validate_delta($delta, $existingSchema);
                     if ($deltaError) abort(422, 'AI returned an invalid edit: ' . $deltaError);
@@ -2395,7 +2410,8 @@ Analyze the project context and issue. Return ONLY valid JSON:
 PROMPT;
 
                 $_t0 = microtime(true);
-                $result = $gemini->generateJsonWithHistory($diagnosePrompt, $history, $context);
+                try { $result = $gemini->generateJsonWithHistory($diagnosePrompt, $history, $context); }
+                catch (\RuntimeException $e) { ai_abort_error('diagnose', $e->getMessage()); }
                 $aiTrace[] = ['stage' => 'diagnose', 'system' => $diagnosePrompt, 'history' => $history, 'user_msg' => mb_strlen($context) > 5000 ? mb_substr($context, 0, 5000) : $context, 'user_msg_len' => mb_strlen($context), 'user_msg_truncated' => mb_strlen($context) > 5000, 'response' => $result, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
 
                 json_out([
@@ -2407,9 +2423,7 @@ PROMPT;
                 ]);
             }
         } catch (\RuntimeException $e) {
-            $msg = $e->getMessage();
-            if (str_contains($msg, 'credits') || str_contains($msg, 'quota')) abort(402, $msg);
-            abort(502, 'AI generation failed: ' . $msg);
+            ai_abort_error('unknown', $e->getMessage());
         }
 
     }, ['auth_middleware']);

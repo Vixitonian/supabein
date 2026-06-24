@@ -909,6 +909,35 @@ const AiPanel = (() => {
     stopThinkingStages = () => { clearInterval(timer); stopThinkingStages = null; };
   }
 
+  function aiFriendlyError(e) {
+    const code  = e.data?.code;
+    const stage = e.data?.stage;
+    const stageLabel = {
+      schema:        'schema generation',
+      schema_retry:  'schema generation (retry)',
+      frontend:      'frontend generation',
+      design_brief:  'design brief',
+      edit:          'edit analysis',
+      edit_retry:    'edit analysis (retry)',
+      diagnose:      'diagnostics',
+      chat:          'chat',
+      suggest:       'suggestion analysis',
+      intent:        'intent analysis',
+      recover:       'error recovery',
+    }[stage] || (stage ? stage.replace(/_/g, ' ') : 'AI call');
+    const codeMsg = {
+      rate_limit:     'The AI hit a rate limit — wait a moment and try again',
+      content_filter: 'The AI filtered this request — try rephrasing your prompt',
+      invalid_json:   'The AI returned an unexpected format — retrying may help',
+      timeout:        'The AI timed out — try a shorter or simpler prompt',
+      api_key:        'AI API key is invalid or expired',
+      network:        'Can\'t reach the AI provider — check server connectivity',
+      provider_error: 'The AI provider had an internal error — try again shortly',
+    }[code];
+    if (codeMsg) return `${codeMsg} (during ${stageLabel})`;
+    return `AI error during ${stageLabel}: ${e.message}`;
+  }
+
   async function callWithFallback(path, body) {
     let selectedM = getSelectedModel();
     const tried = new Set();
@@ -1246,12 +1275,11 @@ const AiPanel = (() => {
       await handlePlanResponse(response);
     } catch(e) {
       if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; return; }
-      const code = e.status ? ` [HTTP ${e.status}]` : '';
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, details: e.data }, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code, raw: e.data?.raw }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong${code}: ${e.message} — try rephrasing your request or check the project for partial changes.`, retryBody: body, retryType: 'plan' });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
     }
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
@@ -1283,12 +1311,11 @@ const AiPanel = (() => {
       await addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: response, settled: false });
     } catch(e) {
       if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; return; }
-      const code = e.status ? ` [HTTP ${e.status}]` : '';
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, details: e.data }, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code, raw: e.data?.raw }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong${code}: ${e.message}`, retryBody: body, retryType: 'plan' });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
     }
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
