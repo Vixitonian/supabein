@@ -1326,16 +1326,18 @@ const AiPanel = (() => {
   }
 
   async function handlePlanResponse(response) {
-    if (!response) {
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'Received an empty response from the server — the AI may have timed out or returned no content. Please try again.' });
+    if (!response || !response.mode) {
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'The AI returned an empty or unreadable response — the server may have timed out or the response was too large. Please try again.' });
       return;
     }
     if (response.mode === 'chat') {
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
     } else if (response.mode === 'diagnose') {
       await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
-    } else {
+    } else if (response.mode === 'build' || response.mode === 'edit') {
       await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
+    } else {
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Unexpected response from AI (mode: ${response.mode}) — try rephrasing your request.` });
     }
   }
 
@@ -1512,7 +1514,7 @@ const AiPanel = (() => {
         const refinedPrompt = (msg.data.body?.prompt || '')
           + '\n\nApply ONLY these specific changes (ignore everything else):\n'
           + selected.map((s, i) => `${i + 1}. ${s.label}`).join('\n');
-        await proceedWithPlan({ ...msg.data.body, prompt: refinedPrompt });
+        await proceedWithBuildDirect({ ...msg.data.body, prompt: refinedPrompt });
       },
       () => {
         msg.settled = true;
@@ -1548,7 +1550,7 @@ const AiPanel = (() => {
       return bubble;
     }
     if (msg.type === 'intent') return renderIntentSummaryCard(msg);
-    if (msg.type === 'edit-intent') return renderEditIntentSummaryCard(msg);
+    if (msg.type === 'edit-intent') return el('span', {});
     if (msg.type === 'recover') return renderRecoveryCard(msg);
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);

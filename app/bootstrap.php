@@ -69,7 +69,7 @@ function abort(int $status, string $message = '', array $data = []): never
 function json_out(mixed $data, int $status = 200): never
 {
     http_response_code($status);
-    echo json_encode($data);
+    echo json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
 
