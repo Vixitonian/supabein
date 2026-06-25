@@ -1649,6 +1649,7 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
 
 /* Error retry/dismiss actions */
 .ai-error-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.ai-error-checkpoint { font-size: 12px; color: var(--accent); margin-top: 6px; }
 
 /* Live trace indicator dot */
 .ai-trace-live-dot {

@@ -910,6 +910,14 @@ const AiPanel = (() => {
   }
 
   function aiFriendlyError(e) {
+    // Native connection/network error — no HTTP status code at all
+    if (!e.status) {
+      const msg = (e.message || '').toLowerCase();
+      if (msg.includes('timeout') || msg.includes('abort') || e.name === 'TimeoutError' || e.name === 'AbortError') {
+        return 'The request timed out after too long — the server may be under load. Your progress is saved; click Continue to retry.';
+      }
+      return 'Connection to the server was lost — check your internet and click Continue to retry.';
+    }
     const code  = e.data?.code;
     const stage = e.data?.stage;
     const stageLabel = {
@@ -1563,18 +1571,23 @@ const AiPanel = (() => {
       );
       const actions = el('div', { class: 'ai-error-actions' });
       if (msg.retryType === 'plan' && msg.retryBody) {
+        const hasIntent = !!(msg.retryBody.intent);
+        const retryLabel = hasIntent ? '↺ Continue build' : '↺ Retry';
+        if (hasIntent) {
+          div.appendChild(el('div', { class: 'ai-error-checkpoint' }, '✓ Intent saved — continuing will skip straight to plan generation'));
+        }
         actions.appendChild(el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
           const sess = currentSession();
           if (sess) { sess.messages = sess.messages.filter(m => m.id !== msg.id); saveSessions(); }
           await proceedWithPlan(msg.retryBody);
-        }}, '↺ Retry'));
+        }}, retryLabel));
       }
       if (msg.retryType === 'apply' && msg.retryBody) {
         actions.appendChild(el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
           const sess = currentSession();
           if (sess) { sess.messages = sess.messages.filter(m => m.id !== msg.id); saveSessions(); }
           await applyPlan(msg.retryBody.plan, msg.retryBody.mode, null);
-        }}, '↺ Retry'));
+        }}, '↺ Retry apply'));
       }
       actions.appendChild(el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
         const sess = currentSession();
