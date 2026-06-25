@@ -95,6 +95,12 @@ AUTHENTICATION (read carefully — this is the most common design failure):
   plus {"name":"password","type":"PASSWORD"}). Without a PASSWORD column the platform cannot
   issue a login token, so :current_user_id is always empty and every owner-scoped table is
   permanently inaccessible.
+- The users table MUST include "anon INSERT allowed" in its policies. Signup calls POST /data/:pid/users
+  without a token (the user is not yet authenticated), so anon INSERT must be allowed or every
+  registration attempt will return 403 Forbidden. Example minimal policy set for users:
+    anon INSERT allowed (no constraint — lets anyone register)
+    authenticated SELECT allowed (constraint: id = :current_user_id — own row only)
+    authenticated UPDATE allowed (constraint: id = :current_user_id)
 - Reference the logged-in user from other tables with a column named EXACTLY "user_id" of type
   INT. Do NOT invent owner column names like "customer_ref", "user_ref", "owner_id", or "author".
   Owner-scoped policies must read "user_id = :current_user_id".
