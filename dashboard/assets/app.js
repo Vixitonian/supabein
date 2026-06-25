@@ -35,7 +35,7 @@ const Api = (() => {
     return base;
   })();
 
-  async function request(method, path, data, isFormData = false) {
+  async function request(method, path, data, isFormData = false, abortSignal = null) {
     const headers = {};
     const token = Auth.getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
@@ -48,12 +48,16 @@ const Api = (() => {
       body = JSON.stringify(data);
     }
 
+    const signal = abortSignal ?? AbortSignal.timeout(600000);
     let res;
     try {
-      res = await fetch(BASE + path, { method, headers, body, signal: AbortSignal.timeout(600000) });
+      res = await fetch(BASE + path, { method, headers, body, signal });
     } catch (e) {
-      if (e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
-        throw new ApiError('Request timed out after 10 minutes — the server took too long. Try a simpler prompt or check server health.', 408, {});
+      if (e instanceof DOMException) {
+        if (abortSignal?.aborted) throw e;
+        if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+          throw new ApiError('Request timed out after 10 minutes — the server took too long. Try a simpler prompt or check server health.', 408, {});
+        }
       }
       throw e;
     }
@@ -90,7 +94,7 @@ const Api = (() => {
   return {
     BASE,
     get:    (path)       => request('GET',    path),
-    post:   (path, data) => request('POST',   path, data),
+    post:   (path, data, signal) => request('POST',   path, data, false, signal),
     patch:  (path, data) => request('PATCH',  path, data),
     put:    (path, data) => request('PUT',    path, data),
     delete: (path)       => request('DELETE', path),
@@ -835,6 +839,8 @@ const AiPanel = (() => {
   let liveTraceMsg = null;
   let operationInProgress = false;
   let operationMode = null;
+  let currentAbortController = null;
+  let sendBtnEl = null;
 
   const AI_MODELS = [
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -946,13 +952,13 @@ const AiPanel = (() => {
     return `AI error during ${stageLabel}: ${e.message}`;
   }
 
-  async function callWithFallback(path, body) {
+  async function callWithFallback(path, body, signal = null) {
     let selectedM = getSelectedModel();
     const tried = new Set();
     while (true) {
       tried.add(selectedM.model);
       try {
-        return await Api.post(path, { ...body, provider: selectedM.provider, model: selectedM.model });
+        return await Api.post(path, { ...body, provider: selectedM.provider, model: selectedM.model }, signal);
       } catch (e) {
         if (e.status === 402) {
           const nextModel = AI_MODELS.find(m => !tried.has(m.model));
@@ -966,6 +972,27 @@ const AiPanel = (() => {
         }
         throw e;
       }
+    }
+  }
+
+  function abortCurrentOperation() {
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
+  }
+
+  function updateSendBtn() {
+    if (!sendBtnEl) return;
+    if (operationInProgress) {
+      sendBtnEl.textContent = '■';
+      sendBtnEl.disabled = false;
+      sendBtnEl.classList.add('ai-send-btn--stop');
+    } else {
+      sendBtnEl.textContent = '↑';
+      const ta = panelEl?.querySelector('#ai-textarea');
+      sendBtnEl.disabled = !ta || ta.value.trim() === '';
+      sendBtnEl.classList.remove('ai-send-btn--stop');
     }
   }
 
@@ -1271,18 +1298,27 @@ const AiPanel = (() => {
     if (sess) sess.messages.push(liveTraceMsg);
     operationInProgress = true;
     operationMode = stageMode;
+    currentAbortController = new AbortController();
+    updateSendBtn();
     renderMessages();
 
     const t0 = Date.now();
     try {
-      const response = await callWithFallback('/v1/ai/plan', body);
+      const response = await callWithFallback('/v1/ai/plan', body, currentAbortController.signal);
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await handlePlanResponse(response);
     } catch(e) {
-      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; return; }
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        operationInProgress = false; operationMode = null; currentAbortController = null;
+        updateSendBtn(); renderMessages();
+        return;
+      }
+      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code, raw: e.data?.raw }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
@@ -1292,6 +1328,8 @@ const AiPanel = (() => {
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
     operationMode = null;
+    currentAbortController = null;
+    updateSendBtn();
     if (sess) await persistSession(sess);
     renderSidebar();
     renderMessages();
@@ -1307,18 +1345,27 @@ const AiPanel = (() => {
     if (sess) sess.messages.push(liveTraceMsg);
     operationInProgress = true;
     operationMode = stageMode;
+    currentAbortController = new AbortController();
+    updateSendBtn();
     renderMessages();
 
     const t0 = Date.now();
     try {
-      const response = await callWithFallback('/v1/ai/plan', body);
+      const response = await callWithFallback('/v1/ai/plan', body, currentAbortController.signal);
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
       await addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: response, settled: false });
     } catch(e) {
-      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; return; }
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        operationInProgress = false; operationMode = null; currentAbortController = null;
+        updateSendBtn(); renderMessages();
+        return;
+      }
+      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code, raw: e.data?.raw }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
@@ -1328,6 +1375,8 @@ const AiPanel = (() => {
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
     operationMode = null;
+    currentAbortController = null;
+    updateSendBtn();
     if (sess) await persistSession(sess);
     renderSidebar();
     renderMessages();
@@ -2149,12 +2198,14 @@ const AiPanel = (() => {
     }
     operationInProgress = true;
     operationMode = mode;
+    currentAbortController = new AbortController();
+    updateSendBtn();
     renderMessages();
 
     const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
       const t0 = Date.now();
-      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel });
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel }, currentAbortController.signal);
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
@@ -2163,6 +2214,13 @@ const AiPanel = (() => {
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
     } catch(e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        operationInProgress = false; operationMode = null; currentAbortController = null;
+        updateSendBtn(); renderMessages();
+        return;
+      }
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
       renderMessages();
       stopThinkingStages?.();
@@ -2180,6 +2238,8 @@ const AiPanel = (() => {
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
     operationMode = null;
+    currentAbortController = null;
+    updateSendBtn();
     if (sess) await persistSession(sess);
 
     renderMessages();
@@ -2216,11 +2276,14 @@ const AiPanel = (() => {
     textarea.addEventListener('input', () => {
       textarea.style.height = 'auto';
       textarea.style.height = Math.min(textarea.scrollHeight, 180) + 'px';
-      sendBtn.disabled = textarea.value.trim() === '';
+      if (!operationInProgress) sendBtn.disabled = textarea.value.trim() === '';
     });
 
-    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: sendMessage }, '↑');
+    const sendBtn = el('button', { class: 'btn btn-ai ai-send-btn', onClick: () => {
+      if (operationInProgress) { abortCurrentOperation(); } else { sendMessage(); }
+    }}, '↑');
     sendBtn.disabled = true;
+    sendBtnEl = sendBtn;
 
     const reviewToggle = el('button', {
       class: 'ai-review-toggle' + (reviewEnabled ? ' active' : ''),
