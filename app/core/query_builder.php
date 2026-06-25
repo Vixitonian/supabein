@@ -153,7 +153,7 @@ class QueryBuilder
                 continue;
             }
             $cols[]   = self::q($col);
-            $params[] = $val;
+            $params[] = is_array($val) || is_object($val) ? json_encode($val, JSON_UNESCAPED_UNICODE) : $val;
         }
 
         if (empty($cols)) {
@@ -188,7 +188,7 @@ class QueryBuilder
                 continue;
             }
             $sets[]   = self::q($col) . ' = ?';
-            $params[] = $val;
+            $params[] = is_array($val) || is_object($val) ? json_encode($val, JSON_UNESCAPED_UNICODE) : $val;
         }
 
         if (empty($sets)) {

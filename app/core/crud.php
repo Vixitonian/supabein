@@ -58,6 +58,21 @@ class Crud
         }, $rows);
     }
 
+    private static function decodeJsonCols(array $rows, array $colTypes): array
+    {
+        $jsonCols = array_keys(array_filter($colTypes, fn($t) => $t === 'JSON'));
+        if (!$jsonCols) return $rows;
+        return array_map(function ($r) use ($jsonCols) {
+            foreach ($jsonCols as $jc) {
+                if (array_key_exists($jc, $r) && is_string($r[$jc])) {
+                    $decoded = json_decode($r[$jc], true);
+                    if (json_last_error() === JSON_ERROR_NONE) $r[$jc] = $decoded;
+                }
+            }
+            return $r;
+        }, $rows);
+    }
+
     // ─── SELECT (list) ───────────────────────────────────────────────────────
 
     public static function handleList(array $req): void
@@ -90,6 +105,7 @@ class Crud
         $rows = $stmt->fetchAll();
         $rows = array_map(fn($r) => isset($r['id']) ? array_merge($r, ['id' => (int)$r['id']]) : $r, $rows);
         $rows = self::maskPasswordCols($rows, $colTypes);
+        $rows = self::decodeJsonCols($rows, $colTypes);
 
         json_out(['data' => $rows, 'count' => count($rows), 'limit' => $limit, 'offset' => $offset]);
     }
@@ -122,6 +138,7 @@ class Crud
 
         if (isset($row['id'])) $row['id'] = (int)$row['id'];
         [$row] = self::maskPasswordCols([$row], $colTypes);
+        [$row] = self::decodeJsonCols([$row], $colTypes);
         json_out($row);
     }
 
@@ -184,6 +201,7 @@ class Crud
         $row = $stmt->fetch();
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
         if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
+        if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
         json_out($row, 201);
     }
 
@@ -230,6 +248,7 @@ class Crud
             $row = $stmt->fetch();
             if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
             if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
+            if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
             $inserted[] = $row;
         }
 
@@ -279,6 +298,7 @@ class Crud
         $row = $stmt2->fetch();
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
         if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
+        if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
         json_out($row);
     }
 
