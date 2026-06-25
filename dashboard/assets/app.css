@@ -1097,6 +1097,7 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 }
 .ai-project-picker:focus { outline: none; border-color: var(--accent); color: var(--text); }
 .ai-send-btn {
+  position: relative;
   width: 34px;
   height: 34px;
   border-radius: 50%;
@@ -1118,6 +1119,18 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 }
 .ai-send-btn:not(:disabled):hover { opacity: 0.85; }
 .ai-send-btn:not(:disabled):active { transform: scale(0.9); }
+.ai-send-btn--stop { color: var(--danger) !important; background: rgba(239, 68, 68, 0.1) !important; }
+.ai-send-btn--stop::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 2px solid var(--danger);
+  border-top-color: transparent;
+  animation: ai-stop-spin 0.8s linear infinite;
+  pointer-events: none;
+}
+@keyframes ai-stop-spin { to { transform: rotate(360deg); } }
 
 /* ─── Review toggle ─────────────────────────────────────────────────────── */
 .ai-review-toggle {
