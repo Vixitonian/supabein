@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'supabein-v1';
+const CACHE_NAME = 'supabein-v2';
 
 const PRECACHE_ASSETS = [
   '/dashboard/',
@@ -66,18 +66,21 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-while-revalidate for dashboard navigation
+  // Network-first for dashboard navigation (HTML) — always pick up the latest
+  // deploy on the first reload; the HTML carries the ?v= asset versions, so a
+  // stale shell would otherwise keep loading stale JS/CSS. Fall back to cache
+  // only when offline.
   if (url.pathname.startsWith('/dashboard')) {
     event.respondWith(
-      caches.open(CACHE_NAME).then((cache) =>
-        cache.match(request).then((cached) => {
-          const networkFetch = fetch(request).then((response) => {
-            cache.put(request, response.clone());
-            return response;
-          });
-          return cached || networkFetch;
+      fetch(request)
+        .then((response) => {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+          return response;
         })
-      )
+        .catch(() =>
+          caches.match(request).then((cached) => cached || caches.match('/dashboard/'))
+        )
     );
     return;
   }
