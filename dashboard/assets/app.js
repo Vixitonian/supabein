@@ -2331,6 +2331,11 @@ const AiPanel = (() => {
           currentSessionId = sess.id;
         }
 
+        // User message
+        await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
+        renderMessages();
+
+        // AI thinking
         const thinkingId = 'test_thinking_' + Date.now();
         const sess = currentSession();
         if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
@@ -2703,92 +2708,6 @@ function showNewProjectModal() {
   document.body.appendChild(modalEl);
 }
 
-async function runProjectTests(projectId, triggerBtn) {
-  triggerBtn.disabled = true;
-  triggerBtn.textContent = 'Running…';
-
-  // Remove any previous result panel
-  document.getElementById('test-result-panel')?.remove();
-
-  try {
-    const result = await Api.post('/v1/ai/test', { project_id: projectId });
-    renderTestResultPanel(result);
-  } catch (err) {
-    renderTestResultPanel({ stories: [], passed: 0, failed: 0, error: err.message });
-  } finally {
-    triggerBtn.disabled = false;
-    triggerBtn.textContent = 'Run Tests';
-  }
-}
-
-function renderTestResultPanel(result) {
-  const { stories = [], passed = 0, failed = 0, screenshot, error } = result;
-  const total = passed + failed;
-
-  const panelEl = document.createElement('div');
-  panelEl.id = 'test-result-panel';
-  panelEl.style.cssText = 'margin-top:24px;border:1px solid var(--border);border-radius:8px;overflow:hidden';
-
-  // Header bar
-  const statusColor = error ? 'var(--danger)' : total === 0 ? 'var(--text-muted)' : failed === 0 ? '#22c55e' : 'var(--danger)';
-  const statusText  = error
-    ? `Error: ${error}`
-    : total === 0
-      ? 'No stories generated'
-      : failed === 0
-        ? `All ${passed} stories passed`
-        : `${passed}/${total} passed · ${failed} failed`;
-
-  const headerEl = document.createElement('div');
-  headerEl.style.cssText = `padding:12px 16px;background:var(--surface);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)`;
-  headerEl.innerHTML = `
-    <span style="font-weight:600">User Story Test Results</span>
-    <span style="color:${statusColor};font-size:0.85rem;font-weight:600">${statusText}</span>
-  `;
-  panelEl.appendChild(headerEl);
-
-  if (error && !stories.length) {
-    const errEl = document.createElement('div');
-    errEl.style.cssText = 'padding:16px;color:var(--danger);font-size:0.875rem';
-    errEl.textContent = error;
-    panelEl.appendChild(errEl);
-  }
-
-  if (stories.length) {
-    const listEl = document.createElement('div');
-    listEl.style.cssText = 'padding:12px 16px;display:flex;flex-direction:column;gap:6px';
-    stories.forEach(s => {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:baseline;gap:8px;font-size:0.875rem';
-      const icon = s.passed ? '✓' : '✗';
-      const color = s.passed ? '#22c55e' : 'var(--danger)';
-      row.innerHTML = `<span style="color:${color};font-weight:700;flex-shrink:0">${icon}</span>`
-        + `<span style="color:${s.passed ? 'var(--text)' : 'var(--danger)'}">${s.label}</span>`
-        + (s.detail ? `<span style="color:var(--text-muted);font-size:0.8rem;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px" title="${s.detail}">${s.detail}</span>` : '');
-      listEl.appendChild(row);
-    });
-    panelEl.appendChild(listEl);
-  }
-
-  if (screenshot) {
-    const details = document.createElement('details');
-    details.style.cssText = 'border-top:1px solid var(--border);padding:12px 16px';
-    details.innerHTML = '<summary style="cursor:pointer;font-size:0.875rem;color:var(--text-muted)">Screenshot</summary>';
-    const img = document.createElement('img');
-    img.src = 'data:image/png;base64,' + screenshot;
-    img.style.cssText = 'margin-top:10px;max-width:100%;border-radius:4px;border:1px solid var(--border)';
-    details.appendChild(img);
-    panelEl.appendChild(details);
-  }
-
-  // Insert after the tabs, before main content
-  const tabsEl = document.querySelector('.tabs');
-  if (tabsEl) {
-    tabsEl.parentNode.insertBefore(panelEl, tabsEl.nextSibling);
-  } else {
-    document.querySelector('#app')?.appendChild(panelEl);
-  }
-}
 
 // Project overview
 async function renderProject({ id }) {
@@ -2860,14 +2779,6 @@ async function renderProject({ id }) {
           target: '_blank',
           rel: 'noopener'
         }, 'View Site →'));
-      }
-      if (site.current_deploy_id && !hdr.querySelector('#proj-run-tests-btn')) {
-        const testBtn = el('button', {
-          id: 'proj-run-tests-btn',
-          class: 'btn btn-secondary btn-sm'
-        }, 'Run Tests');
-        testBtn.addEventListener('click', () => runProjectTests(id, testBtn));
-        hdr.appendChild(testBtn);
       }
     }).catch(() => {});
 
