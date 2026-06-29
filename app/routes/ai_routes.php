@@ -1056,12 +1056,28 @@ function ai_intent_to_context(array $intent): string
     foreach ($intent['actors'] as $actor) {
         $lines .= '- ' . (is_array($actor) ? $actor['name'] : $actor) . "\n";
     }
-    $lines .= "User stories:\n";
+    $lines .= "\nUser stories:\n";
     foreach ($intent['actors'] as $actor) {
-        if (is_array($actor)) {
-            foreach ($actor['stories'] ?? [] as $story) {
-                $lines .= '- ' . (is_array($story) ? $story['title'] : $story) . "\n";
+        if (!is_array($actor)) continue;
+        foreach ($actor['stories'] ?? [] as $story) {
+            if (!is_array($story)) {
+                $lines .= '- ' . $story . "\n";
+                continue;
             }
+            $lines .= '- ' . ($story['title'] ?? '') . "\n";
+            foreach ($story['journeys'] ?? [] as $j) {
+                $lines .= '  Journey: ' . $j . "\n";
+            }
+            foreach ($story['requirements'] ?? [] as $r) {
+                $lines .= '  Requirement: ' . $r . "\n";
+            }
+        }
+    }
+    $nfrs = $intent['non_functional_requirements'] ?? [];
+    if ($nfrs) {
+        $lines .= "\nNon-functional requirements:\n";
+        foreach ($nfrs as $r) {
+            $lines .= '- ' . $r . "\n";
         }
     }
     return $lines;
