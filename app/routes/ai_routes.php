@@ -1928,8 +1928,16 @@ JSEOF;
                . "const TEST_PASS  = 'TestPass123!';\n";
 
     $connect = <<<'JSEOF'
-const browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
-const page    = await browser.newPage();
+let browser, page;
+try {
+  browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
+  page    = await browser.newPage();
+} catch (connErr) {
+  console.error('Browser connect failed: ' + connErr.message);
+  failed++;
+  console.log('__STORIES_JSON__' + JSON.stringify(stories));
+  process.exit(1);
+}
 page.setDefaultTimeout(15000);
 const pageErrors = [];
 page.on('console', m => { if (m.type() === 'error') pageErrors.push(m.text()); });
@@ -2110,6 +2118,12 @@ function ai_playwright_test_run(string $script, array $config): array
         }
     }
 
+    // Surface Node error lines when no stories were produced
+    $nodeError = null;
+    if (empty($stories) && trim($stderr)) {
+        $nodeError = trim(substr($stderr, 0, 500));
+    }
+
     // Screenshot
     $screenshotB64 = null;
     $ssPath = '/tmp/sb_test_screenshot.png';
@@ -2123,6 +2137,7 @@ function ai_playwright_test_run(string $script, array $config): array
         'passed'     => $passed,
         'failed'     => $failed,
         'exit_code'  => $exitCode,
+        'error'      => $nodeError,
         'screenshot' => $screenshotB64,
     ];
 }
