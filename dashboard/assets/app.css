@@ -958,10 +958,21 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   max-width: 100%;
 }
 .ai-msg-error { color: var(--danger); background: rgba(239,68,68,0.08); }
-.ai-msg-thinking { color: var(--muted); }
+.ai-msg-thinking { color: var(--muted); display: flex; align-items: center; gap: 8px; }
 .ai-thinking-dots { letter-spacing: 3px; animation: ai-thinking 1.2s infinite; display: inline-block; }
 @keyframes ai-thinking { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
-.ai-thinking-label { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; min-height: 16px; }
+.ai-thinking-label { font-size: 11px; color: var(--muted); min-height: 16px; }
+.loader-ring {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255,255,255,0.12);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: loader-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes loader-spin { to { transform: rotate(360deg); } }
 
 /* ─── Plan card ──────────────────────────────────────────────────────────── */
 .ai-plan-card { border: 1px solid var(--border); }
@@ -1263,6 +1274,83 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   gap: 8px;
   margin-top: 14px;
 }
+
+/* ─── Product requirements tree ─────────────────────────────────────────── */
+.ai-req-tree { padding: 6px 0 2px; font-size: 12px; }
+.ai-req-actor-block { margin-bottom: 10px; }
+.ai-req-actor-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-weight: 600;
+  color: var(--accent);
+}
+.ai-req-actor-name { cursor: pointer; flex: 1; }
+.ai-req-actor-name:hover { text-decoration: underline dotted; }
+.ai-req-tree-bullet { color: var(--muted); font-family: monospace; flex-shrink: 0; }
+.ai-req-stories-wrap { padding-left: 16px; }
+.ai-req-story-block { margin-bottom: 2px; }
+.ai-req-story-block > summary { list-style: none; }
+.ai-req-story-block > summary::-webkit-details-marker { display: none; }
+.ai-req-story-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0;
+  cursor: pointer;
+  color: var(--text);
+}
+.ai-req-tree-connector { color: var(--muted); font-family: monospace; flex-shrink: 0; }
+.ai-req-story-title { flex: 1; cursor: pointer; }
+.ai-req-story-title:hover { text-decoration: underline dotted; }
+.ai-req-story-body { padding: 4px 0 4px 22px; }
+.ai-req-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 5px 0 3px;
+}
+.ai-req-item {
+  font-size: 11px;
+  color: var(--text);
+  padding: 1px 0;
+  line-height: 1.5;
+}
+.ai-req-journey { color: var(--accent); }
+.ai-req-nfr-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 0 4px;
+}
+.ai-req-nfr-list { display: flex; flex-direction: column; gap: 2px; }
+.ai-req-nfr-item { color: var(--muted); }
+.ai-req-remove {
+  background: none;
+  border: none;
+  color: var(--danger);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.ai-req-remove:hover { opacity: 1; }
+.ai-story-inline-input {
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 1px 4px;
+  outline: none;
+}
+.ai-intent-divider { border-top: 1px solid var(--border); margin: 8px 0 6px; }
 
 /* ─── Intent summary (locked read-only after confirm) ────────────────────── */
 .ai-intent-summary { padding: 10px 16px; }
