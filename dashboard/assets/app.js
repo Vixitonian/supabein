@@ -91,6 +91,45 @@ const Api = (() => {
     }
   }
 
+  // Stream a POST response as newline-delimited JSON, invoking onEvent(obj) for
+  // each parsed line as it arrives. Returns the last event received. Falls back
+  // to one big chunk if the server/host buffers — the final event still arrives.
+  async function stream(path, data, signal, onEvent) {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = Auth.getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
+    const res = await fetch(BASE + path, { method: 'POST', headers, body: JSON.stringify(data), signal });
+
+    if (res.status === 401) { Auth.clear(); Router.navigate('/login'); throw new ApiError('Session expired — please log in again', 401, {}); }
+    const refreshed = res.headers.get('X-Refresh-Token');
+    if (refreshed) Auth.setToken(refreshed);
+    if (!res.ok || !res.body) {
+      const json = await res.json().catch(() => ({}));
+      throw new ApiError(json.error || 'Request failed', res.status, json);
+    }
+
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', last = null;
+    const handle = (line) => {
+      const s = line.trim();
+      if (!s) return;
+      let ev; try { ev = JSON.parse(s); } catch { return; }
+      last = ev;
+      onEvent(ev);
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) { handle(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
+    }
+    handle(buf);
+    return last;
+  }
+
   return {
     BASE,
     get:    (path)       => request('GET',    path),
@@ -99,6 +138,7 @@ const Api = (() => {
     put:    (path, data) => request('PUT',    path, data),
     delete: (path)       => request('DELETE', path),
     upload: (path, formData) => request('POST', path, formData, true),
+    stream,
     ApiError,
   };
 })();
@@ -1337,6 +1377,12 @@ const AiPanel = (() => {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
     const stageMode = body.project_id ? 'edit' : 'build';
+
+    // Build flow (new app, not chat, not edit) streams its progress live.
+    if (!body.chatMode && !body.project_id) {
+      return proceedWithPlanStreaming(body, sess);
+    }
+
     const thinkingId = 'thinking_' + Date.now();
     sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
 
@@ -1377,6 +1423,63 @@ const AiPanel = (() => {
     currentAbortController = null;
     updateSendBtn();
     if (sess) await persistSession(sess);
+    renderSidebar();
+    renderMessages();
+  }
+
+  // Streams the build (schema → design → frontend) and shows each step live.
+  async function proceedWithPlanStreaming(body, sess) {
+    const progressMsg = makeProgressMsg();
+    sess.messages.push(progressMsg);
+
+    liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
+    sess.messages.push(liveTraceMsg);
+    operationInProgress = true;
+    operationMode = 'build';
+    currentAbortController = new AbortController();
+    updateSendBtn();
+    renderMessages();
+
+    const { provider, model } = getSelectedModel();
+    const t0 = Date.now();
+    try {
+      const finalEv = await Api.stream(
+        '/v1/ai/build/stream',
+        { ...body, provider, model },
+        currentAbortController.signal,
+        (ev) => { applyProgressEvent(progressMsg, ev); renderMessages(); }
+      );
+
+      if (!finalEv || finalEv.stage === 'error') {
+        const emsg = (finalEv && finalEv.message) || 'The build stream ended unexpectedly — please try again.';
+        liveTraceMsg.data.push({ call: 'POST /v1/ai/build/stream', inputs: body, status: 0, outputs: { error: emsg, at: finalEv?.at }, ms: Date.now() - t0 });
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
+      } else {
+        liveTraceMsg.data.push({ call: 'POST /v1/ai/build/stream', inputs: body, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
+        renderMessages();
+        await handlePlanResponse({ mode: finalEv.mode || 'build', plan: finalEv.plan, summary: finalEv.summary, usage: finalEv.usage });
+      }
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        // user stopped — drop the progress card and clean up silently
+        sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
+        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+        operationInProgress = false; operationMode = null; currentAbortController = null;
+        updateSendBtn(); renderMessages();
+        return;
+      }
+      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
+      progressMsg.data.error = e.message;
+      liveTraceMsg.data.push({ call: 'POST /v1/ai/build/stream', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code }, ms: Date.now() - t0 });
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
+    }
+
+    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+    operationInProgress = false;
+    operationMode = null;
+    currentAbortController = null;
+    updateSendBtn();
+    await persistSession(sess);
     renderSidebar();
     renderMessages();
   }
@@ -1706,6 +1809,7 @@ const AiPanel = (() => {
       startThinkingStages(thinkingLabel, msg.stageMode || 'default');
       return bubble;
     }
+    if (msg.type === 'progress') return renderProgressCard(msg);
     if (msg.type === 'intent') return renderIntentSummaryCard(msg);
     if (msg.type === 'edit-intent') return el('span', {});
     if (msg.type === 'recover') return renderRecoveryCard(msg);
@@ -2076,6 +2180,77 @@ const AiPanel = (() => {
     }
 
     return el('details', { class: 'ai-trace-ai-entry' }, ...children);
+  }
+
+  // ── Live build progress card ───────────────────────────────────────────────
+  const BUILD_PROGRESS_STAGES = [
+    { key: 'schema',   label: 'Designing database schema' },
+    { key: 'design',   label: 'Choosing a visual design' },
+    { key: 'frontend', label: 'Generating frontend code' },
+  ];
+
+  function makeProgressMsg() {
+    return {
+      id: 'progress_' + Date.now(),
+      role: 'ai',
+      type: 'progress',
+      data: {
+        stages: BUILD_PROGRESS_STAGES.map((s, i) => ({ ...s, status: i === 0 ? 'active' : 'pending', detail: '' })),
+        error: null,
+      },
+    };
+  }
+
+  function progressSetStage(msg, key, status, detail) {
+    const stages = msg.data.stages;
+    const idx = stages.findIndex(s => s.key === key);
+    if (idx === -1) return;
+    // When a stage starts or finishes, anything before it is implicitly done.
+    if (status === 'active' || status === 'done') {
+      for (let i = 0; i < idx; i++) if (stages[i].status !== 'error') stages[i].status = 'done';
+    }
+    stages[idx].status = status;
+    if (detail != null && detail !== '') stages[idx].detail = detail;
+  }
+
+  // Map a streamed build event onto the progress card's stage list.
+  function applyProgressEvent(msg, ev) {
+    if (!ev || !ev.stage) return;
+    if (ev.stage === 'error') {
+      const active = msg.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
+      msg.data.error = ev.message || 'Something went wrong';
+      return;
+    }
+    if (ev.stage === 'complete') {
+      msg.data.stages.forEach(s => { if (s.status !== 'error') s.status = 'done'; });
+      return;
+    }
+    const status = ev.status === 'start' ? 'active' : ev.status === 'done' ? 'done' : 'active';
+    progressSetStage(msg, ev.stage, status, ev.detail || '');
+  }
+
+  function renderProgressCard(msg) {
+    const data = msg.data || { stages: [] };
+    const ICON = { pending: '○', active: '', done: '✓', error: '✕' };
+    const rows = (data.stages || []).map(s => {
+      const icon = s.status === 'active'
+        ? el('span', { class: 'ai-progress-spin' })
+        : el('span', { class: 'ai-progress-icon ai-progress-icon--' + s.status }, ICON[s.status] || '○');
+      const textWrap = el('div', { class: 'ai-progress-text' },
+        el('div', { class: 'ai-progress-label' }, s.label),
+        s.detail ? el('div', { class: 'ai-progress-detail' }, s.detail) : null
+      );
+      return el('div', { class: 'ai-progress-row ai-progress-row--' + s.status }, icon, textWrap);
+    });
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-progress-card' },
+      el('div', { class: 'ai-progress-title' }, 'Building your app'),
+      ...rows
+    );
+    if (data.error) {
+      card.appendChild(el('div', { class: 'ai-progress-error' }, '✕ ' + data.error));
+    }
+    return card;
   }
 
   function renderTraceCard(msg) {
