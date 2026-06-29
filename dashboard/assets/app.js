@@ -2637,12 +2637,14 @@ function renderTestResultPanel(result) {
   panelEl.style.cssText = 'margin-top:24px;border:1px solid var(--border);border-radius:8px;overflow:hidden';
 
   // Header bar
-  const statusColor = error ? 'var(--danger)' : failed === 0 ? '#22c55e' : 'var(--danger)';
+  const statusColor = error ? 'var(--danger)' : total === 0 ? 'var(--text-muted)' : failed === 0 ? '#22c55e' : 'var(--danger)';
   const statusText  = error
-    ? 'Error'
-    : failed === 0
-      ? `All ${passed} stories passed`
-      : `${passed}/${total} passed · ${failed} failed`;
+    ? `Error: ${error}`
+    : total === 0
+      ? 'No stories generated'
+      : failed === 0
+        ? `All ${passed} stories passed`
+        : `${passed}/${total} passed · ${failed} failed`;
 
   const headerEl = document.createElement('div');
   headerEl.style.cssText = `padding:12px 16px;background:var(--surface);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)`;
