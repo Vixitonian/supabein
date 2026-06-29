@@ -153,8 +153,9 @@ function el(tag, attrs = {}, ...children) {
     else e.setAttribute(k, v);
   }
   for (const c of children.flat()) {
-    if (typeof c === 'string') e.appendChild(document.createTextNode(c));
-    else if (c) e.appendChild(c);
+    if (c == null || c === false) continue;
+    if (c instanceof Node) e.appendChild(c);
+    else e.appendChild(document.createTextNode(typeof c === 'string' ? c : String(c)));
   }
   return e;
 }
@@ -1218,7 +1219,14 @@ const AiPanel = (() => {
       ));
       return;
     }
-    sess.messages.forEach(msg => container.appendChild(renderMessage(msg)));
+    sess.messages.forEach(msg => {
+      try {
+        container.appendChild(renderMessage(msg));
+      } catch (err) {
+        console.error('[AiPanel] failed to render message', msg?.type, err);
+        container.appendChild(el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ Could not display this message.'));
+      }
+    });
     container.scrollTop = container.scrollHeight;
   }
 
@@ -1549,19 +1557,29 @@ const AiPanel = (() => {
   }
 
   function renderIntentSummaryCard(msg) {
-    const intent = msg.data || {};
-    const actors = intent.actors || [];
-    const stories = intent.stories || [];
+    // Handle both the legacy flat format ({actors:string[], stories:string[]})
+    // and the nested product-requirements format ({actors:[{name, stories:[{title}]}]}).
+    const intent = normalizeIntent(msg.data || {});
+    const actorNames = (intent.actors || [])
+      .map(a => (typeof a === 'string' ? a : (a && a.name) || ''))
+      .filter(Boolean);
+    const stories = [];
+    (intent.actors || []).forEach(a => {
+      const ss = (a && Array.isArray(a.stories)) ? a.stories : [];
+      ss.forEach(s => stories.push(typeof s === 'string' ? s : (s && s.title) || ''));
+    });
+    const cleanStories = stories.filter(Boolean);
+
     const parts = [];
-    if (actors.length) {
+    if (actorNames.length) {
       parts.push(el('div', { class: 'ai-intent-summary-actors' },
         el('span', { class: 'ai-intent-section-label', style: 'margin-right:6px' }, 'Actors:'),
-        ...actors.map(a => el('span', { class: 'ai-actor-chip' }, a))
+        ...actorNames.map(a => el('span', { class: 'ai-actor-chip' }, a))
       ));
     }
-    if (stories.length) {
+    if (cleanStories.length) {
       parts.push(el('div', { class: 'ai-intent-summary-stories' },
-        ...stories.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s))
+        ...cleanStories.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s))
       ));
     }
     return el('div', { class: 'ai-msg ai-msg-ai ai-intent-summary' },
@@ -2388,7 +2406,13 @@ const AiPanel = (() => {
         }
         if (m.type === 'result') return { role: 'model', text: 'The changes were applied successfully.' };
         if (m.type === 'diagnosis') return { role: 'model', text: 'Diagnosis: ' + (m.data?.diagnosis || '') + (m.data?.suggestions?.length ? ' Suggestions: ' + m.data.suggestions.join('; ') : '') };
-        if (m.type === 'intent') return { role: 'model', text: 'Intent confirmed — actors: [' + (m.data?.actors || []).join(', ') + '], stories: [' + (m.data?.stories || []).join('; ') + ']' };
+        if (m.type === 'intent') {
+          const ni = normalizeIntent(m.data || {});
+          const an = (ni.actors || []).map(a => (typeof a === 'string' ? a : (a && a.name) || '')).filter(Boolean);
+          const st = [];
+          (ni.actors || []).forEach(a => ((a && Array.isArray(a.stories)) ? a.stories : []).forEach(s => st.push(typeof s === 'string' ? s : (s && s.title) || '')));
+          return { role: 'model', text: 'Intent confirmed — actors: [' + an.join(', ') + '], stories: [' + st.filter(Boolean).join('; ') + ']' };
+        }
         if (m.type === 'edit-intent') return { role: 'model', text: 'Edit changes confirmed: ' + (m.data?.confirmed || []).map(s => s.label).join('; ') };
         if (m.type === 'recover') return { role: 'model', text: 'Build failed and recovery was offered: ' + (m.data?.diagnosis || '') };
         if (m.type === 'error') return { role: 'model', text: 'Error: ' + m.content };
