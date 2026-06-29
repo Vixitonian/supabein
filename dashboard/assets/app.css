@@ -456,8 +456,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 @media (max-width: 767px) {
   .layout { flex-direction: column; min-height: 0; }
 
-  .sb-topbar { justify-content: space-between; }
+  .sb-topbar { justify-content: flex-start; gap: 12px; }
   .sb-topbar-brand { display: flex; }
+  .sb-topbar-right { margin-left: auto; }
 
   /* Sidebar hidden off-screen; slides in when .open is added */
   .sidebar {
