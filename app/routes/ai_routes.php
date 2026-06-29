@@ -2059,23 +2059,28 @@ JSEOF;
 
 function ai_playwright_test_run(string $script, array $config): array
 {
-    $nodeBin     = $config['NODE_BIN']              ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
-    $nodeModules = $config['PLAYWRIGHT_MODULES']    ?? '/home/dxinethn/playwright-test/node_modules';
-    $tmpFile     = sys_get_temp_dir() . '/sb_test_' . getmypid() . '_' . time() . '.mjs';
+    $nodeBin     = $config['NODE_BIN']           ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
+    $nodeModules = $config['PLAYWRIGHT_MODULES'] ?? '/home/dxinethn/playwright-test/node_modules';
+
+    // ESM bare-specifier resolution starts from the script file's directory, NOT NODE_PATH.
+    // Write the script into the same directory as node_modules so `import 'playwright-core'`
+    // resolves to the sibling node_modules/ folder.
+    $playwrightDir = rtrim(dirname($nodeModules), '/');
+    $tmpFile       = $playwrightDir . '/sb_test_' . getmypid() . '_' . time() . '.mjs';
 
     file_put_contents($tmpFile, $script);
 
     $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
     $env = array_merge(getenv() ?: [], [
-        'NODE_PATH' => $nodeModules,
-        'HOME'      => dirname($nodeModules, 2),
+        'HOME' => dirname($playwrightDir),
+        'PATH' => '/usr/local/bin:/usr/bin:/bin',
     ]);
 
     $process = proc_open(
         escapeshellarg($nodeBin) . ' ' . escapeshellarg($tmpFile),
         $descriptors,
         $pipes,
-        null,
+        $playwrightDir,   // CWD = playwright-test dir for module resolution
         $env
     );
 
