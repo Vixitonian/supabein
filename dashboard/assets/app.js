@@ -981,6 +981,16 @@ const AiPanel = (() => {
       currentAbortController.abort();
       currentAbortController = null;
     }
+    // Reset the UI immediately so the stop button responds even if the
+    // in-flight request takes a moment to unwind (or the backend keeps going).
+    stopThinkingStages?.();
+    operationInProgress = false;
+    operationMode = null;
+    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+    const sess = currentSession();
+    if (sess) sess.messages = sess.messages.filter(m => m.type !== 'thinking');
+    updateSendBtn();
+    renderMessages();
   }
 
   function updateSendBtn() {
@@ -1014,7 +1024,9 @@ const AiPanel = (() => {
     return backdropEl;
   }
 
-  function getSession(id) { return sessions.find(s => s.id === id) || null; }
+  // Compare as strings — currentSessionId can come back from localStorage as a
+  // string while session ids from the API are numbers, which would miss with ===.
+  function getSession(id) { return sessions.find(s => String(s.id) === String(id)) || null; }
   function currentSession() { return getSession(currentSessionId); }
 
   async function persistSession(sess) {
@@ -1322,10 +1334,11 @@ const AiPanel = (() => {
   }
 
   async function proceedWithPlan(body) {
-    const sess = currentSession();
+    let sess = currentSession();
+    if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
     const stageMode = body.project_id ? 'edit' : 'build';
     const thinkingId = 'thinking_' + Date.now();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+    sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
     if (sess) sess.messages.push(liveTraceMsg);
@@ -1369,13 +1382,14 @@ const AiPanel = (() => {
   }
 
   async function proceedWithBuildDirect(body) {
-    const sess = currentSession();
+    let sess = currentSession();
+    if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
     const stageMode = body.project_id ? 'edit' : 'build';
     const thinkingId = 'direct_' + Date.now();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
+    sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
-    if (sess) sess.messages.push(liveTraceMsg);
+    sess.messages.push(liveTraceMsg);
     operationInProgress = true;
     operationMode = stageMode;
     currentAbortController = new AbortController();
