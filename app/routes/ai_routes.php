@@ -3108,6 +3108,124 @@ PROMPT;
 
     }, ['auth_middleware']);
 
+    // ── AI Build (streaming): same build-mode passes as /v1/ai/plan, but emits
+    //    newline-delimited JSON progress events as each stage runs so the client
+    //    can show the build happening step by step. Degrades gracefully: even if
+    //    the host buffers output, the final "complete" event carries the full plan.
+    $router->post('/v1/ai/build/stream', function (array $req): void {
+        set_time_limit(420);
+
+        // Switch the response to an unbuffered NDJSON stream.
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        header('Content-Type: application/x-ndjson; charset=utf-8');
+        header('Cache-Control: no-cache, no-transform');
+        header('X-Accel-Buffering: no'); // ask nginx/LiteSpeed not to buffer
+        ob_implicit_flush(true);
+
+        $emit = static function (array $event): void {
+            echo json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+            flush();
+        };
+
+        $config = \App::get('config');
+        $userId = (int)$req['auth']['user_id'];
+
+        $prompt = trim($req['body']['prompt'] ?? '');
+        if ($prompt === '' || strlen($prompt) > 2000) {
+            $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'prompt is required and must be under 2000 characters']);
+            return;
+        }
+
+        // Prior conversation turns for multi-turn context (capped at 20 turns)
+        $history = [];
+        foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
+            if (!is_array($turn)) continue;
+            $role = $turn['role'] ?? '';
+            $text = trim($turn['text'] ?? '');
+            if (!in_array($role, ['user', 'model'], true) || $text === '') continue;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+
+        $approvedIntent = (isset($req['body']['intent']) && is_array($req['body']['intent']))
+            ? $req['body']['intent'] : null;
+
+        $gemini  = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $aiTrace = [];
+
+        try {
+            // ── Stage 1: schema ───────────────────────────────────────────────
+            $emit(['stage' => 'schema', 'status' => 'start', 'label' => 'Designing database schema…']);
+            $schemaUserMsg = $approvedIntent
+                ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
+                : $prompt;
+            $_t0 = microtime(true);
+            try { $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg); }
+            catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'schema', 'message' => $e->getMessage()]); return; }
+            $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+            $schemaPlan['frontend'] = ['files' => []];
+            $schemaPlan = ai_sanitize_plan($schemaPlan);
+
+            $validationError = ai_validate_plan($schemaPlan);
+            if ($validationError) {
+                $emit(['stage' => 'schema', 'status' => 'retry', 'label' => 'Refining schema…', 'detail' => $validationError]);
+                $retryPrompt = $schemaUserMsg
+                    . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
+                    . "\nReturn a corrected schema that fixes exactly this problem.";
+                $_t0 = microtime(true);
+                try { $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt); }
+                catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'schema_retry', 'message' => $e->getMessage()]); return; }
+                $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
+                $schemaPlan['frontend'] = ['files' => []];
+                $schemaPlan = ai_sanitize_plan($schemaPlan);
+                $validationError = ai_validate_plan($schemaPlan);
+                if ($validationError) { $emit(['stage' => 'error', 'at' => 'schema', 'message' => 'AI returned an invalid schema: ' . $validationError]); return; }
+            }
+            $tableNames = array_map(fn($t) => $t['name'], $schemaPlan['tables'] ?? []);
+            $emit(['stage' => 'schema', 'status' => 'done', 'label' => 'Database schema ready', 'detail' => count($tableNames) . ' table' . (count($tableNames) === 1 ? '' : 's') . ': ' . implode(', ', $tableNames)]);
+
+            // ── Stage 2: design brief (best-effort) ───────────────────────────
+            $emit(['stage' => 'design', 'status' => 'start', 'label' => 'Choosing a visual design…']);
+            $_t0   = microtime(true);
+            $brief = ai_generate_design_brief($gemini, $prompt, $schemaPlan);
+            if (!empty($brief)) {
+                $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+            }
+            $briefCtx = ai_brief_to_context($brief);
+            $emit(['stage' => 'design', 'status' => 'done', 'label' => 'Visual design chosen', 'detail' => trim(($brief['personality'] ?? '') . (isset($brief['accent_color']) ? ' · ' . $brief['accent_color'] : '')) ?: 'default theme']);
+
+            // ── Stage 3: frontend ─────────────────────────────────────────────
+            $emit(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
+            $frontendMsg        = "App description: {$prompt}\n\n"
+                                . ($briefCtx ? "{$briefCtx}\n\n" : '')
+                                . "Exact validated schema — use ONLY these column names in JS:\n"
+                                . ai_schema_to_context($schemaPlan);
+            $_frontendSysPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
+            $_t0 = microtime(true);
+            try { $frontendResult = $gemini->generateJson($_frontendSysPrompt, $frontendMsg); }
+            catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'frontend', 'message' => $e->getMessage()]); return; }
+            $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+
+            $plan = $schemaPlan;
+            $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+            foreach ($plan['frontend']['files'] as &$file) {
+                $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+            }
+            unset($file);
+            $emit(['stage' => 'frontend', 'status' => 'done', 'label' => 'Frontend generated', 'detail' => count($plan['frontend']['files']) . ' file' . (count($plan['frontend']['files']) === 1 ? '' : 's')]);
+
+            $summary = [
+                'project_name'   => $plan['project_name'],
+                'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
+                'frontend_files' => count($plan['frontend']['files'] ?? []),
+            ];
+
+            // ── Final event: full plan for the client to review/apply ─────────
+            $emit(['stage' => 'complete', 'mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
+        } catch (\Throwable $e) {
+            $emit(['stage' => 'error', 'at' => 'unknown', 'message' => $e->getMessage()]);
+        }
+    }, ['auth_middleware']);
+
     // ── AI Apply: execute a previously generated plan ──────────────────────────
     $router->post('/v1/ai/apply', function (array $req): void {
         set_time_limit(420);
