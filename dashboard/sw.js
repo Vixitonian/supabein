@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'supabein-v2';
+const CACHE_NAME = 'supabein-v3';
 
 const PRECACHE_ASSETS = [
   '/dashboard/',
@@ -9,6 +9,13 @@ const PRECACHE_ASSETS = [
   '/dashboard/assets/app.css',
   '/dashboard/manifest.json',
 ];
+
+// Allow the page to tell a waiting worker to activate immediately.
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

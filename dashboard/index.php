@@ -35,8 +35,33 @@ $rjs = filemtime($dir . 'router.js');
   <script src="assets/app.js?v=<?= $js ?>"></script>
   <script>
     if ('serviceWorker' in navigator) {
+      // Auto-reload once when a new service worker takes control, so deploys
+      // that ship a new sw.js are picked up without manual cache clearing.
+      var sbReloading = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (sbReloading) return;
+        sbReloading = true;
+        window.location.reload();
+      });
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('/dashboard/sw.js', { scope: '/dashboard/' });
+        navigator.serviceWorker.register('/dashboard/sw.js', { scope: '/dashboard/' })
+          .then(function (reg) {
+            // Force an update check on every load so a changed sw.js installs promptly.
+            reg.update();
+            if (reg.waiting && navigator.serviceWorker.controller) {
+              // A new worker is already waiting — activate it now.
+              reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+            }
+            reg.addEventListener('updatefound', function () {
+              var nw = reg.installing;
+              if (!nw) return;
+              nw.addEventListener('statechange', function () {
+                if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+                  nw.postMessage({ type: 'SKIP_WAITING' });
+                }
+              });
+            });
+          });
       });
     }
   </script>
