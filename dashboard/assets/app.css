@@ -851,7 +851,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   flex-shrink: 0;
   position: relative;
 }
-.ai-header-title { flex: 1; font-weight: 600; font-size: 13px; color: var(--accent); }
+.ai-header-left { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow: hidden; }
+.ai-header-title { font-weight: 600; font-size: 13px; color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ai-hamburger {
   background: none;
   border: none;
