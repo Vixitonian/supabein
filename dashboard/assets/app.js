@@ -590,11 +590,12 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
   );
   const aiTopbarBtn = el('button', { class: 'sb-ai-topbar-btn', onClick: () => AiPanel.toggle() }, '✦ AI');
   const topbar = el('div', { class: 'sb-topbar' },
+    burger,
     el('div', { class: 'sb-topbar-brand' },
       el('span', { class: 'sb-logo-mark' }, 'SB'),
       el('span', { class: 'sb-logo-text' }, 'SupaBein')
     ),
-    el('div', { class: 'sb-topbar-right' }, aiTopbarBtn, burger)
+    el('div', { class: 'sb-topbar-right' }, aiTopbarBtn)
   );
 
   // Smart sticky: hide on scroll down, reveal on scroll up
