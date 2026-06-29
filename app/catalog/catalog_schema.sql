@@ -148,7 +148,32 @@ CREATE TABLE IF NOT EXISTS `user_reset_tokens` (
     UNIQUE KEY `uq_user_reset_hash` (`token_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `project_requirements` (
+    `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`   INT UNSIGNED NOT NULL,
+    `user_id`      INT UNSIGNED NOT NULL,
+    `requirements` LONGTEXT NOT NULL DEFAULT '{}',
+    `created_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY `uq_project` (`project_id`),
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
+
+-- ─── Migration: project_requirements (run once on existing installs) ─────────
+-- CREATE TABLE IF NOT EXISTS `project_requirements` (
+--     `id`           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `project_id`   INT UNSIGNED NOT NULL,
+--     `user_id`      INT UNSIGNED NOT NULL,
+--     `requirements` LONGTEXT NOT NULL DEFAULT '{}',
+--     `created_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     `updated_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+--     UNIQUE KEY `uq_project` (`project_id`),
+--     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+--     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ─── Migration: ai_sessions (run once on existing installs) ─────────────────
 -- CREATE TABLE IF NOT EXISTS `ai_sessions` (

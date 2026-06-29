@@ -117,21 +117,38 @@ LOCKED PRODUCT INTENT:
   anonymous "owner", include a users table with a PASSWORD column and user_id ownership.
 PROMPT;
 
-// ── Intent pass (pass 0): minimal actors + user stories, deliberately capped ──
+// ── Intent pass (pass 0): actors + stories + journeys + requirements ──────────
 const AI_INTENT_PROMPT = <<<'PROMPT'
-You extract the MINIMAL set of actors and user stories for a web app from a short description.
-Return ONLY JSON, no prose and no markdown fences: {"actors": [...], "stories": [...]}
+You extract the MINIMAL product requirements for a web app from a short description.
+Return ONLY JSON with this exact structure — no prose, no markdown fences:
+{
+  "actors": [
+    {
+      "name": "actor name",
+      "stories": [
+        {
+          "title": "as a <actor> I can <action>",
+          "journeys": ["Journey: <Step A> → <Step B> → <Step C>"],
+          "requirements": ["System can ...", "System validates ..."]
+        }
+      ]
+    }
+  ],
+  "non_functional_requirements": ["Load in under 2 seconds", "Data encrypted at rest"]
+}
 
 Rules:
-- Include ONLY what the description asks for or strictly requires. Invent nothing.
-- "actors": the distinct kinds of human user. If the app is for one person with no sharing,
-  accounts, or roles, return exactly ["owner"] — a single anonymous user needing no login.
-  Add another actor ONLY if the description implies sharing, assignment, roles, or many users.
-- "stories": short "as a <actor> I can <do one thing>" lines, one capability each, core actions only.
-- Do NOT add admin panels, notifications, comments, tags, search, analytics, profiles, or sharing
-  unless the description explicitly mentions them.
-- HARD LIMITS: at most 5 actors and at most 7 stories. Fewer is better. For a trivial app,
-  return 1 actor and 2–3 stories.
+- MINIMAL: include only what the description explicitly asks for. Invent nothing.
+- "actors": distinct human user types. For a single-user app, exactly one actor named "owner".
+  Add another actor ONLY if the description implies sharing, roles, or multiple user types.
+- "stories": 1–4 per actor. Core actions only: create, view, edit, delete. One capability each.
+  No admin panels, notifications, comments, search, analytics, tags unless explicitly requested.
+- "journeys": 1–2 per story. Format: "Journey: <start> → <middle step> → <end state>"
+- "requirements": 2–4 per story. Start each with "System can", "System validates", "System saves", etc.
+- "non_functional_requirements": 4–6 items. Cover performance, security, reliability, scalability.
+  Examples: "Page loads in under 2 seconds", "Notes persist after browser refresh",
+  "Data encrypted at rest", "Support up to 10,000 records per user"
+- HARD LIMITS: at most 5 actors, 4 stories per actor, 2 journeys per story, 4 requirements per story
 PROMPT;
 
 // ── Shared frontend rules (single source of truth for build AND edit) ────────
@@ -931,43 +948,81 @@ function ai_validate_delta(array $delta, array $existingSchema): ?string
 // ─── Schema serializer for two-pass generation ───────────────────────────────
 
 /**
- * Deterministically cap an intent so a weak model can never explode scope, with or without
- * human review: dedupe, trim, drop empties, hard-limit to 5 actors and 7 stories. This runs
- * on every intent — it protects the review screen as much as the automatic path.
+ * Cap intent to hard limits. Handles both the legacy flat format
+ * {actors:string[], stories:string[]} and the new nested format
+ * {actors:[{name, stories:[{title, journeys, requirements}]}], non_functional_requirements:[]}.
  */
 function ai_cap_intent(array $intent): array
 {
-    $clean = static function ($list, int $max): array {
-        if (!is_array($list)) return [];
+    $cleanStrings = static function (array $list, int $max): array {
         $out = [];
-        foreach ($list as $item) {
-            if (!is_string($item)) continue;
-            $item = trim($item);
-            if ($item === '') continue;
-            if (!in_array($item, $out, true)) $out[] = $item;
+        foreach ($list as $v) {
+            if (!is_string($v)) continue;
+            $v = trim($v);
+            if ($v === '') continue;
+            $out[] = $v;
             if (count($out) >= $max) break;
         }
         return $out;
     };
+
+    // Legacy flat format — convert to nested
+    if (!empty($intent['actors']) && is_string($intent['actors'][0] ?? null)) {
+        $actorNames = $cleanStrings($intent['actors'], 5);
+        $stories    = $cleanStrings($intent['stories'] ?? [], 7);
+        return [
+            'actors' => array_map(fn($name) => ['name' => $name, 'stories' => array_map(
+                fn($s) => ['title' => $s, 'journeys' => [], 'requirements' => []], $stories
+            )], $actorNames),
+            'non_functional_requirements' => [],
+        ];
+    }
+
+    // New nested format
+    $actors = [];
+    foreach (array_slice((array)($intent['actors'] ?? []), 0, 5) as $actor) {
+        if (!is_array($actor) || empty($actor['name'])) continue;
+        $stories = [];
+        foreach (array_slice((array)($actor['stories'] ?? []), 0, 4) as $story) {
+            if (!is_array($story) || empty($story['title'])) continue;
+            $stories[] = [
+                'title'        => (string)$story['title'],
+                'journeys'     => $cleanStrings((array)($story['journeys']     ?? []), 2),
+                'requirements' => $cleanStrings((array)($story['requirements'] ?? []), 4),
+            ];
+        }
+        if (empty($stories)) continue;
+        $actors[] = ['name' => (string)$actor['name'], 'stories' => $stories];
+    }
+
     return [
-        'actors'  => $clean($intent['actors']  ?? [], 5),
-        'stories' => $clean($intent['stories'] ?? [], 7),
+        'actors'                      => $actors,
+        'non_functional_requirements' => $cleanStrings((array)($intent['non_functional_requirements'] ?? []), 6),
     ];
 }
 
 /**
- * Structural check on an intent so the retry loop has something concrete to feed back.
+ * Structural validation of the new nested intent format.
  */
 function ai_validate_intent(array $intent): ?string
 {
-    if (empty($intent['actors'])  || !is_array($intent['actors']))  return 'intent.actors must be a non-empty array of strings';
-    if (empty($intent['stories']) || !is_array($intent['stories'])) return 'intent.stories must be a non-empty array of strings';
+    if (empty($intent['actors']) || !is_array($intent['actors']))
+        return 'intent.actors must be a non-empty array';
+    foreach ($intent['actors'] as $actor) {
+        if (!is_array($actor) || empty($actor['name']))
+            return 'each actor must be an object with a name';
+        if (empty($actor['stories']) || !is_array($actor['stories']))
+            return 'each actor must have a non-empty stories array';
+        foreach ($actor['stories'] as $story) {
+            if (!is_array($story) || empty($story['title']))
+                return 'each story must have a title';
+        }
+    }
     return null;
 }
 
 /**
  * Run the intent pass (pass 0) with one self-correcting retry, then cap deterministically.
- * Returns ['actors'=>[...], 'stories'=>[...]]. Throws \RuntimeException on model/transport error.
  */
 function ai_generate_intent(object $client, string $prompt, array $history = []): array
 {
@@ -980,29 +1035,35 @@ function ai_generate_intent(object $client, string $prompt, array $history = [])
     $intent = $call($prompt);
     $err = ai_validate_intent($intent);
     if ($err) {
-        $intent = $call($prompt . "\n\nYour previous response was rejected: " . $err
-            . "\nReturn ONLY {\"actors\":[...],\"stories\":[...]} obeying the limits.");
+        $intent = $call($prompt . "\n\nYour previous response was rejected: " . $err . "\nReturn ONLY the JSON structure specified, obeying the hard limits.");
         $err = ai_validate_intent($intent);
         if ($err) {
-            // Last-resort fallback so a flaky intent pass never blocks a build.
-            $intent = ['actors' => ['owner'], 'stories' => [$prompt]];
+            // Last-resort fallback
+            $intent = ['actors' => [['name' => 'owner', 'stories' => [['title' => $prompt, 'journeys' => [], 'requirements' => []]]]], 'non_functional_requirements' => []];
         }
     }
     return ai_cap_intent($intent);
 }
 
 /**
- * Serialize an approved intent into a locked context block for the schema pass. The wording
- * matches the "Locked product intent" rule in AI_BUILD_SCHEMA_PROMPT so the model treats it
- * as the complete, fixed scope rather than a suggestion to expand on.
+ * Serialize an approved intent into a locked context block for the schema pass. Works with
+ * both the new nested format and the legacy flat format.
  */
 function ai_intent_to_context(array $intent): string
 {
     $intent = ai_cap_intent($intent);
-    $lines = "Locked product intent — design the schema for EXACTLY these, add nothing and drop nothing.\nActors:\n";
-    foreach ($intent['actors'] as $a)  $lines .= "- {$a}\n";
+    $lines  = "Locked product intent — design the schema for EXACTLY these, add nothing and drop nothing.\nActors:\n";
+    foreach ($intent['actors'] as $actor) {
+        $lines .= '- ' . (is_array($actor) ? $actor['name'] : $actor) . "\n";
+    }
     $lines .= "User stories:\n";
-    foreach ($intent['stories'] as $s) $lines .= "- {$s}\n";
+    foreach ($intent['actors'] as $actor) {
+        if (is_array($actor)) {
+            foreach ($actor['stories'] ?? [] as $story) {
+                $lines .= '- ' . (is_array($story) ? $story['title'] : $story) . "\n";
+            }
+        }
+    }
     return $lines;
 }
 
@@ -3125,6 +3186,27 @@ PROMPT;
         $catalog   = \SupaBein\Catalog::getInstance();
         if (!$catalog->deleteAiSession($sessionId, $userId)) abort(404, 'Session not found');
         json_out(['deleted' => true]);
+    }, ['auth_middleware']);
+
+    // ── Product requirements: get + upsert ────────────────────────────────────
+    $router->get('/v1/projects/:id/requirements', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        $reqs = $catalog->getProjectRequirements($projectId);
+        json_out($reqs ?? (object)[]);
+    }, ['auth_middleware']);
+
+    $router->put('/v1/projects/:id/requirements', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        $data = $req['body'] ?? [];
+        if (empty($data)) abort(422, 'requirements body required');
+        $catalog->upsertProjectRequirements($projectId, $userId, $data);
+        json_out(['ok' => true]);
     }, ['auth_middleware']);
 
     // ── Run Playwright user-story tests against a deployed site ───────────────

@@ -1169,101 +1169,129 @@ const AiPanel = (() => {
     container.scrollTop = container.scrollHeight;
   }
 
-  function renderIntentCard(intent, onConfirm, onCancel) {
-    const actors  = [...(intent.actors  || [])];
-    const stories = [...(intent.stories || [])];
+  // Normalise legacy {actors:string[], stories:string[]} to the nested product-requirements format
+  function normalizeIntent(raw) {
+    if (!raw) return { actors: [], non_functional_requirements: [] };
+    const first = (raw.actors || [])[0];
+    if (typeof first === 'string') {
+      const storiesArr = (raw.stories || []).map(t => ({ title: t, journeys: [], requirements: [] }));
+      return { actors: (raw.actors || []).map(n => ({ name: n, stories: storiesArr })), non_functional_requirements: [] };
+    }
+    return raw;
+  }
 
-    const actorsWrap  = el('div', { class: 'ai-intent-actors' });
-    const storiesWrap = el('div', { class: 'ai-intent-stories' });
+  function renderIntentCard(rawIntent, onConfirm, onCancel) {
+    // Deep-clone so edits don't mutate caller's copy
+    const intent = JSON.parse(JSON.stringify(normalizeIntent(rawIntent)));
+    const actors = intent.actors;
+    const nfrs   = intent.non_functional_requirements || [];
 
-    function refreshActors() {
-      actorsWrap.innerHTML = '';
-      actors.forEach((a, i) => {
-        const textSpan = el('span', { class: 'ai-actor-text' }, a);
-        textSpan.addEventListener('click', () => {
-          const inp = el('input', { class: 'ai-actor-inline-input', type: 'text' });
-          inp.value = a;
-          inp.style.width = Math.max(60, a.length * 8) + 'px';
-          textSpan.replaceWith(inp);
-          inp.focus(); inp.select();
-          const save = () => {
-            const v = inp.value.trim();
-            if (v && v !== a) actors[i] = v;
-            refreshActors();
-          };
-          inp.addEventListener('blur', save);
-          inp.addEventListener('keydown', e => {
-            if (e.key === 'Enter') { e.preventDefault(); save(); }
-            if (e.key === 'Escape') refreshActors();
-          });
-        });
-        const chip = el('span', { class: 'ai-actor-chip' },
-          textSpan,
-          el('button', { class: 'ai-chip-remove', title: 'Remove', onClick: () => { actors.splice(i, 1); refreshActors(); }}, '×')
+    const treeWrap = el('div', { class: 'ai-req-tree' });
+
+    function makeInlineEdit(node, getText, setText, onSave) {
+      node.addEventListener('click', () => {
+        const inp = el('input', { class: 'ai-story-inline-input', type: 'text', value: getText() });
+        inp.style.cssText = 'width:100%;min-width:160px';
+        node.replaceWith(inp);
+        inp.focus(); inp.select();
+        const commit = () => { const v = inp.value.trim(); if (v) setText(v); onSave(); };
+        inp.addEventListener('blur', commit);
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } if (e.key === 'Escape') onSave(); });
+      });
+    }
+
+    function buildTree() {
+      treeWrap.innerHTML = '';
+      actors.forEach((actor, ai) => {
+        const actorBlock = el('div', { class: 'ai-req-actor-block' });
+
+        // Actor header row
+        const actorNameSpan = el('span', { class: 'ai-req-actor-name' }, actor.name);
+        makeInlineEdit(actorNameSpan, () => actor.name, v => { actor.name = v; }, buildTree);
+        const actorHdr = el('div', { class: 'ai-req-actor-header' },
+          el('span', { class: 'ai-req-tree-bullet' }, '┌─'),
+          actorNameSpan,
+          el('button', { class: 'ai-chip-remove ai-req-remove', title: 'Remove actor', onClick: () => { actors.splice(ai, 1); buildTree(); } }, '×')
         );
-        actorsWrap.appendChild(chip);
-      });
-      const inp = el('input', { class: 'ai-intent-add-input', placeholder: '+ actor', type: 'text' });
-      inp.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-          const v = inp.value.trim();
-          if (v && !actors.includes(v)) { actors.push(v); refreshActors(); }
-        }
-      });
-      actorsWrap.appendChild(inp);
-    }
+        actorBlock.appendChild(actorHdr);
 
-    function refreshStories() {
-      storiesWrap.innerHTML = '';
-      stories.forEach((s, i) => {
-        const textSpan = el('span', { class: 'ai-story-text' }, s);
-        textSpan.addEventListener('click', () => {
-          const inp = el('input', { class: 'ai-story-inline-input', type: 'text' });
-          inp.value = s;
-          inp.style.width = '100%';
-          textSpan.replaceWith(inp);
-          inp.focus(); inp.select();
-          const save = () => {
-            const v = inp.value.trim();
-            if (v && v !== s) stories[i] = v;
-            refreshStories();
-          };
-          inp.addEventListener('blur', save);
-          inp.addEventListener('keydown', e => {
-            if (e.key === 'Enter') { e.preventDefault(); save(); }
-            if (e.key === 'Escape') refreshStories();
-          });
+        // Stories
+        const storiesWrap = el('div', { class: 'ai-req-stories-wrap' });
+        (actor.stories || []).forEach((story, si) => {
+          const isLast = si === (actor.stories.length - 1);
+          const storyDet = el('details', { class: 'ai-req-story-block' });
+          storyDet.open = true;
+
+          const titleSpan = el('span', { class: 'ai-req-story-title' }, story.title);
+          makeInlineEdit(titleSpan, () => story.title, v => { story.title = v; }, buildTree);
+          const summary = el('summary', { class: 'ai-req-story-summary' },
+            el('span', { class: 'ai-req-tree-connector' }, isLast ? '└─' : '├─'),
+            titleSpan,
+            el('button', { class: 'ai-chip-remove ai-req-remove', title: 'Remove story',
+              onClick: e => { e.stopPropagation(); actor.stories.splice(si, 1); buildTree(); } }, '×')
+          );
+          storyDet.appendChild(summary);
+
+          const body = el('div', { class: 'ai-req-story-body', style: isLast ? '' : 'border-left:1px solid var(--border)' });
+
+          // Journeys
+          if (story.journeys && story.journeys.length) {
+            body.appendChild(el('div', { class: 'ai-req-section-label' }, 'Journeys'));
+            story.journeys.forEach(j => body.appendChild(el('div', { class: 'ai-req-item ai-req-journey' }, j)));
+          }
+
+          // Functional requirements
+          if (story.requirements && story.requirements.length) {
+            body.appendChild(el('div', { class: 'ai-req-section-label' }, 'Requirements'));
+            story.requirements.forEach(r => body.appendChild(el('div', { class: 'ai-req-item' }, r)));
+          }
+
+          storyDet.appendChild(body);
+          storiesWrap.appendChild(storyDet);
         });
-        storiesWrap.appendChild(el('div', { class: 'ai-story-item' },
-          el('button', { class: 'ai-story-remove', title: 'Remove', onClick: () => { stories.splice(i, 1); refreshStories(); }}, '−'),
-          textSpan
-        ));
+
+        // Add story button
+        const addStoryInp = el('input', { class: 'ai-intent-add-input', placeholder: '+ add story…', type: 'text' });
+        addStoryInp.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            const v = addStoryInp.value.trim();
+            if (v) { actor.stories.push({ title: v, journeys: [], requirements: [] }); buildTree(); }
+          }
+        });
+        storiesWrap.appendChild(el('div', { class: 'ai-story-add-row', style: 'padding-left:20px' }, addStoryInp));
+
+        actorBlock.appendChild(storiesWrap);
+        treeWrap.appendChild(actorBlock);
       });
-      const addRow = el('div', { class: 'ai-story-add-row' });
-      const inp = el('input', { class: 'ai-intent-add-input', placeholder: '+ add a story…', type: 'text' });
-      inp.addEventListener('keydown', e => {
+
+      // Add actor input
+      const addActorInp = el('input', { class: 'ai-intent-add-input', placeholder: '+ add actor…', type: 'text' });
+      addActorInp.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
-          const v = inp.value.trim();
-          if (v) { stories.push(v); refreshStories(); }
+          const v = addActorInp.value.trim();
+          if (v && !actors.find(a => a.name === v)) { actors.push({ name: v, stories: [] }); buildTree(); }
         }
       });
-      addRow.appendChild(inp);
-      storiesWrap.appendChild(addRow);
+      treeWrap.appendChild(el('div', { style: 'margin-top:6px' }, addActorInp));
+
+      // Non-functional requirements
+      if (nfrs.length) {
+        treeWrap.appendChild(el('div', { class: 'ai-intent-divider' }));
+        treeWrap.appendChild(el('div', { class: 'ai-req-nfr-header' }, 'Non-Functional Requirements'));
+        const nfrList = el('div', { class: 'ai-req-nfr-list' });
+        nfrs.forEach(r => nfrList.appendChild(el('div', { class: 'ai-req-item ai-req-nfr-item' }, r)));
+        treeWrap.appendChild(nfrList);
+      }
     }
 
-    refreshActors();
-    refreshStories();
+    buildTree();
 
     return el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' },
-      el('div', { class: 'ai-intent-header' }, 'Intent — review before building'),
-      el('div', { class: 'ai-intent-section-label' }, 'Actors'),
-      actorsWrap,
-      el('div', { class: 'ai-intent-divider' }),
-      el('div', { class: 'ai-intent-section-label' }, 'User Stories'),
-      storiesWrap,
+      el('div', { class: 'ai-intent-header' }, 'Product Requirements — review before building'),
+      treeWrap,
       el('div', { class: 'ai-intent-actions' },
         el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
-        el('button', { class: 'btn btn-ai btn-sm', onClick: () => onConfirm({ actors, stories }) }, 'Build with this →')
+        el('button', { class: 'btn btn-ai btn-sm', onClick: () => onConfirm({ actors, non_functional_requirements: nfrs }) }, 'Build with this →')
       )
     );
   }
@@ -1279,6 +1307,9 @@ const AiPanel = (() => {
       async (confirmedIntent) => {
         card.remove();
         await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
+        if (selectedProjectId) {
+          try { await Api.put('/v1/projects/' + selectedProjectId + '/requirements', confirmedIntent); } catch (_) {}
+        }
         body.intent = confirmedIntent;
         await proceedWithPlan(body);
       },
@@ -1612,19 +1643,24 @@ const AiPanel = (() => {
     card.appendChild(hdr);
 
     if (stories.length) {
-      const list = el('div', { style: 'padding:10px 14px;display:flex;flex-direction:column;gap:5px' });
+      const list = el('div', { style: 'padding:10px 14px;display:flex;flex-direction:column;gap:4px' });
       stories.forEach(s => {
         const icon  = s.passed ? '✓' : '✗';
         const color = s.passed ? '#22c55e' : 'var(--danger)';
-        const row   = el('div', { style: 'display:flex;align-items:baseline;gap:8px;font-size:0.8rem' },
-          el('span', { style: `color:${color};font-weight:700;flex-shrink:0` }, icon),
-          el('span', { style: `color:${s.passed ? 'var(--text)' : 'var(--danger)'}` }, s.label)
-        );
-        if (s.detail) {
-          const det = el('span', { style: 'color:var(--text-muted);font-size:0.75rem;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px', title: s.detail }, s.detail);
-          row.appendChild(det);
+        if (!s.passed && s.detail) {
+          const det = el('details', { style: 'font-size:0.8rem' });
+          det.appendChild(el('summary', { style: `display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;padding:1px 0;color:var(--danger)` },
+            el('span', { style: 'color:var(--danger);font-weight:700;flex-shrink:0' }, '✗'),
+            el('span', {}, s.label)
+          ));
+          det.appendChild(el('div', { style: 'margin:4px 0 4px 18px;font-size:0.72rem;color:var(--text-muted);background:rgba(239,68,68,0.06);padding:6px 8px;border-radius:4px;border-left:2px solid var(--danger);white-space:pre-wrap;word-break:break-all' }, s.detail));
+          list.appendChild(det);
+        } else {
+          list.appendChild(el('div', { style: 'display:flex;align-items:baseline;gap:8px;font-size:0.8rem' },
+            el('span', { style: `color:${color};font-weight:700;flex-shrink:0` }, icon),
+            el('span', { style: `color:${s.passed ? 'var(--text)' : 'var(--danger)'}` }, s.label)
+          ));
         }
-        list.appendChild(row);
       });
       card.appendChild(list);
     }
@@ -1648,7 +1684,7 @@ const AiPanel = (() => {
     if (msg.type === 'thinking') {
       const thinkingLabel = el('span', { class: 'ai-thinking-label' });
       const bubble = el('div', { class: 'ai-msg ai-msg-ai ai-msg-thinking' },
-        el('span', { class: 'ai-thinking-dots' }, '● ● ●'),
+        el('div', { class: 'loader-ring' }),
         thinkingLabel
       );
       startThinkingStages(thinkingLabel, msg.stageMode || 'default');
@@ -2494,15 +2530,15 @@ const AiPanel = (() => {
     await Promise.all([loadSessions(), loadProjects()]);
     renderProjectPicker();
 
-    if (!currentSessionId) currentSessionId = localStorage.getItem('sb:ai_sid');
-
-    if (!currentSessionId || !getSession(currentSessionId)) {
-      if (sessions.length) {
-        currentSessionId = sessions[0].id;
-        localStorage.setItem('sb:ai_sid', currentSessionId);
-        const sess = getSession(currentSessionId);
-        if (sess) selectedProjectId = sess.projectId || selectedProjectId;
-      } else {
+    if (!operationInProgress) {
+      // Always start fresh on open so the user isn't confused by a previous project's chat
+      const sess = await createSession(selectedProjectId);
+      currentSessionId = sess.id;
+      localStorage.setItem('sb:ai_sid', currentSessionId);
+    } else {
+      // Restore the in-progress session
+      if (!currentSessionId) currentSessionId = localStorage.getItem('sb:ai_sid');
+      if (!currentSessionId || !getSession(currentSessionId)) {
         const sess = await createSession(selectedProjectId);
         currentSessionId = sess.id;
       }

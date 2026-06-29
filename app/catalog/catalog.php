@@ -444,6 +444,27 @@ class Catalog
         return $stmt->rowCount() > 0;
     }
 
+    // ─── Product Requirements ─────────────────────────────────────────────────
+
+    public function upsertProjectRequirements(int $projectId, int $userId, array $data): void
+    {
+        $json = json_encode($data, JSON_UNESCAPED_UNICODE);
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO project_requirements (project_id, user_id, requirements)
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE requirements = VALUES(requirements), updated_at = CURRENT_TIMESTAMP'
+        );
+        $stmt->execute([$projectId, $userId, $json]);
+    }
+
+    public function getProjectRequirements(int $projectId): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT requirements FROM project_requirements WHERE project_id = ?');
+        $stmt->execute([$projectId]);
+        $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+        return $row ? (json_decode($row['requirements'], true) ?? null) : null;
+    }
+
     // ─── AI Jobs ─────────────────────────────────────────────────────────────
 
     public function createJob(int $userId, string $mode, array $payload): array
