@@ -1307,11 +1307,12 @@ const AiPanel = (() => {
       intent,
       async (confirmedIntent) => {
         card.remove();
-        await addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
-        if (selectedProjectId) {
-          try { await Api.put('/v1/projects/' + selectedProjectId + '/requirements', confirmedIntent); } catch (_) {}
-        }
         body.intent = confirmedIntent;
+        // Fire-and-forget — don't block the build start on DB round-trips
+        addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
+        if (selectedProjectId) {
+          Api.put('/v1/projects/' + selectedProjectId + '/requirements', confirmedIntent).catch(() => {});
+        }
         await proceedWithPlan(body);
       },
       () => { card.remove(); renderMessages(); }
@@ -2216,11 +2217,14 @@ const AiPanel = (() => {
     // ── Build mode, Review ON: intent/suggestions review cards ──────────────
     if (reviewEnabled) {
       const thinkingId = 'review_' + Date.now();
+      currentAbortController = new AbortController();
+      operationInProgress = true;
+      updateSendBtn();
       if (!selectedProjectId) {
         if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'intent' });
         renderMessages();
         try {
-          const res = await callWithFallback('/v1/ai/build', { review: true, prompt, history: body.history || [] });
+          const res = await callWithFallback('/v1/ai/build', { review: true, prompt, history: body.history || [] }, currentAbortController.signal);
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
           renderMessages();
@@ -2228,14 +2232,16 @@ const AiPanel = (() => {
         } catch(e) {
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
-          renderSidebar(); renderMessages();
+          if (!(e instanceof DOMException && e.name === 'AbortError')) {
+            await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
+            renderSidebar(); renderMessages();
+          }
         }
       } else {
         if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'edit' });
         renderMessages();
         try {
-          const res = await callWithFallback('/v1/ai/plan', { mode: 'suggest', prompt, project_id: selectedProjectId, history: body.history || [] });
+          const res = await callWithFallback('/v1/ai/plan', { mode: 'suggest', prompt, project_id: selectedProjectId, history: body.history || [] }, currentAbortController.signal);
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
           renderMessages();
@@ -2243,10 +2249,15 @@ const AiPanel = (() => {
         } catch(e) {
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
-          renderSidebar(); renderMessages();
+          if (!(e instanceof DOMException && e.name === 'AbortError')) {
+            await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: body, retryType: 'plan' });
+            renderSidebar(); renderMessages();
+          }
         }
       }
+      currentAbortController = null;
+      operationInProgress = false;
+      updateSendBtn();
       return;
     }
 
@@ -2493,8 +2504,10 @@ const AiPanel = (() => {
     const modelSelectorBtn = buildModelSelector();
 
     const header = el('div', { class: 'ai-header' },
-      hamburgerBtn,
-      el('span', { class: 'ai-header-title' }, '✦ SupaBein AI'),
+      el('div', { class: 'ai-header-left' },
+        hamburgerBtn,
+        el('span', { class: 'ai-header-title' }, '✦ SupaBein AI')
+      ),
       modelSelectorBtn,
       newSessionBtn,
       closeBtn
