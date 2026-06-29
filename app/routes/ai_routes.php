@@ -1901,7 +1901,7 @@ function ai_playwright_test_generate(
     $fillStr    = implode("\n", $fillLines);
     $ipfx       = $itemPrefix ?? '/item';
     $newBtnSel  = $newRoute
-        ? 'a[href=\'#' . $newRoute . '\'], a:has-text("New")'
+        ? 'a[href="#' . $newRoute . '"], a:has-text("New")'
         : 'a:has-text("New")';
 
     // ── Static JS pieces (NOWDOC = no PHP interpolation) ──────────────────────

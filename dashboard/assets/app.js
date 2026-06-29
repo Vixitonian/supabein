@@ -1593,6 +1593,54 @@ const AiPanel = (() => {
     );
   }
 
+  function renderTestCard(msg) {
+    const { stories = [], passed = 0, failed = 0, error, screenshot } = msg.data || {};
+    const total = passed + failed;
+    const statusColor = error ? 'var(--danger)' : total === 0 ? 'var(--text-muted)' : failed === 0 ? '#22c55e' : 'var(--danger)';
+    const statusText  = error
+      ? `Error: ${error}`
+      : total === 0 ? 'No stories generated'
+      : failed === 0 ? `All ${passed} passed ✓`
+      : `${passed}/${total} passed · ${failed} failed`;
+
+    const card = el('div', { class: 'ai-msg ai-msg-ai', style: 'padding:0;overflow:hidden' });
+
+    const hdr = el('div', { style: 'padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)' },
+      el('span', { style: 'font-weight:600;font-size:0.875rem' }, '▶ Test Results'),
+      el('span', { style: `color:${statusColor};font-size:0.8rem;font-weight:600` }, statusText)
+    );
+    card.appendChild(hdr);
+
+    if (stories.length) {
+      const list = el('div', { style: 'padding:10px 14px;display:flex;flex-direction:column;gap:5px' });
+      stories.forEach(s => {
+        const icon  = s.passed ? '✓' : '✗';
+        const color = s.passed ? '#22c55e' : 'var(--danger)';
+        const row   = el('div', { style: 'display:flex;align-items:baseline;gap:8px;font-size:0.8rem' },
+          el('span', { style: `color:${color};font-weight:700;flex-shrink:0` }, icon),
+          el('span', { style: `color:${s.passed ? 'var(--text)' : 'var(--danger)'}` }, s.label)
+        );
+        if (s.detail) {
+          const det = el('span', { style: 'color:var(--text-muted);font-size:0.75rem;margin-left:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px', title: s.detail }, s.detail);
+          row.appendChild(det);
+        }
+        list.appendChild(row);
+      });
+      card.appendChild(list);
+    }
+
+    if (screenshot) {
+      const det = el('details', { style: 'border-top:1px solid var(--border);padding:10px 14px' });
+      det.appendChild(el('summary', { style: 'font-size:0.8rem;cursor:pointer;color:var(--text-muted)' }, 'Screenshot'));
+      const img = el('img', { style: 'margin-top:8px;width:100%;border-radius:4px;border:1px solid var(--border)' });
+      img.src = 'data:image/png;base64,' + screenshot;
+      det.appendChild(img);
+      card.appendChild(det);
+    }
+
+    return card;
+  }
+
   function renderMessage(msg) {
     if (msg.role === 'user') {
       return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
@@ -1646,6 +1694,7 @@ const AiPanel = (() => {
       return div;
     }
     if (msg.type === 'trace') return renderTraceCard(msg);
+    if (msg.type === 'test')  return renderTestCard(msg);
     const bubble = el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
     const tokenEl = renderTokenUsage(msg.usage);
     if (tokenEl) bubble.appendChild(tokenEl);
@@ -2034,6 +2083,8 @@ const AiPanel = (() => {
     projects.forEach(p => picker.appendChild(el('option', { value: String(p.id) }, p.name)));
     picker.value = selectedProjectId ? String(selectedProjectId) : '';
     if (picker.value === '' && current) picker.value = '';
+    const testBtn = panelEl.querySelector('.ai-run-tests-btn');
+    if (testBtn) testBtn.style.display = selectedProjectId ? '' : 'none';
   }
 
   async function loadSessionMessages(id) {
@@ -2265,7 +2316,48 @@ const AiPanel = (() => {
     const projectPicker = el('select', { id: 'ai-project-picker', class: 'ai-project-picker' });
     projectPicker.addEventListener('change', () => {
       selectedProjectId = projectPicker.value ? parseInt(projectPicker.value) : null;
+      runTestsBtn.style.display = selectedProjectId ? '' : 'none';
     });
+
+    const runTestsBtn = el('button', {
+      class: 'btn btn-secondary btn-sm ai-run-tests-btn',
+      style: selectedProjectId ? '' : 'display:none',
+      onClick: async () => {
+        if (!selectedProjectId) return;
+        if (operationInProgress) return;
+
+        if (!currentSessionId || !getSession(currentSessionId)) {
+          const sess = await createSession(selectedProjectId);
+          currentSessionId = sess.id;
+        }
+
+        const thinkingId = 'test_thinking_' + Date.now();
+        const sess = currentSession();
+        if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
+        renderMessages();
+
+        runTestsBtn.disabled = true;
+        try {
+          const result = await Api.post('/v1/ai/test', { project_id: selectedProjectId });
+          const s = currentSession();
+          if (s) {
+            s.messages = s.messages.filter(m => m.id !== thinkingId);
+            s.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: result });
+            persistSession(s);
+          }
+        } catch (err) {
+          const s = currentSession();
+          if (s) {
+            s.messages = s.messages.filter(m => m.id !== thinkingId);
+            s.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test', data: { stories: [], passed: 0, failed: 0, error: err.message } });
+            persistSession(s);
+          }
+        } finally {
+          runTestsBtn.disabled = false;
+          renderMessages();
+        }
+      }
+    }, '▶ Run Tests');
 
     const textarea = el('textarea', {
       id: 'ai-textarea',
@@ -2316,6 +2408,7 @@ const AiPanel = (() => {
         textarea,
         el('div', { class: 'ai-input-actions' },
           projectPicker,
+          runTestsBtn,
           modeBtn,
           reviewToggle,
           sendBtn
