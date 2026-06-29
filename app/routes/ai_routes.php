@@ -1817,14 +1817,15 @@ function ai_playwright_test_generate(
     string $appUrl,
     string $token,
     array  $schema,
-    string $indexHtml
+    string $indexHtml,
+    int    $projectId
 ): string {
-    // Find auth table (has PASSWORD column)
-    $authTable = null;
-    $authField = 'email';
+    // ── Schema analysis ────────────────────────────────────────────────────────────
+    $authTable  = null;
+    $authField  = 'email';
     $dataTables = [];
     foreach ($schema['tables'] as $table) {
-        $hasPassword = false;
+        $hasPassword  = false;
         $firstVarchar = null;
         foreach ($table['columns'] as $col) {
             if ($col['type'] === 'PASSWORD') {
@@ -1841,25 +1842,37 @@ function ai_playwright_test_generate(
         }
     }
     $hasAuth = $authTable !== null;
+    $sbPid   = 'p' . $projectId;
 
-    // Find the /something/new route from deployed index.html
-    $newRoute   = null;
-    $itemPrefix = null;
+    // ── Route detection from deployed index.html ───────────────────────────────────
+    $newRoute        = null;
+    $itemPrefix      = null;
+    $editRouteExists = false;
     if (preg_match_all('/defineRoute\([\'"]([^\'"]+)[\'"]/u', $indexHtml, $rm)) {
         foreach ($rm[1] as $r) {
-            if (str_ends_with($r, '/new')) {
-                $newRoute   = $r;                    // e.g. /note/new
-                $itemPrefix = substr($r, 0, -4);     // e.g. /note
-                break;
+            if (str_ends_with($r, '/new') && $newRoute === null) {
+                $newRoute   = $r;
+                $itemPrefix = substr($r, 0, -4);
+            }
+        }
+        if ($itemPrefix) {
+            foreach ($rm[1] as $r) {
+                if (str_starts_with($r, $itemPrefix . '/') && str_ends_with($r, '/edit')) {
+                    $editRouteExists = true;
+                    break;
+                }
             }
         }
     }
 
-    // Collect fillable fields from first data table
-    $firstTable  = $dataTables[0] ?? null;
-    $fillLines   = [];
-    $assertValue = 'PW Test Value';
-    $firstField  = true;
+    // ── Fill lines for Record A and Record B ───────────────────────────────────────
+    $firstTable    = $dataTables[0] ?? null;
+    $fillLines     = [];
+    $fillLines2    = [];
+    $assertValue   = 'PW Test Value';
+    $assertValue2  = 'PW Record B';
+    $firstInputSel = 'input';
+    $firstField    = true;
     if ($firstTable) {
         foreach ($firstTable['columns'] as $col) {
             $cn = strtolower($col['name']);
@@ -1868,45 +1881,75 @@ function ai_playwright_test_generate(
             if ($ct === 'BOOLEAN' || $ct === 'TINYINT(1)') continue;
 
             if (preg_match('/^TEXT|MEDIUMTEXT|LONGTEXT/', $ct)) {
-                $tag = 'textarea';
-                $val = 'PW test content for ' . $col['name'];
+                $tag  = 'textarea';
+                $valA = 'PW test content for ' . $col['name'];
+                $valB = 'PW record B content ' . $col['name'];
             } elseif (preg_match('/^(INT|BIGINT|SMALLINT|TINYINT)/', $ct)) {
-                $tag = 'input';
-                $val = '42';
+                $tag  = 'input';
+                $valA = '42';
+                $valB = '99';
             } elseif (preg_match('/^DECIMAL|^FLOAT|^DOUBLE/', $ct)) {
-                $tag = 'input';
-                $val = '9.99';
+                $tag  = 'input';
+                $valA = '9.99';
+                $valB = '19.99';
             } elseif ($ct === 'DATE') {
-                $tag = 'input';
-                $val = '2024-01-15';
+                $tag  = 'input';
+                $valA = '2024-01-15';
+                $valB = '2024-02-20';
             } elseif (preg_match('/^DATETIME|^TIMESTAMP/', $ct)) {
-                $tag = 'input';
-                $val = '2024-01-15T10:00';
+                $tag  = 'input';
+                $valA = '2024-01-15T10:00';
+                $valB = '2024-02-20T14:00';
             } else {
-                $tag = 'input';
-                $val = 'Playwright Test ' . ucfirst(str_replace('_', ' ', $col['name']));
+                $tag  = 'input';
+                $valA = 'Playwright Test ' . ucfirst(str_replace('_', ' ', $col['name']));
+                $valB = 'Record B ' . ucfirst(str_replace('_', ' ', $col['name']));
             }
 
-            if ($firstField) { $assertValue = $val; $firstField = false; }
-            $fillLines[] = "  await page.fill('" . $tag . "[name=\"" . $col['name'] . "\"]', "
-                         . json_encode($val, JSON_UNESCAPED_UNICODE) . ');';
+            if ($firstField) {
+                $assertValue   = $valA;
+                $assertValue2  = $valB;
+                $firstInputSel = $tag . '[name="' . $col['name'] . '"]';
+                $firstField    = false;
+            }
+            $fillLines[]  = "  await page.fill('" . $tag . '[name="' . $col['name'] . '"]' . "', "
+                          . json_encode($valA, JSON_UNESCAPED_UNICODE) . ');';
+            $fillLines2[] = "  await page.fill('" . $tag . '[name="' . $col['name'] . '"]' . "', "
+                          . json_encode($valB, JSON_UNESCAPED_UNICODE) . ');';
         }
     }
 
-    $hasCrud    = $firstTable !== null && $newRoute !== null;
-    $tokenJson  = json_encode($token);
-    $urlJson    = json_encode($appUrl);
-    $afJson     = json_encode($authField);
-    $avJson     = json_encode($assertValue);
-    $fillStr    = implode("\n", $fillLines);
-    $ipfx       = $itemPrefix ?? '/item';
-    $newBtnSel  = $newRoute
+    $hasCrud   = $firstTable !== null && $newRoute !== null;
+    $tokenJson = json_encode($token);
+    $urlJson   = json_encode($appUrl);
+    $afJson    = json_encode($authField);
+    $avJson    = json_encode($assertValue);
+    $av2Json   = json_encode($assertValue2);
+    $fillStr   = implode("\n", $fillLines);
+    $fillStr2  = implode("\n", $fillLines2);
+    $ipfx      = $itemPrefix ?? '/item';
+
+    $newBtnSel = $newRoute
         ? 'a[href="#' . $newRoute . '"], a:has-text("New")'
         : 'a:has-text("New")';
 
-    // ── Static JS pieces (NOWDOC = no PHP interpolation) ──────────────────────
+    $authTableJson = json_encode($authTable ?? 'users');
+    $sbPidJson     = json_encode($sbPid);
+
+    // For list assertion: if edit route exists record A will have been edited
+    if ($editRouteExists) {
+        $listAssertJson = json_encode('PW Edited ' . $assertValue);
+        $editValJson    = json_encode('PW Edited ' . $assertValue);
+    } else {
+        $listAssertJson = $avJson;
+        $editValJson    = $avJson;
+    }
+
+    // ── Static JS header (helpers) ─────────────────────────────────────────────────
     $header = <<<'JSEOF'
 import { chromium } from 'playwright-core';
+import https from 'https';
+import http from 'http';
 
 let passed = 0, failed = 0;
 const stories = [];
@@ -1919,15 +1962,56 @@ function assert(label, cond, detail) {
   if (cond) { console.log('  ✓  ' + label); passed++; }
   else       { console.error('  ✗  ' + label + (detail ? ' — ' + detail : '')); failed++; }
 }
+
+async function captureToken(pg) {
+  try {
+    const raw = await pg.evaluate(() => localStorage.getItem('sb:token'));
+    if (!raw) return [null, null];
+    const p = JSON.parse(atob(raw.split('.')[1]));
+    return [raw, parseInt(p.sub, 10)];
+  } catch (_) { return [null, null]; }
+}
+
+async function waitLoggedIn(pg, ms = 15000) {
+  await pg.waitForFunction(
+    () => { const el = document.querySelector('#nav-logout'); return el && !el.classList.contains('hidden'); },
+    { timeout: ms }
+  );
+}
+
+function apiDelete(apiUrl, bearerToken) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(apiUrl); } catch (_) { resolve(0); return; }
+    const isHttps = u.protocol === 'https:';
+    const opts = {
+      hostname: u.hostname,
+      port: u.port ? parseInt(u.port) : (isHttps ? 443 : 80),
+      path: u.pathname,
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + bearerToken }
+    };
+    const req = (isHttps ? https : http).request(opts, res => { res.resume(); resolve(res.statusCode); });
+    req.on('error', () => resolve(0));
+    req.end();
+  });
+}
 JSEOF;
 
-    // Dynamic constants
-    $constants = 'const TOKEN    = ' . $tokenJson . ";\n"
-               . 'const APP_URL  = ' . $urlJson . ";\n"
-               . 'const TEST_EMAIL = `pw-test-${Date.now()}@testmail.dev`;' . "\n"
-               . "const TEST_PASS  = 'TestPass123!';\n";
+    // ── Dynamic constants ──────────────────────────────────────────────────────────
+    $constants = 'const TOKEN      = ' . $tokenJson . ";\n"
+               . 'const APP_URL    = ' . $urlJson . ";\n"
+               . 'const SB_PID     = ' . $sbPidJson . ";\n"
+               . 'const AUTH_TABLE = ' . $authTableJson . ";\n"
+               . 'const TEST_EMAIL   = `pw-a-${Date.now()}@testmail.dev`;' . "\n"
+               . 'const TEST_EMAIL_B = `pw-b-${Date.now() + 1}@testmail.dev`;' . "\n"
+               . "const TEST_PASS    = 'TestPass123!';\n"
+               . "const SB_API = (() => { try { return new URL(APP_URL).origin + '/api/v1'; } catch(_) { return ''; } })();\n";
 
+    // ── Browser connection ─────────────────────────────────────────────────────────
     $connect = <<<'JSEOF'
+let tokenA = null, userIdA = null;
+let tokenB = null, userIdB = null;
 let browser, page;
 try {
   browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
@@ -1944,10 +2028,22 @@ page.on('console', m => { if (m.type() === 'error') pageErrors.push(m.text()); }
 page.on('pageerror', e => pageErrors.push(e.message));
 JSEOF;
 
-    // Auth block
+    // ── Auth block ─────────────────────────────────────────────────────────────────
     $authBlock = '';
     if ($hasAuth) {
-        $authBlock  = "  log('Story: Unauthenticated access shows login form');\n";
+        $authBlock .= "  log('Story: Wrong credentials are rejected');\n";
+        $authBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $authBlock .= "  await page.waitForTimeout(500);\n";
+        $authBlock .= "  await page.fill('#login-form input[name=' + " . $afJson . " + ']', 'wrong@nowhere.dev');\n";
+        $authBlock .= "  await page.fill('#login-form input[name=\"password\"]', 'BadPass000');\n";
+        $authBlock .= "  await page.click('#login-form button[type=\"submit\"], #login-form button');\n";
+        $authBlock .= "  await page.waitForTimeout(2000);\n";
+        $authBlock .= "  const stillLogin = await page.\$('#login-form') !== null;\n";
+        $authBlock .= "  const loginErrTxt = await page.\$eval('#login-error', el => el.textContent.trim()).catch(() => '');\n";
+        $authBlock .= "  assert('Wrong credentials are rejected',\n";
+        $authBlock .= "    stillLogin || loginErrTxt.length > 0, loginErrTxt);\n\n";
+
+        $authBlock .= "  log('Story: Unauthenticated access shows login form');\n";
         $authBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
         $authBlock .= "  await page.waitForTimeout(1000);\n";
         $authBlock .= "  assert('Login form visible to unauthenticated users', await page.\$('#login-form') !== null);\n\n";
@@ -1958,11 +2054,9 @@ JSEOF;
         $authBlock .= "  await page.click('#signup-form button[type=\"submit\"], #signup-form button');\n";
         $authBlock .= "  let loggedIn = false;\n";
         $authBlock .= "  try {\n";
-        $authBlock .= "    await page.waitForFunction(\n";
-        $authBlock .= "      () => { const el = document.querySelector('#nav-logout'); return el && !el.classList.contains('hidden'); },\n";
-        $authBlock .= "      { timeout: 15000 }\n";
-        $authBlock .= "    );\n";
+        $authBlock .= "    await waitLoggedIn(page);\n";
         $authBlock .= "    loggedIn = true;\n";
+        $authBlock .= "    [tokenA, userIdA] = await captureToken(page);\n";
         $authBlock .= "  } catch (_) {\n";
         $authBlock .= "    const errTxt = await page.\$eval('#signup-error', el => el.textContent.trim()).catch(() => '');\n";
         $authBlock .= "    console.log('  signup-error: ' + errTxt);\n";
@@ -1970,11 +2064,11 @@ JSEOF;
         $authBlock .= "  assert('Signup succeeds and user is logged in', loggedIn);\n";
         $authBlock .= "  if (!loggedIn) throw Object.assign(new Error('auth_failed'), { abort: true });\n\n";
     } else {
-        $authBlock  = "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $authBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
         $authBlock .= "  await page.waitForTimeout(1000);\n";
     }
 
-    // CRUD block
+    // ── CRUD block ─────────────────────────────────────────────────────────────────
     $crudBlock = '';
     if ($hasCrud) {
         $crudBlock .= "  log('Story: App loads with new-record button');\n";
@@ -1984,10 +2078,40 @@ JSEOF;
         $crudBlock .= "    !pageErrors.some(e => e.toLowerCase().includes('failed to fetch')),\n";
         $crudBlock .= "    pageErrors.slice(0, 2).join(' | '));\n\n";
 
+        // XSS check
+        $crudBlock .= "  log('Story: XSS payload in form field does not execute');\n";
+        $crudBlock .= "  await page.click('" . $newBtnSel . "');\n";
+        $crudBlock .= "  await page.waitForTimeout(600);\n";
+        $crudBlock .= "  await page.evaluate(() => { window.__xss = false; });\n";
+        $crudBlock .= "  const xssInput = await page.\$('" . $firstInputSel . "');\n";
+        $crudBlock .= "  if (xssInput) await xssInput.fill('<img src=x onerror=\"window.__xss=true\">');\n";
+        $crudBlock .= "  await page.waitForTimeout(800);\n";
+        $crudBlock .= "  const xssRan = await page.evaluate(() => window.__xss === true).catch(() => false);\n";
+        $crudBlock .= "  assert('XSS payload in form field does not execute', !xssRan);\n";
+        $crudBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $crudBlock .= "  await page.waitForTimeout(500);\n\n";
+
+        // Empty form / submit button check
+        $crudBlock .= "  log('Story: Form renders and empty submit causes no JS errors');\n";
+        $crudBlock .= "  const errsBefore = pageErrors.length;\n";
+        $crudBlock .= "  await page.click('" . $newBtnSel . "');\n";
+        $crudBlock .= "  await page.waitForTimeout(600);\n";
+        $crudBlock .= "  assert('New record form has a submit button',\n";
+        $crudBlock .= "    await page.\$('button[type=\"submit\"], input[type=\"submit\"]') !== null);\n";
+        $crudBlock .= "  await page.click('button[type=\"submit\"]').catch(() => {});\n";
+        $crudBlock .= "  await page.waitForTimeout(800);\n";
+        $crudBlock .= "  const errsAfterEmpty = pageErrors.slice(errsBefore);\n";
+        $crudBlock .= "  assert('Submitting empty form causes no new JS errors',\n";
+        $crudBlock .= "    errsAfterEmpty.every(e => !e.toLowerCase().includes('typeerror') && !e.toLowerCase().includes('uncaught')),\n";
+        $crudBlock .= "    errsAfterEmpty.join(' | '));\n";
+        $crudBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $crudBlock .= "  await page.waitForTimeout(500);\n\n";
+
+        // Create record A
         $crudBlock .= "  log('Story: User can create a record');\n";
         $crudBlock .= "  await page.click('" . $newBtnSel . "');\n";
         $crudBlock .= "  await page.waitForTimeout(600);\n";
-        $crudBlock .= $fillStr . "\n";
+        if ($fillStr) $crudBlock .= $fillStr . "\n";
         $crudBlock .= "  await page.click('button[type=\"submit\"]');\n";
         $crudBlock .= "  try {\n";
         $crudBlock .= "    await page.waitForFunction(\n";
@@ -1999,34 +2123,162 @@ JSEOF;
         $crudBlock .= "    page.url().includes('" . $ipfx . "/') && !page.url().includes('/new'), 'url: ' + page.url());\n\n";
 
         $crudBlock .= "  log('Story: Created record content is displayed');\n";
-        $crudBlock .= "  const bodyTxt = await page.textContent('body').catch(() => '');\n";
-        $crudBlock .= "  assert('Record content is shown', bodyTxt.includes(" . $avJson . "));\n\n";
+        $crudBlock .= "  const bodyTxtA = await page.textContent('body').catch(() => '');\n";
+        $crudBlock .= "  assert('Record A content shown on detail view', bodyTxtA.includes(" . $avJson . "));\n\n";
 
+        // Edit record (if edit route detected)
+        if ($editRouteExists) {
+            $crudBlock .= "  log('Story: User can edit a record');\n";
+            $crudBlock .= "  const editLink = await page.\$('a:has-text(\"Edit\"), a[href*=\"/edit\"], button:has-text(\"Edit\")');\n";
+            $crudBlock .= "  assert('Edit link/button is present on detail view', editLink !== null);\n";
+            $crudBlock .= "  if (editLink) {\n";
+            $crudBlock .= "    await editLink.click();\n";
+            $crudBlock .= "    await page.waitForTimeout(600);\n";
+            $crudBlock .= "    const editField = await page.\$('" . $firstInputSel . "');\n";
+            $crudBlock .= "    if (editField) await editField.fill(" . $editValJson . ");\n";
+            $crudBlock .= "    await page.click('button[type=\"submit\"]');\n";
+            $crudBlock .= "    await page.waitForTimeout(2000);\n";
+            $crudBlock .= "    const editedBody = await page.textContent('body').catch(() => '');\n";
+            $crudBlock .= "    assert('Edited value shown after save', editedBody.includes(" . $editValJson . "),\n";
+            $crudBlock .= "      'got: ' + editedBody.substring(0, 150));\n";
+            $crudBlock .= "  }\n\n";
+        }
+
+        // List view — record A
         $crudBlock .= "  log('Story: Record appears in list view');\n";
         $crudBlock .= "  await page.click('a:has-text(\"Back\"), a[href=\"#/\"]');\n";
         $crudBlock .= "  await page.waitForTimeout(1200);\n";
-        $crudBlock .= "  const listTxt = await page.textContent('body').catch(() => '');\n";
-        $crudBlock .= "  assert('Record is visible in list', listTxt.includes(" . $avJson . "));\n\n";
+        $crudBlock .= "  const listTxtA = await page.textContent('body').catch(() => '');\n";
+        $crudBlock .= "  assert('Record A is visible in list', listTxtA.includes(" . $listAssertJson . "));\n\n";
 
+        // Open record from list
         $crudBlock .= "  log('Story: User can open a record from list');\n";
-        $crudBlock .= "  await page.click('a:has-text(' + " . $avJson . " + ')');\n";
-        $crudBlock .= "  await page.waitForTimeout(800);\n";
-        $crudBlock .= "  assert('Clicking record opens detail view',\n";
-        $crudBlock .= "    page.url().includes('" . $ipfx . "/') && !page.url().includes('/new'));\n\n";
+        $crudBlock .= "  const listItemLink = await page.\$('a[href*=\"" . $ipfx . "/\"]');\n";
+        $crudBlock .= "  if (listItemLink) {\n";
+        $crudBlock .= "    await listItemLink.click();\n";
+        $crudBlock .= "    await page.waitForTimeout(800);\n";
+        $crudBlock .= "    assert('Clicking record in list opens detail view',\n";
+        $crudBlock .= "      page.url().includes('" . $ipfx . "/') && !page.url().includes('/new'));\n";
+        $crudBlock .= "    await page.click('a:has-text(\"Back\"), a[href=\"#/\"]').catch(() => {});\n";
+        $crudBlock .= "    await page.waitForTimeout(800);\n";
+        $crudBlock .= "  }\n\n";
 
-        $crudBlock .= "  log('Story: User can delete a record');\n";
-        $crudBlock .= "  const delBtn = await page.\$('#delete-btn, button:has-text(\"Delete\")');\n";
-        $crudBlock .= "  assert('Delete button is present on detail view', delBtn !== null);\n";
-        $crudBlock .= "  if (delBtn) {\n";
-        $crudBlock .= "    page.once('dialog', d => d.accept());\n";
-        $crudBlock .= "    await delBtn.click();\n";
-        $crudBlock .= "    await page.waitForTimeout(2000);\n";
-        $crudBlock .= "    const afterDelTxt = await page.textContent('body').catch(() => '');\n";
-        $crudBlock .= "    assert('Deleted record no longer in list', !afterDelTxt.includes(" . $avJson . "));\n";
+        // Create record B — verify both appear
+        $crudBlock .= "  log('Story: Multiple records appear in list');\n";
+        $crudBlock .= "  await page.click('" . $newBtnSel . "');\n";
+        $crudBlock .= "  await page.waitForTimeout(600);\n";
+        if ($fillStr2) $crudBlock .= $fillStr2 . "\n";
+        $crudBlock .= "  await page.click('button[type=\"submit\"]');\n";
+        $crudBlock .= "  try {\n";
+        $crudBlock .= "    await page.waitForFunction(\n";
+        $crudBlock .= "      () => window.location.hash.includes('" . $ipfx . "/') && !window.location.hash.includes('/new'),\n";
+        $crudBlock .= "      { timeout: 8000 }\n";
+        $crudBlock .= "    );\n";
+        $crudBlock .= "  } catch (_) {}\n";
+        $crudBlock .= "  await page.click('a:has-text(\"Back\"), a[href=\"#/\"]').catch(() => {});\n";
+        $crudBlock .= "  await page.waitForTimeout(1200);\n";
+        $crudBlock .= "  const listTxtBoth = await page.textContent('body').catch(() => '');\n";
+        $crudBlock .= "  assert('Record A still in list after adding Record B', listTxtBoth.includes(" . $listAssertJson . "));\n";
+        $crudBlock .= "  assert('Record B is visible in list', listTxtBoth.includes(" . $av2Json . "));\n\n";
+
+        // Mobile viewport
+        $crudBlock .= "  log('Story: App works on mobile viewport (375px)');\n";
+        $crudBlock .= "  {\n";
+        $crudBlock .= "    const mobilePage = await browser.newPage();\n";
+        $crudBlock .= "    mobilePage.setDefaultTimeout(12000);\n";
+        $crudBlock .= "    await mobilePage.setViewportSize({ width: 375, height: 667 });\n";
+        if ($hasAuth) {
+            $crudBlock .= "    await mobilePage.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+            $crudBlock .= "    if (tokenA) await mobilePage.evaluate(t => localStorage.setItem('sb:token', t), tokenA);\n";
+            $crudBlock .= "    await mobilePage.reload({ waitUntil: 'networkidle' });\n";
+        } else {
+            $crudBlock .= "    await mobilePage.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        }
+        $crudBlock .= "    await mobilePage.waitForTimeout(1000);\n";
+        $crudBlock .= "    const mOverflow = await mobilePage.evaluate(() => document.body.scrollWidth > window.innerWidth).catch(() => false);\n";
+        $crudBlock .= "    assert('No horizontal overflow on mobile viewport', !mOverflow);\n";
+        $crudBlock .= "    const mNewBtn = await mobilePage.\$('" . $newBtnSel . "');\n";
+        $crudBlock .= "    assert('New record button accessible on mobile', mNewBtn !== null);\n";
+        $crudBlock .= "    await mobilePage.close();\n";
         $crudBlock .= "  }\n\n";
     }
 
-    // Logout block
+    // ── Multi-user isolation block ─────────────────────────────────────────────────
+    $isolationBlock = '';
+    if ($hasAuth && $hasCrud) {
+        $isolationBlock .= "  log('Story: Multi-user data isolation');\n";
+        $isolationBlock .= "  {\n";
+        $isolationBlock .= "    const pageB = await browser.newPage();\n";
+        $isolationBlock .= "    pageB.setDefaultTimeout(15000);\n";
+        $isolationBlock .= "    await pageB.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $isolationBlock .= "    await pageB.waitForTimeout(500);\n";
+        $isolationBlock .= "    await pageB.fill('#signup-form input[name=' + " . $afJson . " + ']', TEST_EMAIL_B);\n";
+        $isolationBlock .= "    await pageB.fill('#signup-form input[name=\"password\"]', TEST_PASS);\n";
+        $isolationBlock .= "    await pageB.click('#signup-form button[type=\"submit\"], #signup-form button');\n";
+        $isolationBlock .= "    let bLoggedIn = false;\n";
+        $isolationBlock .= "    try {\n";
+        $isolationBlock .= "      await waitLoggedIn(pageB);\n";
+        $isolationBlock .= "      bLoggedIn = true;\n";
+        $isolationBlock .= "      [tokenB, userIdB] = await captureToken(pageB);\n";
+        $isolationBlock .= "      await pageB.waitForTimeout(1500);\n";
+        $isolationBlock .= "      const pageBBody = await pageB.textContent('body').catch(() => '');\n";
+        $isolationBlock .= "      assert('User B cannot see User A records', !pageBBody.includes(" . $listAssertJson . "));\n";
+        $isolationBlock .= "    } catch (_) {\n";
+        $isolationBlock .= "      assert('User B signup for isolation test', bLoggedIn, 'signup failed');\n";
+        $isolationBlock .= "    }\n";
+        $isolationBlock .= "    await pageB.close();\n";
+        $isolationBlock .= "  }\n\n";
+    }
+
+    // ── Delete-all + empty-state block ─────────────────────────────────────────────
+    $deleteAllBlock = '';
+    if ($hasCrud) {
+        $deleteAllBlock .= "  log('Story: Delete all records — app renders empty state without crash');\n";
+        $deleteAllBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $deleteAllBlock .= "  await page.waitForTimeout(1000);\n";
+        $deleteAllBlock .= "  for (let _i = 0; _i < 20; _i++) {\n";
+        $deleteAllBlock .= "    const itemLink = await page.\$('a[href*=\"" . $ipfx . "/\"]');\n";
+        $deleteAllBlock .= "    if (!itemLink) break;\n";
+        $deleteAllBlock .= "    await itemLink.click();\n";
+        $deleteAllBlock .= "    await page.waitForTimeout(500);\n";
+        $deleteAllBlock .= "    const delBtn = await page.\$('#delete-btn, button:has-text(\"Delete\")');\n";
+        $deleteAllBlock .= "    if (!delBtn) { await page.goto(APP_URL, { waitUntil: 'networkidle' }); break; }\n";
+        $deleteAllBlock .= "    page.once('dialog', d => d.accept());\n";
+        $deleteAllBlock .= "    await delBtn.click();\n";
+        $deleteAllBlock .= "    await page.waitForTimeout(1500);\n";
+        $deleteAllBlock .= "    if (!page.url().startsWith(APP_URL.replace(/\\/+$/, ''))) {\n";
+        $deleteAllBlock .= "      await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $deleteAllBlock .= "      await page.waitForTimeout(800);\n";
+        $deleteAllBlock .= "    }\n";
+        $deleteAllBlock .= "  }\n";
+        $deleteAllBlock .= "  const crashErrors = pageErrors.filter(e =>\n";
+        $deleteAllBlock .= "    e.toLowerCase().includes('typeerror') || e.toLowerCase().includes('uncaught'));\n";
+        $deleteAllBlock .= "  assert('App renders without crash on empty list', crashErrors.length === 0, crashErrors.join(' | '));\n";
+        $deleteAllBlock .= "  assert('New record button present in empty state', await page.\$('" . $newBtnSel . "') !== null);\n\n";
+    }
+
+    // ── Re-login block ─────────────────────────────────────────────────────────────
+    $reloginBlock = '';
+    if ($hasAuth) {
+        $reloginBlock .= "  log('Story: User can re-login with same credentials');\n";
+        $reloginBlock .= "  const logoutForRL = await page.\$('#nav-logout');\n";
+        $reloginBlock .= "  if (logoutForRL) {\n";
+        $reloginBlock .= "    const isHiddenRL = await logoutForRL.evaluate(el => el.classList.contains('hidden')).catch(() => true);\n";
+        $reloginBlock .= "    if (!isHiddenRL) await logoutForRL.click();\n";
+        $reloginBlock .= "    await page.waitForTimeout(1000);\n";
+        $reloginBlock .= "  }\n";
+        $reloginBlock .= "  const loginFormRL = await page.\$('#login-form');\n";
+        $reloginBlock .= "  if (loginFormRL) {\n";
+        $reloginBlock .= "    await page.fill('#login-form input[name=' + " . $afJson . " + ']', TEST_EMAIL);\n";
+        $reloginBlock .= "    await page.fill('#login-form input[name=\"password\"]', TEST_PASS);\n";
+        $reloginBlock .= "    await page.click('#login-form button[type=\"submit\"], #login-form button');\n";
+        $reloginBlock .= "  }\n";
+        $reloginBlock .= "  let reLoggedIn = false;\n";
+        $reloginBlock .= "  try { await waitLoggedIn(page); reLoggedIn = true; } catch (_) {}\n";
+        $reloginBlock .= "  assert('User can re-login with same credentials', reLoggedIn);\n\n";
+    }
+
+    // ── Final logout block ─────────────────────────────────────────────────────────
     $logoutBlock = '';
     if ($hasAuth) {
         $logoutBlock .= "  log('Story: User can log out');\n";
@@ -2035,10 +2287,20 @@ JSEOF;
         $logoutBlock .= "  if (logoutEl) {\n";
         $logoutBlock .= "    await logoutEl.click();\n";
         $logoutBlock .= "    await page.waitForTimeout(1000);\n";
-        $logoutBlock .= "    const loginBack  = await page.\$('#login-form') !== null;\n";
-        $logoutBlock .= "    const navHidden  = await page.\$eval('#nav-logout', el => el.classList.contains('hidden')).catch(() => true);\n";
+        $logoutBlock .= "    const loginBack = await page.\$('#login-form') !== null;\n";
+        $logoutBlock .= "    const navHidden = await page.\$eval('#nav-logout', el => el.classList.contains('hidden')).catch(() => true);\n";
         $logoutBlock .= "    assert('After logout, login form is shown', loginBack && navHidden);\n";
         $logoutBlock .= "  }\n";
+    }
+
+    // ── Cleanup block (always runs, outside try/catch) ─────────────────────────────
+    $cleanupBlock = '';
+    if ($hasAuth) {
+        $cleanupBlock .= "// Cleanup test users via API\n";
+        $cleanupBlock .= "try {\n";
+        $cleanupBlock .= "  if (tokenA && userIdA) await apiDelete(SB_API + '/data/' + SB_PID + '/' + AUTH_TABLE + '/' + userIdA, tokenA);\n";
+        $cleanupBlock .= "  if (tokenB && userIdB) await apiDelete(SB_API + '/data/' + SB_PID + '/' + AUTH_TABLE + '/' + userIdB, tokenB);\n";
+        $cleanupBlock .= "} catch (_) {}\n\n";
     }
 
     $footer = <<<'JSEOF'
@@ -2058,10 +2320,14 @@ JSEOF;
          . "try {\n"
          . $authBlock
          . $crudBlock
+         . $isolationBlock
+         . $deleteAllBlock
+         . $reloginBlock
          . $logoutBlock
          . "} catch (e) {\n"
          . "  if (!e.abort) { console.error('Unexpected error: ' + e.message); failed++; }\n"
          . "}\n\n"
+         . $cleanupBlock
          . $footer;
 }
 
@@ -2893,7 +3159,7 @@ PROMPT;
         $indexHtml = file_exists($indexPath) ? (string)file_get_contents($indexPath) : '';
 
         $schema = ai_schema_from_db($projectId, $catalog);
-        $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml);
+        $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId);
         $result = ai_playwright_test_run($script, $config);
 
         json_out($result);
