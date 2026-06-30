@@ -575,7 +575,8 @@ function ai_deploy_files(
     int $siteId,
     array $project,
     array $frontendFiles,
-    bool $mergeFromCurrent = false
+    bool $mergeFromCurrent = false,
+    bool $publishLive = true
 ): array {
     $sitesPath = rtrim($config['SITES_PATH'], '/');
     $label     = 'ai-generated-' . date('Y-m-d');
@@ -679,6 +680,12 @@ function ai_deploy_files(
     $catalog->updateDeploy($deployId, 'ready', $deployDir);
     $catalog->updateSiteStagingDeploy($siteId, $deployId);
 
+    // Staging-only: leave the deploy in staging/ with staging_deploy_id set so the
+    // user can preview and explicitly publish it to live later.
+    if (!$publishLive) {
+        return ['error' => null, 'deploy' => $catalog->getDeployById($deployId), 'published' => false, 'staged' => true];
+    }
+
     // Auto-publish to current/ so the site is live immediately.
     $currentDir = $sitesPath . '/s' . $siteId . '/current';
     if (is_dir($currentDir))  \SupaBein\Deploy::rrmdir($currentDir);
@@ -687,7 +694,7 @@ function ai_deploy_files(
     $catalog->updateSiteCurrentDeploy($siteId, $deployId);
     $catalog->updateSiteStagingDeploy($siteId, null);
 
-    return ['error' => null, 'deploy' => $catalog->getDeployById($deployId)];
+    return ['error' => null, 'deploy' => $catalog->getDeployById($deployId), 'published' => true];
 }
 
 function ai_sanitize_plan(array $plan): array
@@ -3263,6 +3270,95 @@ PROMPT;
         }
     }, ['auth_middleware']);
 
+    // ── AI Edit (streaming): generate an edit delta for an existing project,
+    //    emitting NDJSON progress events the same way the build stream does.
+    $router->post('/v1/ai/edit/stream', function (array $req): void {
+        set_time_limit(420);
+
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        header('Content-Type: application/x-ndjson; charset=utf-8');
+        header('Cache-Control: no-cache, no-transform');
+        header('X-Accel-Buffering: no');
+        ob_implicit_flush(true);
+
+        $emit = static function (array $event): void {
+            echo json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+            flush();
+        };
+
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+
+        $prompt    = trim($req['body']['prompt'] ?? '');
+        $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : 0;
+        if ($prompt === '' || strlen($prompt) > 2000) { $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'prompt is required and must be under 2000 characters']); return; }
+        if (!$projectId) { $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'project_id is required']); return; }
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) { $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'Project not found']); return; }
+
+        $history = [];
+        foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
+            if (!is_array($turn)) continue;
+            $role = $turn['role'] ?? '';
+            $text = trim($turn['text'] ?? '');
+            if (!in_array($role, ['user', 'model'], true) || $text === '') continue;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+
+        $gemini  = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
+        $aiTrace = [];
+
+        try {
+            $emit(['stage' => 'read', 'status' => 'start', 'label' => 'Reading current schema & files…']);
+            $existingSchema = ai_schema_from_db($projectId, $catalog);
+            $schemaCtx      = ai_schema_to_context($existingSchema);
+            $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+            $emit(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
+
+            $emit(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
+            $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
+            $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+            $_t0 = microtime(true);
+            try { $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage); }
+            catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'edit', 'message' => $e->getMessage()]); return; }
+            $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+
+            $deltaError = ai_validate_delta($delta, $existingSchema);
+            if ($deltaError) {
+                $emit(['stage' => 'changes', 'status' => 'retry', 'label' => 'Refining changes…', 'detail' => $deltaError]);
+                $retryMsg = $userMessage . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
+                $_t0 = microtime(true);
+                try { $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg); }
+                catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'edit_retry', 'message' => $e->getMessage()]); return; }
+                $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
+                $deltaError = ai_validate_delta($delta, $existingSchema);
+                if ($deltaError) { $emit(['stage' => 'error', 'at' => 'edit', 'message' => 'AI returned an invalid edit: ' . $deltaError]); return; }
+            }
+
+            if (!empty($delta['frontend']['files'])) {
+                foreach ($delta['frontend']['files'] as &$file) {
+                    $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+                }
+                unset($file);
+            }
+            $emit(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready', 'detail' => (count($delta['add_tables'] ?? []) + count($delta['add_columns'] ?? []) + count($delta['update_policies'] ?? [])) . ' schema change(s), ' . count($delta['frontend']['files'] ?? []) . ' file(s)']);
+
+            $summary = [
+                'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
+                'add_columns'     => array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? []) ?: [[]]),
+                'update_policies' => array_map(fn($p) => $p['table'] . ' ' . $p['api_role'] . ' ' . $p['operation'], $delta['update_policies'] ?? []),
+            ];
+            if (!empty($delta['frontend']['files'])) $summary['frontend_files'] = count($delta['frontend']['files']);
+
+            $editPlan = array_merge($delta, ['project_id' => $projectId]);
+            $emit(['stage' => 'complete', 'mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
+        } catch (\Throwable $e) {
+            $emit(['stage' => 'error', 'at' => 'unknown', 'message' => $e->getMessage()]);
+        }
+    }, ['auth_middleware']);
+
     // ── AI Apply: execute a previously generated plan ──────────────────────────
     $router->post('/v1/ai/apply', function (array $req): void {
         set_time_limit(420);
@@ -3296,11 +3392,23 @@ PROMPT;
                 $editConfig = \App::get('config');
                 $editSites  = $catalog->listSites($projectId);
                 if ($editSites) {
-                    $deployResult = ai_deploy_files($editConfig, $catalog, (int)$editSites[0]['id'],
+                    $editSiteId = (int)$editSites[0]['id'];
+                    // Edits deploy to STAGING (preview) — the user publishes to live explicitly.
+                    $deployResult = ai_deploy_files($editConfig, $catalog, $editSiteId,
                                                     $project, $plan['frontend']['files'],
-                                                    true);
+                                                    true, false);
                     if (!empty($deployResult['deploy'])) {
                         $result['deploy'] = $deployResult['deploy'];
+                        $apiBase = rtrim($editConfig['API_BASE_URL'] ?? '', '/');
+                        $appBase = preg_replace('#/(api|v\d+)(/.*)?$#i', '', $apiBase);
+                        $result['staging'] = [
+                            'project_id'  => $projectId,
+                            'site_id'     => $editSiteId,
+                            'deploy_id'   => (int)$deployResult['deploy']['id'],
+                            'staging_url' => $appBase . '/sites/s' . $editSiteId . '/staging/',
+                        ];
+                    } elseif (!empty($deployResult['error'])) {
+                        $result['deploy_error'] = $deployResult['error'];
                     }
                 }
             }
