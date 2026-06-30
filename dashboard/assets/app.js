@@ -1496,6 +1496,7 @@ const AiPanel = (() => {
       endpoint: '/v1/ai/build/stream',
       stages: BUILD_PROGRESS_STAGES,
       mode: 'build',
+      title: 'Building your app',
       onComplete: (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage }),
     });
   }
@@ -1505,6 +1506,7 @@ const AiPanel = (() => {
       endpoint: '/v1/ai/edit/stream',
       stages: EDIT_PROGRESS_STAGES,
       mode: 'edit',
+      title: 'Updating your app',
       // Auto-apply the edit straight to staging (no extra Deploy click), then the
       // result card offers View Staging + Publish to Live.
       onComplete: (ev) => applyPlan(ev.plan, 'edit', null),
@@ -1514,7 +1516,7 @@ const AiPanel = (() => {
   // Shared streaming driver for build and edit: shows a live progress card,
   // streams stage events, then hands the final plan to opts.onComplete.
   async function streamGenerate(body, sess, opts) {
-    const progressMsg = makeProgressMsg(opts.stages);
+    const progressMsg = makeProgressMsg(opts.stages, opts.title);
     sess.messages.push(progressMsg);
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
@@ -1554,7 +1556,10 @@ const AiPanel = (() => {
         return;
       }
       if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
-      progressMsg.data.error = e.message;
+      // Mark the in-flight stage failed (✗) but let the dedicated error card below
+      // carry the message + Retry, rather than duplicating the text in two places.
+      const active = progressMsg.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
       liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code }, ms: Date.now() - t0 });
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
     }
@@ -2413,13 +2418,14 @@ const AiPanel = (() => {
     { key: 'changes', label: 'Generating changes' },
   ];
 
-  function makeProgressMsg(stages) {
+  function makeProgressMsg(stages, title) {
     const list = stages || BUILD_PROGRESS_STAGES;
     return {
       id: 'progress_' + Date.now(),
       role: 'ai',
       type: 'progress',
       data: {
+        title: title || 'Building your app',
         stages: list.map((s, i) => ({ ...s, status: i === 0 ? 'active' : 'pending', detail: '' })),
         error: null,
       },
@@ -2469,7 +2475,7 @@ const AiPanel = (() => {
       return el('div', { class: 'ai-progress-row ai-progress-row--' + s.status }, icon, textWrap);
     });
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-progress-card' },
-      el('div', { class: 'ai-progress-title' }, 'Building your app'),
+      el('div', { class: 'ai-progress-title' }, data.title || 'Building your app'),
       ...rows
     );
     if (data.error) {
