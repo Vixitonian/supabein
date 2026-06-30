@@ -936,6 +936,7 @@ const AiPanel = (() => {
     diagnose: ['Analyzing the issue…', 'Checking schema & policies…', 'Preparing suggestions…', 'Almost done…'],
     chat:     ['Thinking…', 'Looking up your projects…', 'Formulating reply…'],
     intent:   ['Analyzing your idea…', 'Identifying actors…', 'Distilling user stories…'],
+    test:     ['Launching browser…', 'Running user-story tests…', 'Capturing results…', 'Still testing — this can take a minute…'],
     default:  ['Working on it…', 'Still going…', 'Almost done…'],
   };
 
@@ -1834,18 +1835,16 @@ const AiPanel = (() => {
   let testRunning = false;
   // Run the Playwright user-story tests for a project and append a result card.
   async function runProjectTests(projectId, btn) {
-    if (!projectId || testRunning || operationInProgress) return;
+    if (!projectId || testRunning) return;
     testRunning = true;
     if (btn) btn.disabled = true;
-    if (!currentSessionId || !getSession(currentSessionId)) {
-      const s = await createSession(projectId);
-      currentSessionId = s.id;
-    }
-    await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
-    renderMessages();
-    const thinkingId = 'test_thinking_' + Date.now();
     let sess = currentSession();
-    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
+    if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
+    await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
+    const thinkingId = 'test_thinking_' + Date.now();
+    sess = currentSession();
+    if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
+    sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
     renderMessages();
     try {
       const result = await Api.post('/v1/ai/test', { project_id: projectId });

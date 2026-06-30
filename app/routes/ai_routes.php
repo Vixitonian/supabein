@@ -196,6 +196,29 @@ The inline bootstrap contains ONLY:
   </script>
 
 core/router.js must NEVER call defineRoute() itself — it only exports the router API.
+core/router.js MUST be EXACTLY this file (copy verbatim — an empty initial hash MUST resolve
+to the home route '/', otherwise the very first page load shows a bogus "404 - Not Found"):
+
+  const router = (() => {
+    const routes = {};
+    const appDiv = document.getElementById('app');
+    const defineRoute = (path, handler) => { routes[path] = handler; };
+    const navigate = (path) => { window.location.hash = path; };
+    const onHashChange = async () => {
+      // Empty hash (first load, or "#") means the home route, never 404.
+      const path = window.location.hash.replace(/^#/, '') || '/';
+      const handler = routes[path] || routes['/404'] ||
+        (() => { appDiv.innerHTML = '<h1 class="text-2xl text-red-400 p-8">404 - Not Found</h1>'; });
+      if (!appDiv) return;
+      appDiv.innerHTML = '<p class="text-gray-400 animate-pulse text-center p-8">Loading...</p>';
+      try { await handler(); }
+      catch (error) {
+        appDiv.innerHTML = '<p class="text-red-400 text-center p-8">Error: ' + error.message + '</p>';
+        console.error('Routing error:', error);
+      }
+    };
+    return { defineRoute, navigate, onHashChange };
+  })();
 
 ═══════════════════════════════════════════════════════
 RULE 3 — AUTH INITIALISATION RACE
