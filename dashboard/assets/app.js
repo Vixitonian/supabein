@@ -1073,14 +1073,24 @@ const AiPanel = (() => {
 
   async function persistSession(sess) {
     if (!sess) return;
+    // Never store a session that has no messages yet — keeps empty "New session"
+    // entries out of the sidebar and the database.
+    if (sess._new && (!sess.messages || sess.messages.length === 0)) return;
     try {
       if (sess._new) {
+        const oldId = sess.id;
         const created = await Api.post('/v1/ai/sessions', {
           name: sess.name,
           project_id: sess.projectId || undefined,
         });
         sess.id = created.id;
         sess._new = false;
+        // The temp id was used as currentSessionId — point it at the real id now.
+        if (currentSessionId === oldId) { currentSessionId = sess.id; localStorage.setItem('sb:ai_sid', String(sess.id)); }
+        // The POST only created the row; push the messages we already have.
+        if (sess.messages.length) {
+          await Api.patch('/v1/ai/sessions/' + sess.id, { name: sess.name, messages: sess.messages });
+        }
       } else {
         await Api.patch('/v1/ai/sessions/' + sess.id, {
           name: sess.name,
@@ -1101,16 +1111,19 @@ const AiPanel = (() => {
     }
   }
 
-  async function createSession(projectId) {
+  let _tmpSessionSeq = 0;
+  function createSession(projectId) {
+    // Drop any earlier unsaved empty sessions so they don't pile up in the list.
+    sessions = sessions.filter(s => !(s._new && (!s.messages || s.messages.length === 0)));
     const sess = {
-      id: null, _new: true,
+      id: 'tmp_' + (++_tmpSessionSeq), _new: true,
       name: 'New session',
       projectId: projectId || null,
       messages: [],
       created_at: new Date().toISOString(),
     };
     sessions.unshift(sess);
-    await persistSession(sess);
+    // Not persisted yet — a session is only written once it has its first message.
     return sess;
   }
 
@@ -1492,7 +1505,9 @@ const AiPanel = (() => {
       endpoint: '/v1/ai/edit/stream',
       stages: EDIT_PROGRESS_STAGES,
       mode: 'edit',
-      onComplete: (ev) => addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: { mode: 'edit', plan: ev.plan, summary: ev.summary }, settled: false }),
+      // Auto-apply the edit straight to staging (no extra Deploy click), then the
+      // result card offers View Staging + Publish to Live.
+      onComplete: (ev) => applyPlan(ev.plan, 'edit', null),
     });
   }
 
@@ -1867,30 +1882,33 @@ const AiPanel = (() => {
     let sess = currentSession();
     if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
     await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
+    const sid = currentSessionId;               // pin the target session
     const thinkingId = 'test_thinking_' + Date.now();
-    sess = currentSession();
+    sess = getSession(sid);
     if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
     sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
     renderMessages();
     try {
       const result = await Api.post('/v1/ai/test', { project_id: projectId });
-      sess = currentSession();
-      if (sess) {
-        sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: result });
-        persistSession(sess);
+      const s = getSession(sid) || currentSession();
+      if (s) {
+        s.messages = s.messages.filter(m => m.id !== thinkingId);
+        s.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: result || { stories: [], passed: 0, failed: 0 } });
+        await persistSession(s);
       }
     } catch (err) {
-      sess = currentSession();
-      if (sess) {
-        sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        sess.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test', data: { stories: [], passed: 0, failed: 0, error: err.message } });
-        persistSession(sess);
+      const s = getSession(sid) || currentSession();
+      if (s) {
+        s.messages = s.messages.filter(m => m.id !== thinkingId);
+        s.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test', data: { stories: [], passed: 0, failed: 0, error: err.message } });
+        await persistSession(s);
       }
     } finally {
       testRunning = false;
       if (btn) btn.disabled = false;
       renderMessages();
+      const c = panelEl?.querySelector('.ai-messages');
+      if (c) c.scrollTop = c.scrollHeight;
     }
   }
 
@@ -2522,7 +2540,7 @@ const AiPanel = (() => {
   }
 
   async function loadSessionMessages(id) {
-    if (!id) return;
+    if (!id || String(id).startsWith('tmp_')) return; // unsaved local session
     try {
       const full = await Api.get('/v1/ai/sessions/' + id);
       if (full && Array.isArray(full.messages)) {

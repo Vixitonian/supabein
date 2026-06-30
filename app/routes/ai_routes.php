@@ -3165,6 +3165,15 @@ PROMPT;
         header('Cache-Control: no-cache, no-transform');
         header('X-Accel-Buffering: no'); // ask nginx/LiteSpeed not to buffer
         ob_implicit_flush(true);
+        // Defeat gzip/proxy buffering so events flush incrementally rather than
+        // arriving all at once at the end.
+        @ini_set('zlib.output_compression', '0');
+        @ini_set('output_buffering', '0');
+        if (function_exists('apache_setenv')) { @apache_setenv('no-gzip', '1'); }
+        // Prime the connection with padding (a non-JSON line the client skips) so
+        // buffering layers reach their threshold and start streaming immediately.
+        echo str_repeat(' ', 4096) . "\n";
+        flush();
 
         $emit = static function (array $event): void {
             echo json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
@@ -3280,6 +3289,15 @@ PROMPT;
         header('Cache-Control: no-cache, no-transform');
         header('X-Accel-Buffering: no');
         ob_implicit_flush(true);
+        // Defeat gzip/proxy buffering so events flush incrementally rather than
+        // arriving all at once at the end.
+        @ini_set('zlib.output_compression', '0');
+        @ini_set('output_buffering', '0');
+        if (function_exists('apache_setenv')) { @apache_setenv('no-gzip', '1'); }
+        // Prime the connection with padding (a non-JSON line the client skips) so
+        // buffering layers reach their threshold and start streaming immediately.
+        echo str_repeat(' ', 4096) . "\n";
+        flush();
 
         $emit = static function (array $event): void {
             echo json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";

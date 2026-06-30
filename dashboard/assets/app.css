@@ -1119,11 +1119,13 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-input-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   padding: 4px 8px 8px 10px;
   gap: 8px;
 }
 .ai-project-picker {
-  flex: 1;
+  flex: 1 1 120px;
+  min-width: 110px;
   max-width: 200px;
   background: transparent;
   border: 1px solid var(--border);
