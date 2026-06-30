@@ -1478,14 +1478,34 @@ const AiPanel = (() => {
   }
 
   // Streams the build (schema → design → frontend) and shows each step live.
-  async function proceedWithPlanStreaming(body, sess) {
-    const progressMsg = makeProgressMsg();
+  function proceedWithPlanStreaming(body, sess) {
+    return streamGenerate(body, sess, {
+      endpoint: '/v1/ai/build/stream',
+      stages: BUILD_PROGRESS_STAGES,
+      mode: 'build',
+      onComplete: (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage }),
+    });
+  }
+
+  function proceedWithEditStreaming(body, sess) {
+    return streamGenerate(body, sess, {
+      endpoint: '/v1/ai/edit/stream',
+      stages: EDIT_PROGRESS_STAGES,
+      mode: 'edit',
+      onComplete: (ev) => addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: { mode: 'edit', plan: ev.plan, summary: ev.summary }, settled: false }),
+    });
+  }
+
+  // Shared streaming driver for build and edit: shows a live progress card,
+  // streams stage events, then hands the final plan to opts.onComplete.
+  async function streamGenerate(body, sess, opts) {
+    const progressMsg = makeProgressMsg(opts.stages);
     sess.messages.push(progressMsg);
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
     sess.messages.push(liveTraceMsg);
     operationInProgress = true;
-    operationMode = 'build';
+    operationMode = opts.mode;
     currentAbortController = new AbortController();
     updateSendBtn();
     renderMessages();
@@ -1494,20 +1514,20 @@ const AiPanel = (() => {
     const t0 = Date.now();
     try {
       const finalEv = await Api.stream(
-        '/v1/ai/build/stream',
+        opts.endpoint,
         { ...body, provider, model },
         currentAbortController.signal,
         (ev) => { applyProgressEvent(progressMsg, ev); renderMessages(); }
       );
 
       if (!finalEv || finalEv.stage === 'error') {
-        const emsg = (finalEv && finalEv.message) || 'The build stream ended unexpectedly — please try again.';
-        liveTraceMsg.data.push({ call: 'POST /v1/ai/build/stream', inputs: body, status: 0, outputs: { error: emsg, at: finalEv?.at }, ms: Date.now() - t0 });
+        const emsg = (finalEv && finalEv.message) || 'The stream ended unexpectedly — please try again.';
+        liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: 0, outputs: { error: emsg, at: finalEv?.at }, ms: Date.now() - t0 });
         await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
       } else {
-        liveTraceMsg.data.push({ call: 'POST /v1/ai/build/stream', inputs: body, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
+        liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
         renderMessages();
-        await handlePlanResponse({ mode: finalEv.mode || 'build', plan: finalEv.plan, summary: finalEv.summary, usage: finalEv.usage });
+        await opts.onComplete(finalEv);
       }
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
@@ -1520,7 +1540,7 @@ const AiPanel = (() => {
       }
       if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
       progressMsg.data.error = e.message;
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/build/stream', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code }, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code }, ms: Date.now() - t0 });
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
     }
 
@@ -1537,6 +1557,12 @@ const AiPanel = (() => {
   async function proceedWithBuildDirect(body) {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
+
+    // Edits stream their generation live (like build) and deploy to staging.
+    if (body.project_id) {
+      return proceedWithEditStreaming(body, sess);
+    }
+
     const stageMode = body.project_id ? 'edit' : 'build';
     const thinkingId = 'direct_' + Date.now();
     sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
@@ -2170,6 +2196,7 @@ const AiPanel = (() => {
     if (data.added_tables && data.added_tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables added: ' + data.added_tables.join(', ')));
     if (data.added_columns && data.added_columns.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Columns: ' + data.added_columns.join(', ')));
     if (data.site) lines.push(el('div', { class: 'ai-result-row' }, '✓ Frontend deployed'));
+    if (data.staging) lines.push(el('div', { class: 'ai-result-row' }, '✓ Changes deployed to staging (preview)'));
 
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
 
@@ -2193,9 +2220,45 @@ const AiPanel = (() => {
       }, 'View Site →'));
     }
 
-    // Run Tests — exercise the app's user stories right after building.
-    const testProjectId = data.project?.id || selectedProjectId;
-    if (testProjectId && (data.site || data.project)) {
+    // Edit staged to preview — offer View Staging + Publish to Live.
+    if (data.staging && data.staging.deploy_id) {
+      actions.appendChild(el('a', {
+        class: 'btn btn-secondary btn-sm',
+        href: data.staging.staging_url,
+        target: '_blank',
+        rel: 'noopener'
+      }, 'View Staging →'));
+
+      const publishBtn = el('button', { class: 'btn btn-ai btn-sm' }, '🚀 Publish to Live');
+      publishBtn.addEventListener('click', async () => {
+        publishBtn.disabled = true;
+        const orig = publishBtn.textContent;
+        publishBtn.textContent = '⏳ Publishing…';
+        try {
+          const { project_id, site_id, deploy_id } = data.staging;
+          await Api.post(`/v1/projects/${project_id}/sites/${site_id}/deploys/${deploy_id}/publish`, {});
+          data.staging.published = true;
+          saveSessions();
+          publishBtn.replaceWith(el('a', {
+            class: 'btn btn-secondary btn-sm',
+            href: `/sites/s${site_id}/current/`, target: '_blank', rel: 'noopener'
+          }, '✓ Live — View Site →'));
+        } catch (err) {
+          publishBtn.disabled = false;
+          publishBtn.textContent = orig;
+          showToast('Publish failed: ' + (err.message || 'try again'));
+        }
+      });
+      if (data.staging.published) {
+        actions.appendChild(el('a', { class: 'btn btn-secondary btn-sm', href: `/sites/s${data.staging.site_id}/current/`, target: '_blank', rel: 'noopener' }, '✓ Live — View Site →'));
+      } else {
+        actions.appendChild(publishBtn);
+      }
+    }
+
+    // Run Tests — exercise the app's user stories right after building/editing.
+    const testProjectId = data.project?.id || data.staging?.project_id || selectedProjectId;
+    if (testProjectId && (data.site || data.project || data.staging)) {
       const runBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '▶ Run Tests');
       runBtn.addEventListener('click', () => runProjectTests(testProjectId, runBtn));
       actions.appendChild(runBtn);
@@ -2327,13 +2390,19 @@ const AiPanel = (() => {
     { key: 'frontend', label: 'Generating frontend code' },
   ];
 
-  function makeProgressMsg() {
+  const EDIT_PROGRESS_STAGES = [
+    { key: 'read',    label: 'Reading current schema & files' },
+    { key: 'changes', label: 'Generating changes' },
+  ];
+
+  function makeProgressMsg(stages) {
+    const list = stages || BUILD_PROGRESS_STAGES;
     return {
       id: 'progress_' + Date.now(),
       role: 'ai',
       type: 'progress',
       data: {
-        stages: BUILD_PROGRESS_STAGES.map((s, i) => ({ ...s, status: i === 0 ? 'active' : 'pending', detail: '' })),
+        stages: list.map((s, i) => ({ ...s, status: i === 0 ? 'active' : 'pending', detail: '' })),
         error: null,
       },
     };
@@ -2613,7 +2682,8 @@ const AiPanel = (() => {
       if (result.added_tables?.length)     lines.push(`Added ${result.added_tables.length} new table${result.added_tables.length !== 1 ? 's' : ''}: ${result.added_tables.join(', ')}.`);
       if (result.added_columns?.length)    lines.push(`Added ${result.added_columns.length} column${result.added_columns.length !== 1 ? 's' : ''}.`);
       if (result.updated_policies?.length) lines.push(`Updated ${result.updated_policies.length} polic${result.updated_policies.length !== 1 ? 'ies' : 'y'}.`);
-      if (result.deploy)                   lines.push('Frontend redeployed.');
+      if (result.staging)                  lines.push('Changes deployed to staging — preview, then publish to live.');
+      else if (result.deploy)              lines.push('Frontend redeployed.');
       if (!lines.length)                   lines.push('No changes were needed.');
     }
     return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
