@@ -232,18 +232,32 @@ Use the api client exclusively. core/api.js MUST be EXACTLY this file (copy verb
 do not change the signatures — this is what keeps every build consistent):
 
   const api = (() => {
+    const goLogin = () => {
+      localStorage.removeItem('sb:token');
+      if (!String(location.hash).toLowerCase().includes('login')) location.hash = '#/login';
+    };
     const authHeader = () => {
       const t = localStorage.getItem('sb:token');
-      return t ? { 'Authorization': 'Bearer ' + t } : {};
+      if (!t) return {};
+      // Drop our own expired token so we never send a dead one and hit "not found".
+      try {
+        const exp = JSON.parse(atob(t.split('.')[1])).exp;
+        if (exp && Date.now() / 1000 > exp) { goLogin(); return {}; }
+      } catch {}
+      return { 'Authorization': 'Bearer ' + t };
     };
     const base = (table) => `${SB_URL}/data/${SB_PID}/${table}`;
     // Tolerate either a bare array OR a wrapped envelope from the data API.
     const unwrap = (j) => Array.isArray(j) ? j : (j && (j.data ?? j.rows ?? j.records)) ?? j;
     const req = async (url, opts = {}) => {
+      const hadToken = !!localStorage.getItem('sb:token');
       const res = await fetch(url, {
         ...opts,
         headers: { 'Content-Type': 'application/json', ...authHeader(), ...(opts.headers || {}) }
       });
+      // A logged-in user being denied means their session is stale — re-login
+      // instead of showing a dead-end "not found / no permission".
+      if (res.status === 401 || (hadToken && res.status === 403)) { goLogin(); throw new Error('Your session expired — please log in again.'); }
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.status === 204 ? null : res.json();
     };
@@ -3281,6 +3295,26 @@ PROMPT;
         $userId  = (int)$req['auth']['user_id'];
         $catalog = \SupaBein\Catalog::getInstance();
         json_out($catalog->listAiSessions($userId));
+    }, ['auth_middleware']);
+
+    // Generate a short, descriptive title for a chat session from its first message.
+    // Best-effort: the client falls back to a truncated prompt if this fails.
+    $router->post('/v1/ai/session-title', function (array $req): void {
+        $prompt = trim($req['body']['prompt'] ?? '');
+        if ($prompt === '') abort(422, 'prompt is required');
+        $config = \App::get('config');
+        try {
+            $client = make_ai_client($config, null, null); // default fast model — keep it cheap
+            $sys = 'You title chat sessions. Given the user\'s first message, return ONLY JSON {"title": "..."} '
+                 . 'with a concise, specific 2-5 word Title Case label (max 40 chars, no trailing punctuation, no quotes).';
+            $res   = $client->generateJson($sys, mb_substr($prompt, 0, 500));
+            $title = is_array($res) ? trim((string)($res['title'] ?? '')) : '';
+            $title = trim($title, " \t\n\r\0\x0B\"'.");
+            if ($title === '') abort(502, 'empty title');
+            json_out(['title' => mb_substr($title, 0, 60)]);
+        } catch (\Throwable $e) {
+            abort(502, 'title generation unavailable');
+        }
     }, ['auth_middleware']);
 
     $router->post('/v1/ai/sessions', function (array $req): void {

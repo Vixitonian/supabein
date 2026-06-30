@@ -1118,9 +1118,35 @@ const AiPanel = (() => {
     if (!sess) return;
     sess.messages.push({ ...message, id: 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2) });
     if (sess.name === 'New session' && message.role === 'user') {
+      // Immediate fallback name, then upgrade to an AI-generated title in the background.
       sess.name = message.content.slice(0, 42) + (message.content.length > 42 ? '…' : '');
+      nameSessionWithAI(sess, message.content);
     }
     await persistSession(sess);
+  }
+
+  // Ensure a session name is unique among sibling sessions by appending (2), (3)…
+  function ensureUniqueSessionName(name, sess) {
+    const taken = sessions.filter(s => s !== sess).map(s => s.name);
+    if (!taken.includes(name)) return name;
+    let n = 2;
+    while (taken.includes(name + ' (' + n + ')')) n++;
+    return name + ' (' + n + ')';
+  }
+
+  // Ask the AI for a short, unique title for the session; keep the fallback on failure.
+  async function nameSessionWithAI(sess, prompt) {
+    if (!sess || sess._aiNamed) return;
+    sess._aiNamed = true;
+    try {
+      const res = await Api.post('/v1/ai/session-title', { prompt });
+      let name = (res && res.title || '').trim().slice(0, 60);
+      if (!name) return;
+      name = ensureUniqueSessionName(name, sess);
+      sess.name = name;
+      renderSidebar();
+      persistSession(sess);
+    } catch (_) { /* keep the truncated-prompt fallback */ }
   }
 
   function saveSessions() {
@@ -1261,6 +1287,24 @@ const AiPanel = (() => {
       });
     }
 
+    // Render an editable list of plain strings (journeys, requirements, NFRs):
+    // each item is click-to-edit with a remove button, plus an add input.
+    function buildEditableItems(container, arr, itemClass, placeholder) {
+      arr.forEach((val, i) => {
+        const span = el('span', { class: 'ai-req-item-text', style: 'flex:1;min-width:0;word-break:break-word' }, val);
+        makeInlineEdit(span, () => arr[i], v => { arr[i] = v; }, buildTree);
+        container.appendChild(el('div', { class: 'ai-req-item ' + itemClass, style: 'display:flex;align-items:flex-start;gap:6px' },
+          el('button', { class: 'ai-chip-remove ai-req-remove', title: 'Remove', onClick: () => { arr.splice(i, 1); buildTree(); } }, '×'),
+          span
+        ));
+      });
+      const inp = el('input', { class: 'ai-intent-add-input', placeholder: placeholder || '+ add…', type: 'text' });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { const v = inp.value.trim(); if (v) { arr.push(v); buildTree(); } }
+      });
+      container.appendChild(el('div', { class: 'ai-story-add-row' }, inp));
+    }
+
     function buildTree() {
       treeWrap.innerHTML = '';
       actors.forEach((actor, ai) => {
@@ -1295,17 +1339,16 @@ const AiPanel = (() => {
 
           const body = el('div', { class: 'ai-req-story-body', style: isLast ? '' : 'border-left:1px solid var(--border)' });
 
-          // Journeys
-          if (story.journeys && story.journeys.length) {
-            body.appendChild(el('div', { class: 'ai-req-section-label' }, 'Journeys'));
-            story.journeys.forEach(j => body.appendChild(el('div', { class: 'ai-req-item ai-req-journey' }, j)));
-          }
+          story.journeys = story.journeys || [];
+          story.requirements = story.requirements || [];
 
-          // Functional requirements
-          if (story.requirements && story.requirements.length) {
-            body.appendChild(el('div', { class: 'ai-req-section-label' }, 'Requirements'));
-            story.requirements.forEach(r => body.appendChild(el('div', { class: 'ai-req-item' }, r)));
-          }
+          // Journeys (editable)
+          body.appendChild(el('div', { class: 'ai-req-section-label' }, 'Journeys'));
+          buildEditableItems(body, story.journeys, 'ai-req-journey', '+ add journey…');
+
+          // Functional requirements (editable)
+          body.appendChild(el('div', { class: 'ai-req-section-label' }, 'Requirements'));
+          buildEditableItems(body, story.requirements, 'ai-req-req', '+ add requirement…');
 
           storyDet.appendChild(body);
           storiesWrap.appendChild(storyDet);
@@ -1335,14 +1378,12 @@ const AiPanel = (() => {
       });
       treeWrap.appendChild(el('div', { style: 'margin-top:6px' }, addActorInp));
 
-      // Non-functional requirements
-      if (nfrs.length) {
-        treeWrap.appendChild(el('div', { class: 'ai-intent-divider' }));
-        treeWrap.appendChild(el('div', { class: 'ai-req-nfr-header' }, 'Non-Functional Requirements'));
-        const nfrList = el('div', { class: 'ai-req-nfr-list' });
-        nfrs.forEach(r => nfrList.appendChild(el('div', { class: 'ai-req-item ai-req-nfr-item' }, r)));
-        treeWrap.appendChild(nfrList);
-      }
+      // Non-functional requirements (editable)
+      treeWrap.appendChild(el('div', { class: 'ai-intent-divider' }));
+      treeWrap.appendChild(el('div', { class: 'ai-req-nfr-header' }, 'Non-Functional Requirements'));
+      const nfrList = el('div', { class: 'ai-req-nfr-list' });
+      buildEditableItems(nfrList, nfrs, 'ai-req-nfr-item', '+ add non-functional requirement…');
+      treeWrap.appendChild(nfrList);
     }
 
     buildTree();
@@ -1557,35 +1598,64 @@ const AiPanel = (() => {
   }
 
   function renderIntentSummaryCard(msg) {
-    // Handle both the legacy flat format ({actors:string[], stories:string[]})
-    // and the nested product-requirements format ({actors:[{name, stories:[{title}]}]}).
+    // Read-only collapsible view of the confirmed product requirements.
+    // Handles both the legacy flat format and the nested format.
     const intent = normalizeIntent(msg.data || {});
-    const actorNames = (intent.actors || [])
-      .map(a => (typeof a === 'string' ? a : (a && a.name) || ''))
-      .filter(Boolean);
-    const stories = [];
-    (intent.actors || []).forEach(a => {
-      const ss = (a && Array.isArray(a.stories)) ? a.stories : [];
-      ss.forEach(s => stories.push(typeof s === 'string' ? s : (s && s.title) || ''));
-    });
-    const cleanStories = stories.filter(Boolean);
+    const actors = (intent.actors || []).map(a => (typeof a === 'string' ? { name: a, stories: [] } : a));
+    const nfrs = (intent.non_functional_requirements || []).filter(Boolean);
 
-    const parts = [];
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-intent-summary' },
+      el('div', { class: 'ai-intent-summary-header' }, '✓ Intent confirmed')
+    );
+
+    // Actors row (always visible)
+    const actorNames = actors.map(a => a.name).filter(Boolean);
     if (actorNames.length) {
-      parts.push(el('div', { class: 'ai-intent-summary-actors' },
+      card.appendChild(el('div', { class: 'ai-intent-summary-actors', style: 'margin-bottom:6px' },
         el('span', { class: 'ai-intent-section-label', style: 'margin-right:6px' }, 'Actors:'),
         ...actorNames.map(a => el('span', { class: 'ai-actor-chip' }, a))
       ));
     }
-    if (cleanStories.length) {
-      parts.push(el('div', { class: 'ai-intent-summary-stories' },
-        ...cleanStories.map(s => el('div', { class: 'ai-intent-summary-story' }, '• ' + s))
-      ));
+
+    const itemList = (label, arr) => {
+      if (!arr || !arr.length) return null;
+      return el('div', { style: 'margin:4px 0 4px 10px' },
+        el('div', { class: 'ai-req-section-label' }, label),
+        ...arr.filter(Boolean).map(x => el('div', { class: 'ai-req-item' }, '• ' + (typeof x === 'string' ? x : '')))
+      );
+    };
+
+    // Per-story collapsible sections with journeys + requirements
+    actors.forEach(a => {
+      (a.stories || []).forEach(story => {
+        const title = typeof story === 'string' ? story : (story.title || '');
+        if (!title) return;
+        const journeys = (story && story.journeys) || [];
+        const reqs = (story && story.requirements) || [];
+        const det = el('details', { class: 'ai-intent-summary-section' });
+        det.appendChild(el('summary', { class: 'ai-intent-summary-story' }, '• ' + title));
+        const body = el('div', { style: 'padding:4px 0 6px 6px' });
+        const j = itemList('Journeys', journeys);
+        const r = itemList('Requirements', reqs);
+        if (j) body.appendChild(j);
+        if (r) body.appendChild(r);
+        if (!j && !r) body.appendChild(el('div', { class: 'ai-req-item', style: 'color:var(--muted)' }, 'No further detail'));
+        det.appendChild(body);
+        card.appendChild(det);
+      });
+    });
+
+    // Non-functional requirements (collapsible)
+    if (nfrs.length) {
+      const det = el('details', { class: 'ai-intent-summary-section' });
+      det.appendChild(el('summary', { class: 'ai-req-nfr-header', style: 'cursor:pointer' }, 'Non-Functional Requirements'));
+      const body = el('div', { style: 'padding:4px 0 6px 6px' });
+      nfrs.forEach(r => body.appendChild(el('div', { class: 'ai-req-item' }, '• ' + r)));
+      det.appendChild(body);
+      card.appendChild(det);
     }
-    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-summary' },
-      el('div', { class: 'ai-intent-summary-header' }, '✓ Intent confirmed'),
-      ...parts
-    );
+
+    return card;
   }
 
   function renderRecoveryCard(msg) {
@@ -1761,6 +1831,44 @@ const AiPanel = (() => {
     );
   }
 
+  let testRunning = false;
+  // Run the Playwright user-story tests for a project and append a result card.
+  async function runProjectTests(projectId, btn) {
+    if (!projectId || testRunning || operationInProgress) return;
+    testRunning = true;
+    if (btn) btn.disabled = true;
+    if (!currentSessionId || !getSession(currentSessionId)) {
+      const s = await createSession(projectId);
+      currentSessionId = s.id;
+    }
+    await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
+    renderMessages();
+    const thinkingId = 'test_thinking_' + Date.now();
+    let sess = currentSession();
+    if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
+    renderMessages();
+    try {
+      const result = await Api.post('/v1/ai/test', { project_id: projectId });
+      sess = currentSession();
+      if (sess) {
+        sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: result });
+        persistSession(sess);
+      }
+    } catch (err) {
+      sess = currentSession();
+      if (sess) {
+        sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+        sess.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test', data: { stories: [], passed: 0, failed: 0, error: err.message } });
+        persistSession(sess);
+      }
+    } finally {
+      testRunning = false;
+      if (btn) btn.disabled = false;
+      renderMessages();
+    }
+  }
+
   function renderTestCard(msg) {
     const { stories = [], passed = 0, failed = 0, error, screenshot } = msg.data || {};
     const total = passed + failed;
@@ -1803,11 +1911,16 @@ const AiPanel = (() => {
     }
 
     if (screenshot) {
-      const det = el('details', { style: 'border-top:1px solid var(--border);padding:10px 14px' });
+      const det = el('details', { style: 'border-top:1px solid var(--border);padding:10px 14px;min-width:0' });
       det.appendChild(el('summary', { style: 'font-size:0.8rem;cursor:pointer;color:var(--text-muted)' }, 'Screenshot'));
-      const img = el('img', { style: 'margin-top:8px;width:100%;border-radius:4px;border:1px solid var(--border)' });
-      img.src = 'data:image/png;base64,' + screenshot;
+      const src = 'data:image/png;base64,' + screenshot;
+      const img = el('img', { title: 'Tap to open full size',
+        style: 'display:block;margin-top:8px;width:100%;max-width:100%;height:auto;border-radius:4px;border:1px solid var(--border);cursor:zoom-in' });
+      img.src = src;
+      // Open the full-resolution capture in a new tab so nothing is lost to scaling.
+      img.addEventListener('click', () => { const w = window.open(); if (w) w.document.write('<img src="' + src + '" style="max-width:100%">'); });
       det.appendChild(img);
+      det.appendChild(el('div', { style: 'margin-top:4px;font-size:0.7rem;color:var(--text-muted)' }, 'Tap image to open full size'));
       card.appendChild(det);
     }
 
@@ -2079,6 +2192,14 @@ const AiPanel = (() => {
         target: '_blank',
         rel: 'noopener'
       }, 'View Site →'));
+    }
+
+    // Run Tests — exercise the app's user stories right after building.
+    const testProjectId = data.project?.id || selectedProjectId;
+    if (testProjectId && (data.site || data.project)) {
+      const runBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '▶ Run Tests');
+      runBtn.addEventListener('click', () => runProjectTests(testProjectId, runBtn));
+      actions.appendChild(runBtn);
     }
 
     if (actions.children.length) card.appendChild(actions);
@@ -2583,46 +2704,7 @@ const AiPanel = (() => {
     const runTestsBtn = el('button', {
       class: 'btn btn-secondary btn-sm ai-run-tests-btn',
       style: selectedProjectId ? '' : 'display:none',
-      onClick: async () => {
-        if (!selectedProjectId) return;
-        if (operationInProgress) return;
-
-        if (!currentSessionId || !getSession(currentSessionId)) {
-          const sess = await createSession(selectedProjectId);
-          currentSessionId = sess.id;
-        }
-
-        // User message
-        await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
-        renderMessages();
-
-        // AI thinking
-        const thinkingId = 'test_thinking_' + Date.now();
-        const sess = currentSession();
-        if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
-        renderMessages();
-
-        runTestsBtn.disabled = true;
-        try {
-          const result = await Api.post('/v1/ai/test', { project_id: selectedProjectId });
-          const s = currentSession();
-          if (s) {
-            s.messages = s.messages.filter(m => m.id !== thinkingId);
-            s.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: result });
-            persistSession(s);
-          }
-        } catch (err) {
-          const s = currentSession();
-          if (s) {
-            s.messages = s.messages.filter(m => m.id !== thinkingId);
-            s.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test', data: { stories: [], passed: 0, failed: 0, error: err.message } });
-            persistSession(s);
-          }
-        } finally {
-          runTestsBtn.disabled = false;
-          renderMessages();
-        }
-      }
+      onClick: () => runProjectTests(selectedProjectId, runTestsBtn)
     }, '▶ Run Tests');
 
     const textarea = el('textarea', {

@@ -68,13 +68,16 @@ function register_data_routes(\SupaBein\Router $router): void
 
         $config  = \App::get('config');
         $now     = time();
+        // End-user app sessions should last for days, not the 1-hour platform TTL —
+        // otherwise owner-scoped reads start failing mid-use once the token expires.
+        $projectUserTtl = (int)($config['PROJECT_USER_JWT_TTL'] ?? 2592000); // 30 days
         $payload = [
             'sub'   => (int)$row['id'],
             'pid'   => $projectId,
             'table' => $tableName,
             'type'  => 'project_user',
             'iat'   => $now,
-            'exp'   => $now + (int)($config['JWT_TTL'] ?? 3600),
+            'exp'   => $now + $projectUserTtl,
         ];
         $token = JWT::encode($payload, $config['JWT_SECRET'], $config['JWT_ALGO']);
 
