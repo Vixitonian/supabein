@@ -1385,7 +1385,12 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-intent-summary-header { font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
 .ai-intent-summary-actors { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
 .ai-intent-summary-stories { display: flex; flex-direction: column; gap: 2px; }
-.ai-intent-summary-story { font-size: 12px; color: var(--muted); }
+.ai-intent-summary-story { font-size: 12px; color: var(--muted); cursor: pointer; }
+.ai-intent-summary-section { margin: 2px 0; }
+.ai-intent-summary-section > summary { list-style: none; }
+.ai-intent-summary-section > summary::-webkit-details-marker { display: none; }
+.ai-intent-summary-section[open] > summary .ai-intent-summary-story,
+.ai-intent-summary-section > summary:hover { color: var(--text); }
 
 /* ─── Edit review card ───────────────────────────────────────────────────── */
 .ai-edit-review-card { padding: 14px 16px; }
