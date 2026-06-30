@@ -73,6 +73,30 @@ class Crud
         }, $rows);
     }
 
+    /**
+     * PDO returns every column as a string on most hosts, so numeric/boolean
+     * columns (e.g. user_id, prices, flags) serialize as "1" instead of 1. That
+     * breaks strict === / !== comparisons in generated frontends. Cast each
+     * column to its real JSON type based on its declared data_type.
+     */
+    private static function castScalarCols(array $rows, array $colTypes): array
+    {
+        $intCols = $boolCols = $floatCols = [];
+        foreach ($colTypes as $col => $type) {
+            $t = strtoupper((string)$type);
+            if ($t === 'BOOLEAN' || $t === 'TINYINT(1)')                     $boolCols[]  = $col;
+            elseif (preg_match('/^(INT|BIGINT|SMALLINT|TINYINT|MEDIUMINT)\b/', $t)) $intCols[]   = $col;
+            elseif (preg_match('/^(DECIMAL|NUMERIC|FLOAT|DOUBLE)\b/', $t))    $floatCols[] = $col;
+        }
+        if (!$intCols && !$boolCols && !$floatCols) return $rows;
+        return array_map(function ($r) use ($intCols, $boolCols, $floatCols) {
+            foreach ($intCols as $c)   { if (isset($r[$c]) && $r[$c] !== null) $r[$c] = (int)$r[$c]; }
+            foreach ($boolCols as $c)  { if (isset($r[$c]) && $r[$c] !== null) $r[$c] = (bool)(int)$r[$c]; }
+            foreach ($floatCols as $c) { if (isset($r[$c]) && $r[$c] !== null) $r[$c] = (float)$r[$c]; }
+            return $r;
+        }, $rows);
+    }
+
     // ─── SELECT (list) ───────────────────────────────────────────────────────
 
     public static function handleList(array $req): void
@@ -106,6 +130,7 @@ class Crud
         $rows = array_map(fn($r) => isset($r['id']) ? array_merge($r, ['id' => (int)$r['id']]) : $r, $rows);
         $rows = self::maskPasswordCols($rows, $colTypes);
         $rows = self::decodeJsonCols($rows, $colTypes);
+        $rows = self::castScalarCols($rows, $colTypes);
 
         json_out(['data' => $rows, 'count' => count($rows), 'limit' => $limit, 'offset' => $offset]);
     }
@@ -139,6 +164,7 @@ class Crud
         if (isset($row['id'])) $row['id'] = (int)$row['id'];
         [$row] = self::maskPasswordCols([$row], $colTypes);
         [$row] = self::decodeJsonCols([$row], $colTypes);
+        [$row] = self::castScalarCols([$row], $colTypes);
         json_out($row);
     }
 
@@ -202,6 +228,7 @@ class Crud
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
         if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
         if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
+        if ($row) [$row] = self::castScalarCols([$row], $colTypes);
         json_out($row, 201);
     }
 
@@ -299,6 +326,7 @@ class Crud
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
         if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
         if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
+        if ($row) [$row] = self::castScalarCols([$row], $colTypes);
         json_out($row);
     }
 
