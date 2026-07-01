@@ -28,32 +28,11 @@ const Router = (() => {
     window.location.hash = hash;
   }
 
-  function currentPath() {
-    return (window.location.hash.replace(/^#\/?/, '') || '');
-  }
-
   function init() {
-    // Tag every entry we land on so we can tell "back within the app" apart
-    // from "back past the app boundary" (e.g. arriving via a deep link, or
-    // reload) in the popstate handler below.
-    let lastPath = currentPath();
-    history.replaceState({ sbApp: true }, '', window.location.href);
-
-    window.addEventListener('hashchange', () => {
-      history.replaceState({ sbApp: true }, '', window.location.href);
-      lastPath = currentPath();
-      dispatch(window.location.hash);
-    });
-
-    window.addEventListener('popstate', (e) => {
-      if (e.state && e.state.sbApp) return; // normal back/forward within the app
-      const wasHome = lastPath === '' || lastPath === 'home';
-      if (wasHome) return; // already at the root — let it exit naturally
-      history.pushState({ sbApp: true }, '', '#/home');
-      lastPath = 'home';
-      dispatch('#/home');
-    });
-
+    // Note: an empty hash already routes to Home (see the '' route), so
+    // going back past the app's first in-app entry lands on Home for free —
+    // no extra history bookkeeping needed here.
+    window.addEventListener('hashchange', () => dispatch(window.location.hash));
     dispatch(window.location.hash);
   }
 

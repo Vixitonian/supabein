@@ -780,31 +780,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .pat-name { font-size: 0.85rem; font-weight: 500; }
 .pat-meta { font-size: 0.75rem; flex: 1; }
 
-/* ─── AI FAB (replaced by topbar button) ─────────────────────────────────── */
-.ai-fab {
-  display: none !important;
-  position: fixed;
-  bottom: 28px;
-  right: 28px;
-  z-index: 1000;
-  background: linear-gradient(135deg, #3ecf8e, #2a8f62);
-  color: #0f1117;
-  border: none;
-  border-radius: 28px;
-  padding: 13px 22px;
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: 0 4px 20px rgba(62,207,142,0.35);
-  transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  letter-spacing: 0.01em;
-}
-.ai-fab:hover { transform: translateY(-2px); box-shadow: 0 6px 28px rgba(62,207,142,0.45); }
-.ai-fab-hidden { opacity: 0; pointer-events: none; transform: translateY(8px); }
-
 /* ─── AI Panel ───────────────────────────────────────────────────────────── */
 .ai-panel {
   position: fixed;
@@ -1549,8 +1524,6 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-sidebar-overlay.ai-sidebar-overlay-visible { display: block; }
 
 @media (max-width: 767px) {
-  .ai-fab { bottom: 20px; right: 16px; padding: 11px 18px; }
-
   .ai-panel-backdrop {
     display: none;
     position: fixed;
@@ -1834,24 +1807,6 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
   font-family: monospace;
 }
 .ai-trace-prompt { white-space: pre-wrap; word-break: break-word; }
-
-/* FAB badge — green dot when session has activity */
-.ai-fab { position: relative; }
-.ai-fab-active::after {
-  content: '';
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 8px;
-  height: 8px;
-  background: #22c55e;
-  border-radius: 50%;
-  animation: fab-badge-pulse 2s ease-in-out infinite;
-}
-@keyframes fab-badge-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50%       { opacity: 0.5; transform: scale(0.75); }
-}
 
 /* Mode toggle button (Chat / Build) */
 .ai-mode-btn {
