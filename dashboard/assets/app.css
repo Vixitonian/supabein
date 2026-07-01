@@ -1826,9 +1826,6 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
 }
 .ai-mode-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Deploy confirm card */
-.ai-deploy-confirm-card { border: 1px solid var(--border); }
-
 /* Error retry/dismiss actions */
 .ai-error-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .ai-error-checkpoint { font-size: 12px; color: var(--accent); margin-top: 6px; }

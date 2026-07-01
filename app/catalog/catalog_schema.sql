@@ -124,9 +124,11 @@ CREATE TABLE IF NOT EXISTS `ai_sessions` (
 CREATE TABLE IF NOT EXISTS `ai_jobs` (
     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `user_id`    INT UNSIGNED NOT NULL,
+    `session_id` INT UNSIGNED DEFAULT NULL,
     `mode`       ENUM('build','edit') NOT NULL,
     `payload`    LONGTEXT NOT NULL,
-    `status`     ENUM('queued','running','done','failed') NOT NULL DEFAULT 'queued',
+    `progress`   LONGTEXT DEFAULT NULL,
+    `status`     ENUM('queued','running','done','failed','cancelled') NOT NULL DEFAULT 'queued',
     `result`     LONGTEXT DEFAULT NULL,
     `error`      TEXT DEFAULT NULL,
     `pid`        INT UNSIGNED DEFAULT NULL,
@@ -134,7 +136,8 @@ CREATE TABLE IF NOT EXISTS `ai_jobs` (
     `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
     KEY `idx_user_status` (`user_id`, `status`),
-    KEY `idx_status_created` (`status`, `created_at`)
+    KEY `idx_status_created` (`status`, `created_at`),
+    KEY `idx_session` (`session_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `user_reset_tokens` (
@@ -236,3 +239,12 @@ SET foreign_key_checks = 1;
 --     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
 --     UNIQUE KEY `uq_token_hash` (`token_hash`)
 -- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ─── Migration: ai_jobs resumable-progress columns (run once on existing installs) ──
+-- Links a job back to the AI session that created it, and stores the same stage
+-- events the old NDJSON stream emitted so a polling client can replay them.
+-- ALTER TABLE `ai_jobs`
+--   ADD COLUMN `session_id` INT UNSIGNED DEFAULT NULL AFTER `user_id`,
+--   ADD COLUMN `progress`   LONGTEXT DEFAULT NULL AFTER `payload`,
+--   MODIFY COLUMN `status`  ENUM('queued','running','done','failed','cancelled') NOT NULL DEFAULT 'queued',
+--   ADD KEY `idx_session` (`session_id`);
