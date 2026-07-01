@@ -3568,8 +3568,16 @@ PROMPT;
         if (!$sites) abort(422, 'No deployed site found — build the project first');
 
         $site = $sites[0];
-        if (!($site['current_deploy_id'] ?? null)) {
-            abort(422, 'No live deploy yet — publish the site from the Deploy tab first');
+        // Test whatever was deployed most recently: edits land in staging (by
+        // design — you review before publishing), so requiring a live deploy
+        // meant "Run Tests" right after an edit always failed even though the
+        // just-edited app was sitting right there in staging.
+        if ($site['staging_deploy_id'] ?? null) {
+            $target = 'staging';
+        } elseif ($site['current_deploy_id'] ?? null) {
+            $target = 'current';
+        } else {
+            abort(422, 'No deploy found — build or edit the project first');
         }
 
         $browserlessToken = $config['BROWSERLESS_TOKEN'] ?? '';
@@ -3577,8 +3585,8 @@ PROMPT;
 
         $siteId    = (int)$site['id'];
         $sitesPath = rtrim($config['SITES_PATH'], '/');
-        $appUrl    = rtrim($config['API_BASE_URL'], '/') . "/sites/s{$siteId}/current/";
-        $indexPath = "{$sitesPath}/s{$siteId}/current/index.html";
+        $appUrl    = rtrim($config['API_BASE_URL'], '/') . "/sites/s{$siteId}/{$target}/";
+        $indexPath = "{$sitesPath}/s{$siteId}/{$target}/index.html";
         $indexHtml = file_exists($indexPath) ? (string)file_get_contents($indexPath) : '';
 
         $schema = ai_schema_from_db($projectId, $catalog);
