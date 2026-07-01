@@ -91,45 +91,6 @@ const Api = (() => {
     }
   }
 
-  // Stream a POST response as newline-delimited JSON, invoking onEvent(obj) for
-  // each parsed line as it arrives. Returns the last event received. Falls back
-  // to one big chunk if the server/host buffers — the final event still arrives.
-  async function stream(path, data, signal, onEvent) {
-    const headers = { 'Content-Type': 'application/json' };
-    const token = Auth.getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-
-    const res = await fetch(BASE + path, { method: 'POST', headers, body: JSON.stringify(data), signal });
-
-    if (res.status === 401) { Auth.clear(); Router.navigate('/login'); throw new ApiError('Session expired — please log in again', 401, {}); }
-    const refreshed = res.headers.get('X-Refresh-Token');
-    if (refreshed) Auth.setToken(refreshed);
-    if (!res.ok || !res.body) {
-      const json = await res.json().catch(() => ({}));
-      throw new ApiError(json.error || 'Request failed', res.status, json);
-    }
-
-    const reader  = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '', last = null;
-    const handle = (line) => {
-      const s = line.trim();
-      if (!s) return;
-      let ev; try { ev = JSON.parse(s); } catch { return; }
-      last = ev;
-      onEvent(ev);
-    };
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf('\n')) >= 0) { handle(buf.slice(0, nl)); buf = buf.slice(nl + 1); }
-    }
-    handle(buf);
-    return last;
-  }
-
   return {
     BASE,
     get:    (path)       => request('GET',    path),
@@ -138,7 +99,6 @@ const Api = (() => {
     put:    (path, data) => request('PUT',    path, data),
     delete: (path)       => request('DELETE', path),
     upload: (path, formData) => request('POST', path, formData, true),
-    stream,
     ApiError,
   };
 })();
@@ -879,6 +839,7 @@ const AiPanel = (() => {
   let operationInProgress = false;
   let operationMode = null;
   let currentAbortController = null;
+  let activeJobPoll = null; // { cancelled: bool } while a build/edit job is being polled
   let sendBtnEl = null;
 
   const AI_MODELS = [
@@ -1020,13 +981,21 @@ const AiPanel = (() => {
       currentAbortController.abort();
       currentAbortController = null;
     }
+    const sess = currentSession();
+    if (activeJobPoll) {
+      activeJobPoll.cancelled = true;
+      activeJobPoll = null;
+      // Tell the server to actually kill the worker process too — matches the
+      // old behavior where aborting the stream fetch also killed the PHP side.
+      const jobMsg = sess && sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
+      if (jobMsg) Api.post(`/v1/ai/jobs/${jobMsg.data.jobId}/cancel`, {}).catch(() => {});
+    }
     // Reset the UI immediately so the stop button responds even if the
     // in-flight request takes a moment to unwind (or the backend keeps going).
     stopThinkingStages?.();
     operationInProgress = false;
     operationMode = null;
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-    const sess = currentSession();
     if (sess) sess.messages = sess.messages.filter(m => m.type !== 'thinking');
     updateSendBtn();
     renderMessages();
@@ -1492,10 +1461,11 @@ const AiPanel = (() => {
     renderMessages();
   }
 
-  // Streams the build (schema → design → frontend) and shows each step live.
+  // Runs the build (schema → design → frontend) as a server-side job and
+  // shows each step live via polling.
   function proceedWithPlanStreaming(body, sess) {
     return streamGenerate(body, sess, {
-      endpoint: '/v1/ai/build/stream',
+      jobEndpoint: '/v1/ai/build/job',
       stages: BUILD_PROGRESS_STAGES,
       mode: 'build',
       title: 'Building your app',
@@ -1505,7 +1475,7 @@ const AiPanel = (() => {
 
   function proceedWithEditStreaming(body, sess) {
     return streamGenerate(body, sess, {
-      endpoint: '/v1/ai/edit/stream',
+      jobEndpoint: '/v1/ai/edit/job',
       stages: EDIT_PROGRESS_STAGES,
       mode: 'edit',
       title: 'Updating your app',
@@ -1515,127 +1485,164 @@ const AiPanel = (() => {
     });
   }
 
-  // Shared streaming driver for build and edit: shows a live progress card,
-  // streams stage events, then hands the final plan to opts.onComplete.
+  // Poll a job's progress until it resolves, replaying new stage events onto
+  // the live progress card exactly like the old NDJSON stream did. Runs as a
+  // server-side job (see ai_worker.php) independent of this page's lifetime —
+  // reloading and reopening the panel just calls this again with the same
+  // jobId (see resumeActiveJob below), picking up wherever it left off.
+  async function pollJob(jobId, progressMsg, pollState) {
+    let since = 0;
+    while (!pollState.cancelled) {
+      await new Promise(r => setTimeout(r, 2000));
+      if (pollState.cancelled) return null;
+
+      let job;
+      try {
+        job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
+      } catch (e) {
+        if (e.status === 401 || e.status === 404) return null;
+        continue; // transient network hiccup — keep polling
+      }
+
+      (job.events || []).forEach(ev => applyProgressEvent(progressMsg, ev));
+      since = job.event_count;
+      renderMessages();
+
+      if (job.status === 'done') {
+        progressMsg.data.jobDone = true;
+        return { stage: 'complete', ...job.result };
+      }
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        progressMsg.data.jobDone = true;
+        const active = progressMsg.data.stages.find(s => s.status === 'active');
+        if (active) active.status = 'error';
+        progressMsg.data.error = job.error || (job.status === 'cancelled' ? 'Stopped' : 'The job failed — please try again.');
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // Shared driver for build and edit: creates a server-side job, shows a live
+  // progress card, polls until the job resolves, then hands the final plan to
+  // opts.onComplete.
   async function streamGenerate(body, sess, opts) {
-    const progressMsg = makeProgressMsg(opts.stages, opts.title);
+    const progressMsg = makeProgressMsg(opts.stages, opts.title, opts.mode);
     sess.messages.push(progressMsg);
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
     sess.messages.push(liveTraceMsg);
     operationInProgress = true;
     operationMode = opts.mode;
-    currentAbortController = new AbortController();
     updateSendBtn();
     renderMessages();
 
     const { provider, model } = getSelectedModel();
     const t0 = Date.now();
-    try {
-      const finalEv = await Api.stream(
-        opts.endpoint,
-        { ...body, provider, model },
-        currentAbortController.signal,
-        (ev) => { applyProgressEvent(progressMsg, ev); renderMessages(); }
-      );
 
-      if (!finalEv || finalEv.stage !== 'complete') {
-        // Anything other than an explicit 'complete' event means the stream
-        // ended early — a mid-stream error, or the connection got cut before
-        // the final event (proxy/timeout). Either way there's no usable plan,
-        // so mark the card failed instead of leaving it stuck mid-spin.
-        const emsg = (finalEv && finalEv.message) || 'The stream ended unexpectedly — please try again.';
-        // Mark the in-flight stage failed (✗) but let the dedicated error card below
-        // carry the message + Retry, rather than duplicating the text in two places.
-        const active = progressMsg.data.stages.find(s => s.status === 'active');
-        if (active) active.status = 'error';
-        liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: 0, outputs: { error: emsg, at: finalEv?.at }, ms: Date.now() - t0 });
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
-      } else {
-        liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
-        renderMessages();
-        await opts.onComplete(finalEv);
-      }
+    let jobId;
+    try {
+      const jobBody = { ...body, provider, model };
+      if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
+      const created = await Api.post(opts.jobEndpoint, jobBody);
+      jobId = created.job_id;
     } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') {
-        // user stopped — drop the progress card and clean up silently
-        sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
-        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-        operationInProgress = false; operationMode = null; currentAbortController = null;
-        updateSendBtn(); renderMessages();
-        return;
-      }
-      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
-      // Mark the in-flight stage failed (✗) but let the dedicated error card below
-      // carry the message + Retry, rather than duplicating the text in two places.
       const active = progressMsg.data.stages.find(s => s.status === 'active');
       if (active) active.status = 'error';
-      liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code }, ms: Date.now() - t0 });
+      liveTraceMsg.data.push({ call: 'POST ' + opts.jobEndpoint, inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
       await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
+      if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+      operationInProgress = false; operationMode = null;
+      updateSendBtn();
+      await persistSession(sess);
+      renderSidebar(); renderMessages();
+      return;
+    }
+
+    // Persist right away — this, not anything at the end, is what makes the
+    // job resumable: a reload a second from now still has the jobId to
+    // reconnect to, purely from what's on the server.
+    progressMsg.data.jobId = jobId;
+    const pollState = { cancelled: false };
+    activeJobPoll = pollState;
+    renderMessages();
+    await persistSession(sess);
+
+    const finalEv = await pollJob(jobId, progressMsg, pollState);
+    if (activeJobPoll === pollState) activeJobPoll = null;
+
+    if (!finalEv) {
+      if (pollState.cancelled) {
+        // user-initiated stop — clean up silently, same as the old abort path
+        sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
+      } else {
+        const emsg = progressMsg.data.error || 'The job failed — please try again.';
+        liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 0, outputs: { error: emsg }, ms: Date.now() - t0 });
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
+      }
+    } else {
+      liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
+      renderMessages();
+      await opts.onComplete(finalEv);
     }
 
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
     operationInProgress = false;
     operationMode = null;
-    currentAbortController = null;
     updateSendBtn();
     await persistSession(sess);
     renderSidebar();
     renderMessages();
   }
 
+  // Called when the panel opens or a session is switched to: if the loaded
+  // messages include a build/edit job that never resolved (e.g. the page
+  // reloaded mid-operation), resume polling it right where it left off —
+  // this is what makes reload/rotate/close-the-tab safe.
+  function resumeActiveJobIfAny(sess) {
+    if (!sess || activeJobPoll) return;
+    const progressMsg = sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
+    if (!progressMsg) return;
+
+    operationInProgress = true;
+    operationMode = progressMsg.data.mode;
+    updateSendBtn();
+
+    const pollState = { cancelled: false };
+    activeJobPoll = pollState;
+    const onComplete = operationMode === 'build'
+      ? (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage })
+      : (ev) => applyPlan(ev.plan, 'edit', null);
+
+    if (!liveTraceMsg) {
+      liveTraceMsg = sess.messages.find(m => m.type === 'trace' && m.live) || { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
+      if (!sess.messages.includes(liveTraceMsg)) sess.messages.push(liveTraceMsg);
+    }
+
+    (async () => {
+      const finalEv = await pollJob(progressMsg.data.jobId, progressMsg, pollState);
+      if (activeJobPoll === pollState) activeJobPoll = null;
+      if (finalEv) await onComplete(finalEv);
+      if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+      operationInProgress = false;
+      operationMode = null;
+      updateSendBtn();
+      await persistSession(sess);
+      renderSidebar();
+      renderMessages();
+    })();
+  }
+
   async function proceedWithBuildDirect(body) {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
 
-    // Edits stream their generation live (like build) and deploy to staging.
-    if (body.project_id) {
-      return proceedWithEditStreaming(body, sess);
-    }
-
-    const stageMode = body.project_id ? 'edit' : 'build';
-    const thinkingId = 'direct_' + Date.now();
-    sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode });
-
-    liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
-    sess.messages.push(liveTraceMsg);
-    operationInProgress = true;
-    operationMode = stageMode;
-    currentAbortController = new AbortController();
-    updateSendBtn();
-    renderMessages();
-
-    const t0 = Date.now();
-    try {
-      const response = await callWithFallback('/v1/ai/plan', body, currentAbortController.signal);
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: 200, outputs: response, ms: Date.now() - t0 });
-      renderMessages();
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'deploy-confirm', content: '', data: response, settled: false });
-    } catch(e) {
-      if (e instanceof DOMException && e.name === 'AbortError') {
-        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        operationInProgress = false; operationMode = null; currentAbortController = null;
-        updateSendBtn(); renderMessages();
-        return;
-      }
-      if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code, raw: e.data?.raw }, ms: Date.now() - t0 });
-      renderMessages();
-      stopThinkingStages?.();
-      if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
-    }
-    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-    operationInProgress = false;
-    operationMode = null;
-    currentAbortController = null;
-    updateSendBtn();
-    if (sess) await persistSession(sess);
-    renderSidebar();
-    renderMessages();
+    // Both new builds and edits run as a job-backed generation with a live
+    // progress card. Edits auto-apply to staging on completion; builds show a
+    // 'plan' card requiring a manual Apply (see handlePlanResponse).
+    return body.project_id
+      ? proceedWithEditStreaming(body, sess)
+      : proceedWithPlanStreaming(body, sess);
   }
 
   async function handlePlanResponse(response) {
@@ -2006,7 +2013,6 @@ const AiPanel = (() => {
     if (msg.type === 'result') return renderResultCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
     if (msg.type === 'edit-review') return renderEditReviewInlineCard(msg);
-    if (msg.type === 'deploy-confirm') return renderDeployConfirmCard(msg);
     if (msg.type === 'error') {
       const div = el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' },
         el('div', {}, '✗ ' + msg.content)
@@ -2315,38 +2321,6 @@ const AiPanel = (() => {
     return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
   }
 
-  function renderDeployConfirmCard(msg) {
-    const { plan, summary, mode } = msg.data;
-    const name = summary?.project_name || plan?.project_name || '';
-    const detail = mode === 'build'
-      ? `${summary?.tables?.length || 0} table(s), ${summary?.frontend_files || 0} file(s)`
-      : `${(summary?.add_tables?.length || 0) + (summary?.add_columns?.length || 0)} change(s), ${summary?.frontend_files || 0} file(s) updated`;
-    const card = el('div', { class: 'ai-msg ai-msg-ai ai-deploy-confirm-card' },
-      el('div', { class: 'ai-plan-title' }, mode === 'build' ? '🔨 Ready to build' : '✏️ Ready to update'),
-      el('div', { class: 'ai-plan-row' }, el('strong', {}, name ? name + ' — ' : ''), detail)
-    );
-    if (!msg.settled) {
-      const actionsDiv = el('div', { class: 'ai-plan-actions' });
-      const deployBtn = el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
-        delete msg.applyError; msg.settled = true; saveSessions();
-        actionsDiv.innerHTML = ''; actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Deploying…'));
-        await applyPlan(plan, mode, msg);
-      }}, '🚀 Deploy');
-      const cancelBtn = el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
-        msg.settled = true; msg.cancelled = true; saveSessions(); renderMessages();
-      }}, 'Cancel');
-      if (msg.applyError) actionsDiv.appendChild(el('div', { class: 'ai-plan-error-notice' }, '✕ ' + msg.applyError));
-      actionsDiv.appendChild(cancelBtn);
-      actionsDiv.appendChild(deployBtn);
-      card.appendChild(actionsDiv);
-    } else if (msg.cancelled) {
-      card.appendChild(el('div', { class: 'ai-plan-actions' }, el('span', { class: 'text-muted', style: 'font-size:12px' }, 'Cancelled')));
-    } else {
-      card.appendChild(el('div', { class: 'ai-plan-actions' }, el('span', { style: 'font-size:12px;color:var(--accent)' }, '✓ Deployed')));
-    }
-    return card;
-  }
-
   function renderAiCallEntry(ai) {
     const STAGE_LABELS = {
       chat:            'Chat Response',
@@ -2428,7 +2402,7 @@ const AiPanel = (() => {
     { key: 'changes', label: 'Generating changes' },
   ];
 
-  function makeProgressMsg(stages, title) {
+  function makeProgressMsg(stages, title, mode) {
     const list = stages || BUILD_PROGRESS_STAGES;
     return {
       id: 'progress_' + Date.now(),
@@ -2436,6 +2410,7 @@ const AiPanel = (() => {
       type: 'progress',
       data: {
         title: title || 'Building your app',
+        mode: mode || 'build',
         stages: list.map((s, i) => ({ ...s, status: i === 0 ? 'active' : 'pending', detail: '' })),
         error: null,
       },
@@ -2560,7 +2535,10 @@ const AiPanel = (() => {
     try {
       const full = await Api.get('/v1/ai/sessions/' + id);
       if (full && Array.isArray(full.messages)) {
-        const idx = sessions.findIndex(s => s.id === id);
+        // Tolerant comparison — id can arrive as a string (e.g. from
+        // localStorage on a fresh page load) while session ids from the API
+        // are numbers, which a strict === would silently miss.
+        const idx = sessions.findIndex(s => String(s.id) === String(id));
         if (idx !== -1) sessions[idx].messages = full.messages;
       }
     } catch(e) {}
@@ -2575,6 +2553,7 @@ const AiPanel = (() => {
     renderMessages();
     renderProjectPicker();
     await loadSessionMessages(id);
+    resumeActiveJobIfAny(getSession(id));
     renderMessages();
   }
 
@@ -2941,18 +2920,31 @@ const AiPanel = (() => {
     await Promise.all([loadSessions(), loadProjects()]);
     renderProjectPicker();
 
-    if (!operationInProgress) {
+    // Figure out which session to open. If the last-used session (this page
+    // load or, after a reload, from localStorage) has a build/edit job that
+    // never resolved, reopen THAT session instead of starting fresh so the
+    // panel can reconnect to it — this is what survives a reload/rotation,
+    // since it doesn't depend on the in-memory operationInProgress flag.
+    const lastId = currentSessionId || localStorage.getItem('sb:ai_sid');
+    let resumeTarget = null;
+    if (lastId && getSession(lastId)) {
+      await loadSessionMessages(lastId);
+      const candidate = getSession(lastId);
+      if (candidate && candidate.messages.some(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone)) {
+        resumeTarget = candidate;
+      }
+    }
+
+    if (resumeTarget) {
+      currentSessionId = resumeTarget.id;
+      selectedProjectId = resumeTarget.projectId ?? selectedProjectId;
+    } else if (operationInProgress && getSession(currentSessionId)) {
+      // Panel was just closed and reopened within the same page lifetime — keep going.
+    } else {
       // Always start fresh on open so the user isn't confused by a previous project's chat
       const sess = await createSession(selectedProjectId);
       currentSessionId = sess.id;
       localStorage.setItem('sb:ai_sid', currentSessionId);
-    } else {
-      // Restore the in-progress session
-      if (!currentSessionId) currentSessionId = localStorage.getItem('sb:ai_sid');
-      if (!currentSessionId || !getSession(currentSessionId)) {
-        const sess = await createSession(selectedProjectId);
-        currentSessionId = sess.id;
-      }
     }
 
     renderSidebar();
@@ -2960,8 +2952,9 @@ const AiPanel = (() => {
     renderProjectPicker();
 
     await loadSessionMessages(currentSessionId);
+    resumeActiveJobIfAny(currentSession());
 
-    if (operationInProgress) {
+    if (operationInProgress && !resumeTarget) {
       const sess = currentSession();
       if (sess && !sess.messages.some(m => m.type === 'thinking')) {
         sess.messages.push({ id: 'thinking_reopen', role: 'ai', type: 'thinking', content: '', stageMode: operationMode || 'default' });

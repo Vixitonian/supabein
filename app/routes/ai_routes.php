@@ -2529,6 +2529,145 @@ function ai_playwright_test_run(string $script, array $config): array
     ];
 }
 
+// ─── Job-backed generation ───────────────────────────────────────────────────
+// Shared by the /v1/ai/build/job and /v1/ai/edit/job routes and the background
+// worker (app/workers/ai_worker.php) — one implementation so the two never
+// drift apart the way the old (dead) worker pipeline did relative to these
+// routes. $report(array $event) is called at the same points the old NDJSON
+// stream's $emit() was; failures throw instead of emitting an 'error' event
+// and returning, since callers now run inside a job, not a live HTTP response.
+
+function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report): array
+{
+    $aiTrace = [];
+
+    // ── Stage 1: schema ───────────────────────────────────────────────────
+    $report(['stage' => 'schema', 'status' => 'start', 'label' => 'Designing database schema…']);
+    $schemaUserMsg = $approvedIntent
+        ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
+        : $prompt;
+    $_t0 = microtime(true);
+    $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
+    $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+    $schemaPlan['frontend'] = ['files' => []];
+    $schemaPlan = ai_sanitize_plan($schemaPlan);
+
+    $validationError = ai_validate_plan($schemaPlan);
+    if ($validationError) {
+        $report(['stage' => 'schema', 'status' => 'retry', 'label' => 'Refining schema…', 'detail' => $validationError]);
+        $retryPrompt = $schemaUserMsg
+            . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
+            . "\nReturn a corrected schema that fixes exactly this problem.";
+        $_t0 = microtime(true);
+        $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+        $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
+        $schemaPlan['frontend'] = ['files' => []];
+        $schemaPlan = ai_sanitize_plan($schemaPlan);
+        $validationError = ai_validate_plan($schemaPlan);
+        if ($validationError) throw new \RuntimeException('AI returned an invalid schema: ' . $validationError);
+    }
+    $tableNames = array_map(fn($t) => $t['name'], $schemaPlan['tables'] ?? []);
+    $report(['stage' => 'schema', 'status' => 'done', 'label' => 'Database schema ready', 'detail' => count($tableNames) . ' table' . (count($tableNames) === 1 ? '' : 's') . ': ' . implode(', ', $tableNames)]);
+
+    // ── Stage 2: design brief (best-effort) ───────────────────────────────
+    $report(['stage' => 'design', 'status' => 'start', 'label' => 'Choosing a visual design…']);
+    $_t0   = microtime(true);
+    $brief = ai_generate_design_brief($client, $prompt, $schemaPlan);
+    if (!empty($brief)) {
+        $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+    }
+    $briefCtx = ai_brief_to_context($brief);
+    $report(['stage' => 'design', 'status' => 'done', 'label' => 'Visual design chosen', 'detail' => trim(($brief['personality'] ?? '') . (isset($brief['accent_color']) ? ' · ' . $brief['accent_color'] : '')) ?: 'default theme']);
+
+    // ── Stage 3: frontend ──────────────────────────────────────────────────
+    $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
+    $frontendMsg        = "App description: {$prompt}\n\n"
+                        . ($briefCtx ? "{$briefCtx}\n\n" : '')
+                        . "Exact validated schema — use ONLY these column names in JS:\n"
+                        . ai_schema_to_context($schemaPlan);
+    $_frontendSysPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
+    $_t0 = microtime(true);
+    $frontendResult = $client->generateJson($_frontendSysPrompt, $frontendMsg);
+    $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+
+    $plan = $schemaPlan;
+    $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+    foreach ($plan['frontend']['files'] as &$file) {
+        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+    }
+    unset($file);
+    $report(['stage' => 'frontend', 'status' => 'done', 'label' => 'Frontend generated', 'detail' => count($plan['frontend']['files']) . ' file' . (count($plan['frontend']['files']) === 1 ? '' : 's')]);
+
+    $summary = [
+        'project_name'   => $plan['project_name'],
+        'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
+        'frontend_files' => count($plan['frontend']['files'] ?? []),
+    ];
+
+    return ['plan' => $plan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace];
+}
+
+function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report): array
+{
+    $aiTrace = [];
+
+    $report(['stage' => 'read', 'status' => 'start', 'label' => 'Reading current schema & files…']);
+    $existingSchema = ai_schema_from_db($projectId, $catalog);
+    $schemaCtx      = ai_schema_to_context($existingSchema);
+    $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+    $report(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
+
+    $report(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
+    $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
+    $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+    $_t0 = microtime(true);
+    $delta = $client->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
+    $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+
+    $deltaError = ai_validate_delta($delta, $existingSchema);
+    if ($deltaError) {
+        $report(['stage' => 'changes', 'status' => 'retry', 'label' => 'Refining changes…', 'detail' => $deltaError]);
+        $retryMsg = $userMessage . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
+        $_t0 = microtime(true);
+        $delta = $client->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg);
+        $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
+        $deltaError = ai_validate_delta($delta, $existingSchema);
+        if ($deltaError) throw new \RuntimeException('AI returned an invalid edit: ' . $deltaError);
+    }
+
+    if (!empty($delta['frontend']['files'])) {
+        foreach ($delta['frontend']['files'] as &$file) {
+            $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+        }
+        unset($file);
+    }
+    $report(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready', 'detail' => (count($delta['add_tables'] ?? []) + count($delta['add_columns'] ?? []) + count($delta['update_policies'] ?? [])) . ' schema change(s), ' . count($delta['frontend']['files'] ?? []) . ' file(s)']);
+
+    $summary = [
+        'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
+        'add_columns'     => array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? []) ?: [[]]),
+        'update_policies' => array_map(fn($p) => $p['table'] . ' ' . $p['api_role'] . ' ' . $p['operation'], $delta['update_policies'] ?? []),
+    ];
+    if (!empty($delta['frontend']['files'])) $summary['frontend_files'] = count($delta['frontend']['files']);
+
+    $editPlan = array_merge($delta, ['project_id' => $projectId]);
+
+    return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace];
+}
+
+// Spawns a fully independent OS process to run one job. This — not a shared
+// queue/consumer — is what lets every user's build/edit run in true parallel:
+// each job gets its own process the moment it's created, so nobody waits on
+// anybody else's job. (cPanel/LVE process limits could throttle this under
+// extreme simultaneous load, but each worker is short-lived and normal usage
+// never approaches that.)
+function ai_spawn_job_worker(array $config, int $jobId): void
+{
+    $phpBin = $config['PHP_BIN'] ?? '/usr/local/bin/php';
+    $worker = SUPABEIN_ROOT . '/app/workers/ai_worker.php';
+    exec($phpBin . ' ' . escapeshellarg($worker) . ' ' . $jobId . ' > /dev/null 2>&1 &');
+}
+
 // ─── Route registration ──────────────────────────────────────────────────────
 
 function register_ai_routes(\SupaBein\Router $router): void
@@ -3152,44 +3291,22 @@ PROMPT;
 
     }, ['auth_middleware']);
 
-    // ── AI Build (streaming): same build-mode passes as /v1/ai/plan, but emits
-    //    newline-delimited JSON progress events as each stage runs so the client
-    //    can show the build happening step by step. Degrades gracefully: even if
-    //    the host buffers output, the final "complete" event carries the full plan.
-    $router->post('/v1/ai/build/stream', function (array $req): void {
-        set_time_limit(420);
-
-        // Switch the response to an unbuffered NDJSON stream.
-        while (ob_get_level() > 0) { ob_end_clean(); }
-        header('Content-Type: application/x-ndjson; charset=utf-8');
-        header('Cache-Control: no-cache, no-transform');
-        header('X-Accel-Buffering: no'); // ask nginx/LiteSpeed not to buffer
-        ob_implicit_flush(true);
-        // Defeat gzip/proxy buffering so events flush incrementally rather than
-        // arriving all at once at the end.
-        @ini_set('zlib.output_compression', '0');
-        @ini_set('output_buffering', '0');
-        if (function_exists('apache_setenv')) { @apache_setenv('no-gzip', '1'); }
-        // Prime the connection with padding (a non-JSON line the client skips) so
-        // buffering layers reach their threshold and start streaming immediately.
-        echo str_repeat(' ', 4096) . "\n";
-        flush();
-
-        $emit = static function (array $event): void {
-            echo json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
-            flush();
-        };
-
-        $config = \App::get('config');
-        $userId = (int)$req['auth']['user_id'];
+    // ── AI Build (job): creates a background job that runs the full
+    //    schema → design → frontend generation server-side, independent of the
+    //    client's connection — reload, rotate, close the tab, the job keeps
+    //    going and a reopened panel just reconnects to it. Each job spawns its
+    //    own OS process (see ai_spawn_job_worker), so multiple users' builds
+    //    run fully in parallel — there's no shared queue/consumer to wait behind.
+    $router->post('/v1/ai/build/job', function (array $req): void {
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
 
         $prompt = trim($req['body']['prompt'] ?? '');
         if ($prompt === '' || strlen($prompt) > 2000) {
-            $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'prompt is required and must be under 2000 characters']);
-            return;
+            abort(422, 'prompt is required and must be under 2000 characters');
         }
 
-        // Prior conversation turns for multi-turn context (capped at 20 turns)
         $history = [];
         foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
             if (!is_array($turn)) continue;
@@ -3199,122 +3316,34 @@ PROMPT;
             $history[] = ['role' => $role, 'text' => $text];
         }
 
-        $approvedIntent = (isset($req['body']['intent']) && is_array($req['body']['intent']))
-            ? $req['body']['intent'] : null;
+        $intent    = (isset($req['body']['intent']) && is_array($req['body']['intent'])) ? $req['body']['intent'] : null;
+        $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
 
-        $gemini  = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
-        $aiTrace = [];
-
-        try {
-            // ── Stage 1: schema ───────────────────────────────────────────────
-            $emit(['stage' => 'schema', 'status' => 'start', 'label' => 'Designing database schema…']);
-            $schemaUserMsg = $approvedIntent
-                ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
-                : $prompt;
-            $_t0 = microtime(true);
-            try { $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg); }
-            catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'schema', 'message' => $e->getMessage()]); return; }
-            $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
-            $schemaPlan['frontend'] = ['files' => []];
-            $schemaPlan = ai_sanitize_plan($schemaPlan);
-
-            $validationError = ai_validate_plan($schemaPlan);
-            if ($validationError) {
-                $emit(['stage' => 'schema', 'status' => 'retry', 'label' => 'Refining schema…', 'detail' => $validationError]);
-                $retryPrompt = $schemaUserMsg
-                    . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
-                    . "\nReturn a corrected schema that fixes exactly this problem.";
-                $_t0 = microtime(true);
-                try { $schemaPlan = $gemini->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt); }
-                catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'schema_retry', 'message' => $e->getMessage()]); return; }
-                $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
-                $schemaPlan['frontend'] = ['files' => []];
-                $schemaPlan = ai_sanitize_plan($schemaPlan);
-                $validationError = ai_validate_plan($schemaPlan);
-                if ($validationError) { $emit(['stage' => 'error', 'at' => 'schema', 'message' => 'AI returned an invalid schema: ' . $validationError]); return; }
-            }
-            $tableNames = array_map(fn($t) => $t['name'], $schemaPlan['tables'] ?? []);
-            $emit(['stage' => 'schema', 'status' => 'done', 'label' => 'Database schema ready', 'detail' => count($tableNames) . ' table' . (count($tableNames) === 1 ? '' : 's') . ': ' . implode(', ', $tableNames)]);
-
-            // ── Stage 2: design brief (best-effort) ───────────────────────────
-            $emit(['stage' => 'design', 'status' => 'start', 'label' => 'Choosing a visual design…']);
-            $_t0   = microtime(true);
-            $brief = ai_generate_design_brief($gemini, $prompt, $schemaPlan);
-            if (!empty($brief)) {
-                $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
-            }
-            $briefCtx = ai_brief_to_context($brief);
-            $emit(['stage' => 'design', 'status' => 'done', 'label' => 'Visual design chosen', 'detail' => trim(($brief['personality'] ?? '') . (isset($brief['accent_color']) ? ' · ' . $brief['accent_color'] : '')) ?: 'default theme']);
-
-            // ── Stage 3: frontend ─────────────────────────────────────────────
-            $emit(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
-            $frontendMsg        = "App description: {$prompt}\n\n"
-                                . ($briefCtx ? "{$briefCtx}\n\n" : '')
-                                . "Exact validated schema — use ONLY these column names in JS:\n"
-                                . ai_schema_to_context($schemaPlan);
-            $_frontendSysPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
-            $_t0 = microtime(true);
-            try { $frontendResult = $gemini->generateJson($_frontendSysPrompt, $frontendMsg); }
-            catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'frontend', 'message' => $e->getMessage()]); return; }
-            $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
-
-            $plan = $schemaPlan;
-            $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
-            foreach ($plan['frontend']['files'] as &$file) {
-                $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
-            }
-            unset($file);
-            $emit(['stage' => 'frontend', 'status' => 'done', 'label' => 'Frontend generated', 'detail' => count($plan['frontend']['files']) . ' file' . (count($plan['frontend']['files']) === 1 ? '' : 's')]);
-
-            $summary = [
-                'project_name'   => $plan['project_name'],
-                'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
-                'frontend_files' => count($plan['frontend']['files'] ?? []),
-            ];
-
-            // ── Final event: full plan for the client to review/apply ─────────
-            $emit(['stage' => 'complete', 'mode' => 'build', 'plan' => $plan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
-        } catch (\Throwable $e) {
-            $emit(['stage' => 'error', 'at' => 'unknown', 'message' => $e->getMessage()]);
-        }
+        $payload = [
+            'prompt'   => $prompt,
+            'history'  => $history,
+            'intent'   => $intent,
+            'provider' => $req['body']['provider'] ?? null,
+            'model'    => $req['body']['model'] ?? null,
+        ];
+        $job = $catalog->createJob($userId, $sessionId, 'build', $payload);
+        ai_spawn_job_worker($config, (int)$job['id']);
+        json_out(['job_id' => (int)$job['id']], 202);
     }, ['auth_middleware']);
 
-    // ── AI Edit (streaming): generate an edit delta for an existing project,
-    //    emitting NDJSON progress events the same way the build stream does.
-    $router->post('/v1/ai/edit/stream', function (array $req): void {
-        set_time_limit(420);
-
-        while (ob_get_level() > 0) { ob_end_clean(); }
-        header('Content-Type: application/x-ndjson; charset=utf-8');
-        header('Cache-Control: no-cache, no-transform');
-        header('X-Accel-Buffering: no');
-        ob_implicit_flush(true);
-        // Defeat gzip/proxy buffering so events flush incrementally rather than
-        // arriving all at once at the end.
-        @ini_set('zlib.output_compression', '0');
-        @ini_set('output_buffering', '0');
-        if (function_exists('apache_setenv')) { @apache_setenv('no-gzip', '1'); }
-        // Prime the connection with padding (a non-JSON line the client skips) so
-        // buffering layers reach their threshold and start streaming immediately.
-        echo str_repeat(' ', 4096) . "\n";
-        flush();
-
-        $emit = static function (array $event): void {
-            echo json_encode($event, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
-            flush();
-        };
-
+    // ── AI Edit (job): same job-backed pattern, for editing an existing project.
+    $router->post('/v1/ai/edit/job', function (array $req): void {
         $config  = \App::get('config');
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
 
         $prompt    = trim($req['body']['prompt'] ?? '');
         $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : 0;
-        if ($prompt === '' || strlen($prompt) > 2000) { $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'prompt is required and must be under 2000 characters']); return; }
-        if (!$projectId) { $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'project_id is required']); return; }
+        if ($prompt === '' || strlen($prompt) > 2000) abort(422, 'prompt is required and must be under 2000 characters');
+        if (!$projectId) abort(422, 'project_id is required');
 
         $project = $catalog->getProjectById($projectId, $userId);
-        if (!$project) { $emit(['stage' => 'error', 'at' => 'validate', 'message' => 'Project not found']); return; }
+        if (!$project) abort(404, 'Project not found');
 
         $history = [];
         foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
@@ -3325,56 +3354,51 @@ PROMPT;
             $history[] = ['role' => $role, 'text' => $text];
         }
 
-        $gemini  = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
-        $aiTrace = [];
+        $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
 
-        try {
-            $emit(['stage' => 'read', 'status' => 'start', 'label' => 'Reading current schema & files…']);
-            $existingSchema = ai_schema_from_db($projectId, $catalog);
-            $schemaCtx      = ai_schema_to_context($existingSchema);
-            $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
-            $emit(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
+        $payload = [
+            'prompt'     => $prompt,
+            'project_id' => $projectId,
+            'history'    => $history,
+            'provider'   => $req['body']['provider'] ?? null,
+            'model'      => $req['body']['model'] ?? null,
+        ];
+        $job = $catalog->createJob($userId, $sessionId, 'edit', $payload);
+        ai_spawn_job_worker($config, (int)$job['id']);
+        json_out(['job_id' => (int)$job['id']], 202);
+    }, ['auth_middleware']);
 
-            $emit(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
-            $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
-            $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
-            $_t0 = microtime(true);
-            try { $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $userMessage); }
-            catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'edit', 'message' => $e->getMessage()]); return; }
-            $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+    // ── AI Jobs: poll progress/result, list active jobs, or cancel one ────────
+    $router->get('/v1/ai/jobs/:id', function (array $req): void {
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+        $job = $catalog->getJobById((int)$req['params']['id'], $userId);
+        if (!$job) abort(404, 'Job not found');
 
-            $deltaError = ai_validate_delta($delta, $existingSchema);
-            if ($deltaError) {
-                $emit(['stage' => 'changes', 'status' => 'retry', 'label' => 'Refining changes…', 'detail' => $deltaError]);
-                $retryMsg = $userMessage . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
-                $_t0 = microtime(true);
-                try { $delta = $gemini->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg); }
-                catch (\RuntimeException $e) { $emit(['stage' => 'error', 'at' => 'edit_retry', 'message' => $e->getMessage()]); return; }
-                $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
-                $deltaError = ai_validate_delta($delta, $existingSchema);
-                if ($deltaError) { $emit(['stage' => 'error', 'at' => 'edit', 'message' => 'AI returned an invalid edit: ' . $deltaError]); return; }
-            }
+        $since  = max(0, (int)($req['query']['since'] ?? 0));
+        $events = array_slice($job['progress'], $since);
 
-            if (!empty($delta['frontend']['files'])) {
-                foreach ($delta['frontend']['files'] as &$file) {
-                    $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
-                }
-                unset($file);
-            }
-            $emit(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready', 'detail' => (count($delta['add_tables'] ?? []) + count($delta['add_columns'] ?? []) + count($delta['update_policies'] ?? [])) . ' schema change(s), ' . count($delta['frontend']['files'] ?? []) . ' file(s)']);
+        json_out([
+            'status'      => $job['status'],
+            'events'      => $events,
+            'event_count' => count($job['progress']),
+            'result'      => $job['status'] === 'done' ? $job['result'] : null,
+            'error'       => $job['status'] === 'failed' ? $job['error'] : null,
+        ]);
+    }, ['auth_middleware']);
 
-            $summary = [
-                'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
-                'add_columns'     => array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? []) ?: [[]]),
-                'update_policies' => array_map(fn($p) => $p['table'] . ' ' . $p['api_role'] . ' ' . $p['operation'], $delta['update_policies'] ?? []),
-            ];
-            if (!empty($delta['frontend']['files'])) $summary['frontend_files'] = count($delta['frontend']['files']);
+    $router->get('/v1/ai/jobs', function (array $req): void {
+        $catalog = \SupaBein\Catalog::getInstance();
+        json_out($catalog->listActiveJobs((int)$req['auth']['user_id']));
+    }, ['auth_middleware']);
 
-            $editPlan = array_merge($delta, ['project_id' => $projectId]);
-            $emit(['stage' => 'complete', 'mode' => 'edit', 'plan' => $editPlan, 'summary' => $summary, 'usage' => $gemini->getLastUsage(), 'aiTrace' => $aiTrace]);
-        } catch (\Throwable $e) {
-            $emit(['stage' => 'error', 'at' => 'unknown', 'message' => $e->getMessage()]);
+    $router->post('/v1/ai/jobs/:id/cancel', function (array $req): void {
+        $catalog = \SupaBein\Catalog::getInstance();
+        $pid = $catalog->cancelJob((int)$req['params']['id'], (int)$req['auth']['user_id']);
+        if ($pid && function_exists('posix_kill')) {
+            @posix_kill($pid, 15); // SIGTERM — matches today's behavior where aborting the fetch also kills the server-side process
         }
+        json_out(['cancelled' => true]);
     }, ['auth_middleware']);
 
     // ── AI Apply: execute a previously generated plan ──────────────────────────

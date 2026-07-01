@@ -702,13 +702,16 @@ class Catalog
     }
 
     // ─── AI Jobs ─────────────────────────────────────────────────────────────
+    // One detached OS process per job (spawned by the route that creates it) —
+    // this is what lets multiple users' builds/edits run fully in parallel with
+    // no shared queue/consumer to bottleneck behind.
 
-    public function createJob(int $userId, string $mode, array $payload): array
+    public function createJob(int $userId, ?int $sessionId, string $mode, array $payload): array
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO ai_jobs (user_id, mode, payload) VALUES (?, ?, ?)'
+            'INSERT INTO ai_jobs (user_id, session_id, mode, payload) VALUES (?, ?, ?, ?)'
         );
-        $stmt->execute([$userId, $mode, json_encode($payload, JSON_UNESCAPED_UNICODE)]);
+        $stmt->execute([$userId, $sessionId, $mode, json_encode($payload, JSON_UNESCAPED_UNICODE)]);
         $id = (int)$this->pdo->lastInsertId();
         return $this->getJobById($id, $userId);
     }
@@ -716,26 +719,77 @@ class Catalog
     public function getJobById(int $id, int $userId): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, user_id, mode, status, result, error, pid, created_at, updated_at
+            'SELECT id, user_id, session_id, mode, status, progress, result, error, pid, created_at, updated_at
              FROM ai_jobs WHERE id = ? AND user_id = ?'
         );
         $stmt->execute([$id, $userId]);
         $row = $stmt->fetch() ?: null;
         if (!$row) return null;
+        $row['progress'] = $row['progress'] !== null ? (json_decode($row['progress'], true) ?? []) : [];
         if ($row['result'] !== null) {
             $row['result'] = json_decode($row['result'], true);
         }
-        return self::castRow($row, ['id', 'user_id', 'pid']);
+        return self::castRow($row, ['id', 'user_id', 'session_id', 'pid']);
     }
 
     public function listActiveJobs(int $userId): array
     {
         $stmt = $this->pdo->prepare(
-            "SELECT id, user_id, mode, status, created_at, updated_at
-             FROM ai_jobs WHERE user_id = ? AND status IN ('queued','running','waiting_input')
+            "SELECT id, user_id, session_id, mode, status, created_at, updated_at
+             FROM ai_jobs WHERE user_id = ? AND status IN ('queued','running')
              ORDER BY created_at DESC"
         );
         $stmt->execute([$userId]);
-        return self::castRows($stmt->fetchAll() ?: [], ['id', 'user_id', 'pid']);
+        return self::castRows($stmt->fetchAll() ?: [], ['id', 'user_id', 'session_id', 'pid']);
+    }
+
+    // Claims a queued job for this worker process — returns false if another
+    // worker already claimed it (shouldn't happen since each job gets its own
+    // freshly-spawned process, but keeps the claim atomic regardless).
+    public function claimJob(int $jobId, int $pid): bool
+    {
+        $stmt = $this->pdo->prepare(
+            "UPDATE ai_jobs SET status = 'running', pid = ? WHERE id = ? AND status = 'queued'"
+        );
+        $stmt->execute([$pid, $jobId]);
+        return $stmt->rowCount() === 1;
+    }
+
+    public function appendJobProgress(int $jobId, array $event): void
+    {
+        $stmt = $this->pdo->prepare('SELECT progress FROM ai_jobs WHERE id = ?');
+        $stmt->execute([$jobId]);
+        $current = $stmt->fetchColumn();
+        $events = $current ? (json_decode($current, true) ?? []) : [];
+        $events[] = $event;
+        $this->pdo->prepare('UPDATE ai_jobs SET progress = ? WHERE id = ?')
+                  ->execute([json_encode($events, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $jobId]);
+    }
+
+    public function markJobDone(int $jobId, array $result): void
+    {
+        $this->pdo->prepare("UPDATE ai_jobs SET status = 'done', result = ? WHERE id = ?")
+                   ->execute([json_encode($result, JSON_UNESCAPED_UNICODE), $jobId]);
+    }
+
+    public function markJobFailed(int $jobId, string $error): void
+    {
+        $this->pdo->prepare("UPDATE ai_jobs SET status = 'failed', error = ? WHERE id = ?")
+                   ->execute([substr($error, 0, 4096), $jobId]);
+    }
+
+    // Returns the job's pid (if any) so the caller can signal the process; null
+    // if the job wasn't in a cancellable state (already finished, or not owned
+    // by this user).
+    public function cancelJob(int $jobId, int $userId): ?int
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT pid FROM ai_jobs WHERE id = ? AND user_id = ? AND status IN ('queued','running')"
+        );
+        $stmt->execute([$jobId, $userId]);
+        $row = $stmt->fetch();
+        if (!$row) return null;
+        $this->pdo->prepare("UPDATE ai_jobs SET status = 'cancelled' WHERE id = ?")->execute([$jobId]);
+        return $row['pid'] !== null ? (int)$row['pid'] : null;
     }
 }
