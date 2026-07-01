@@ -21,7 +21,7 @@ function register_project_routes(\SupaBein\Router $router): void
 
     // GET /v1/projects
     $router->get('/v1/projects', function (array $req) use ($catalog): void {
-        $projects = $catalog->listProjects($req['auth']['user_id']);
+        $projects = $catalog->listProjectsWithStats($req['auth']['user_id']);
         json_out($projects);
     }, ['auth_middleware']);
 
@@ -61,6 +61,17 @@ function register_project_routes(\SupaBein\Router $router): void
             abort(404);
         }
         json_out($project);
+    }, ['auth_middleware']);
+
+    // GET /v1/projects/:id/overview — stats, site status, and recent activity for one project
+    $router->get('/v1/projects/:id/overview', function (array $req) use ($catalog): void {
+        $projectId = (int)$req['params']['id'];
+        $userId    = $req['auth']['user_id'];
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) abort(404);
+
+        json_out($catalog->getProjectOverview($projectId, $userId));
     }, ['auth_middleware']);
 
     // DELETE /v1/projects/:id

@@ -643,17 +643,6 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
     el('div', { class: 'sb-topbar-right' }, aiTopbarBtn)
   );
 
-  // Smart sticky: hide on scroll down, reveal on scroll up
-  if (window._sbScrollHandler) window.removeEventListener('scroll', window._sbScrollHandler, { passive: true });
-  let _lastScrollY = window.scrollY;
-  window._sbScrollHandler = () => {
-    const y = window.scrollY;
-    if (y > _lastScrollY + 4) topbar.classList.add('sb-topbar-hidden');
-    else if (y < _lastScrollY - 2) topbar.classList.remove('sb-topbar-hidden');
-    _lastScrollY = y;
-  };
-  window.addEventListener('scroll', window._sbScrollHandler, { passive: true });
-
   // Dark overlay behind the open drawer
   const overlay = el('div', { class: 'sb-overlay' });
 
@@ -1188,6 +1177,11 @@ const AiPanel = (() => {
 
   function renderSidebar() {
     if (!panelEl) return;
+    const titleEl = panelEl.querySelector('.ai-header-title');
+    if (titleEl) {
+      const sess = currentSession();
+      titleEl.textContent = sess ? (sess.name || 'New session') : '✦ SupaBein AI';
+    }
     const container = panelEl.querySelector('.ai-session-list');
     if (!container) return;
     container.innerHTML = '';
@@ -2848,30 +2842,14 @@ const AiPanel = (() => {
     // Hide review toggle when starting in chat mode
     if (!buildMode) reviewToggle.style.display = 'none';
 
-    const inputBar = el('div', { class: 'ai-input-bar' },
-      el('div', { class: 'ai-input-card' },
-        textarea,
-        el('div', { class: 'ai-input-actions' },
-          projectPicker,
-          runTestsBtn,
-          modeBtn,
-          reviewToggle,
-          sendBtn
-        )
-      )
-    );
-
-    const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
-    const newSessionBtn = el('button', { class: 'ai-new-session-btn', title: 'New session', onClick: newSession }, '✎');
-    const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
-
-    // Model selector button + dropdown
+    // Model selector button + dropdown — lives in the bottom input bar with
+    // the other toggles, opening upward since it sits at the bottom.
     function buildModelSelector() {
       const sel = getSelectedModel();
       const btn = el('button', { class: 'ai-model-btn', title: 'Switch AI model' }, sel.label + ' ▾');
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const existing = header.querySelector('.ai-model-dropdown');
+        const existing = inputBar.querySelector('.ai-model-dropdown');
         if (existing) { existing.remove(); return; }
         const dropdown = el('div', { class: 'ai-model-dropdown' });
         AI_MODELS.forEach(m => {
@@ -2887,7 +2865,7 @@ const AiPanel = (() => {
           });
           dropdown.appendChild(item);
         });
-        header.appendChild(dropdown);
+        inputBar.appendChild(dropdown);
         const onOutside = () => { dropdown.remove(); document.removeEventListener('click', onOutside); };
         setTimeout(() => document.addEventListener('click', onOutside), 0);
       });
@@ -2895,12 +2873,29 @@ const AiPanel = (() => {
     }
     const modelSelectorBtn = buildModelSelector();
 
+    const inputBar = el('div', { class: 'ai-input-bar' },
+      el('div', { class: 'ai-input-card' },
+        textarea,
+        el('div', { class: 'ai-input-actions' },
+          projectPicker,
+          runTestsBtn,
+          modelSelectorBtn,
+          modeBtn,
+          reviewToggle,
+          sendBtn
+        )
+      )
+    );
+
+    const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
+    const newSessionBtn = el('button', { class: 'ai-new-session-btn', title: 'New session', onClick: newSession }, '✎');
+    const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
+
     const header = el('div', { class: 'ai-header' },
       el('div', { class: 'ai-header-left' },
         hamburgerBtn,
         el('span', { class: 'ai-header-title' }, '✦ SupaBein AI')
       ),
-      modelSelectorBtn,
       newSessionBtn,
       closeBtn
     );
@@ -3172,8 +3167,8 @@ async function renderProjects() {
 
   renderLayout(null, '', [el('div', { class: 'page-header' },
     el('h1', { class: 'page-title' }, 'Projects'),
-    el('button', { class: 'btn btn-primary', id: 'new-project' }, '+')
-  ), el('div', { id: 'project-list' }, 'Loading...')]);
+    el('button', { class: 'btn btn-primary', id: 'new-project' }, '+ New Project')
+  ), el('div', { id: 'project-list' }, el('div', { class: 'text-muted' }, 'Loading…'))]);
 
   document.getElementById('new-project').addEventListener('click', () => showNewProjectModal());
 
@@ -3207,13 +3202,30 @@ async function renderProjects() {
           showDeleteProjectModal(p, () => renderProjects());
         });
 
-        const card = el('a', { class: 'proj-card', href: `#/projects/${p.id}` },
-          el('div', { class: 'proj-initial' }, initial),
-          el('div', { class: 'proj-card-body' },
-            el('div', { class: 'proj-card-name' }, p.name),
-            el('div', { class: 'proj-card-meta' }, `ID ${p.id} · ${fmtDate(p.created_at)}`)
+        const footerLinks = [
+          el('a', { class: 'home-proj-link', href: `#/projects/${p.id}` }, 'Open')
+        ];
+        if (p.live && p.site_id) {
+          footerLinks.push(el('a', { class: 'home-proj-link', href: `/sites/s${p.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View site'));
+        }
+
+        const card = el('div', { class: 'proj-card' },
+          el('a', { class: 'proj-card-main', href: `#/projects/${p.id}` },
+            el('div', { class: 'proj-initial' }, initial),
+            el('div', { class: 'proj-card-body' },
+              el('div', { class: 'proj-card-name' }, p.name),
+              el('div', { class: 'proj-card-meta' },
+                `${p.tables ?? 0} table${(p.tables ?? 0) === 1 ? '' : 's'}`,
+                p.live ? el('span', { class: 'home-badge home-badge-live' }, 'Live')
+                       : (p.has_staging ? el('span', { class: 'home-badge home-badge-staging' }, 'Staging') : null)
+              )
+            )
           ),
-          el('div', { class: 'proj-menu-wrap' }, menuBtn, dropdown)
+          el('div', { class: 'proj-menu-wrap' }, menuBtn, dropdown),
+          el('div', { class: 'proj-card-footer' },
+            ...footerLinks,
+            el('span', { class: 'proj-card-date' }, fmtDate(p.created_at))
+          )
         );
         return card;
       })
@@ -3317,38 +3329,47 @@ async function renderProject({ id }) {
     const project = await Api.get(`/v1/projects/${id}`);
 
 
-    const tabTables = el('div', { class: 'tab active' }, 'Tables');
-    const tabApi    = el('div', { class: 'tab' }, 'API');
-    const tabDeploy = el('div', { class: 'tab' }, 'Deploy');
+    const tabOverview = el('div', { class: 'tab active' }, 'Overview');
+    const tabTables   = el('div', { class: 'tab' }, 'Tables');
+    const tabApi      = el('div', { class: 'tab' }, 'API');
+    const tabDeploy   = el('div', { class: 'tab' }, 'Deploy');
 
-    const paneTablesEl = el('div', { id: 'pane-proj-tables' });
-    const paneApiEl    = el('div', { id: 'pane-proj-api',    class: 'hidden' });
-    const paneDeployEl = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
+    const paneOverviewEl = el('div', { id: 'pane-proj-overview' });
+    const paneTablesEl   = el('div', { id: 'pane-proj-tables', class: 'hidden' });
+    const paneApiEl      = el('div', { id: 'pane-proj-api',    class: 'hidden' });
+    const paneDeployEl   = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
 
-    const allTabs  = [tabTables, tabApi, tabDeploy];
-    const allPanes = [paneTablesEl, paneApiEl, paneDeployEl];
+    const allTabs  = [tabOverview, tabTables, tabApi, tabDeploy];
+    const allPanes = [paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl];
 
     function switchProjectTab(idx) {
       allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
       allPanes.forEach((p, i) => p.classList.toggle('hidden', i !== idx));
     }
 
-    tabTables.addEventListener('click', () => {
+    tabOverview.addEventListener('click', () => {
       switchProjectTab(0);
+      if (!paneOverviewEl.dataset.loaded) {
+        paneOverviewEl.dataset.loaded = '1';
+        loadOverviewPane(id, paneOverviewEl, switchProjectTab);
+      }
+    });
+    tabTables.addEventListener('click', () => {
+      switchProjectTab(1);
       if (!paneTablesEl.dataset.loaded) {
         paneTablesEl.dataset.loaded = '1';
         loadTablesPane(id, paneTablesEl);
       }
     });
     tabApi.addEventListener('click', () => {
-      switchProjectTab(1);
+      switchProjectTab(2);
       if (!paneApiEl.dataset.loaded) {
         paneApiEl.dataset.loaded = '1';
         loadApiPane(id, paneApiEl);
       }
     });
     tabDeploy.addEventListener('click', () => {
-      switchProjectTab(2);
+      switchProjectTab(3);
       if (!paneDeployEl.dataset.loaded) {
         paneDeployEl.dataset.loaded = '1';
         loadDeployPane(id, paneDeployEl);
@@ -3390,16 +3411,62 @@ async function renderProject({ id }) {
       ),
 
 
-      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabTables, tabApi, tabDeploy),
-      paneTablesEl, paneApiEl, paneDeployEl,
+      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabOverview, tabTables, tabApi, tabDeploy),
+      paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl,
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
-    // Eagerly load the default (Tables) tab
-    paneTablesEl.dataset.loaded = '1';
-    loadTablesPane(id, paneTablesEl);
+    // Eagerly load the default (Overview) tab
+    paneOverviewEl.dataset.loaded = '1';
+    loadOverviewPane(id, paneOverviewEl, switchProjectTab);
   } catch (e) {
     setApp(`<div class="alert alert-danger">${e.message}</div>`);
+  }
+}
+
+async function loadOverviewPane(projectId, container, switchTab) {
+  container.innerHTML = '';
+  container.appendChild(el('div', { class: 'text-muted' }, 'Loading…'));
+  try {
+    const o = await Api.get(`/v1/projects/${projectId}/overview`);
+    container.innerHTML = '';
+
+    const stat = (val, label) => el('div', { class: 'home-stat' },
+      el('div', { class: 'home-stat-num' }, String(val)),
+      el('div', { class: 'home-stat-label' }, label)
+    );
+    container.appendChild(el('div', { class: 'home-stats' },
+      stat(o.stats.tables, o.stats.tables === 1 ? 'Table' : 'Tables'),
+      stat(o.stats.live ? 'Live' : (o.stats.has_staging ? 'Staging' : '—'), 'Status'),
+      stat(fmtDate(o.project.created_at), 'Created')
+    ));
+
+    const ctas = el('div', { class: 'overview-ctas' },
+      el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open({ projectId: parseInt(projectId) }) }, '✦ Edit with AI'),
+      el('button', { class: 'btn btn-secondary', onClick: () => switchTab(1) }, '▦ Open Tables')
+    );
+    if (o.stats.live && o.site_id) {
+      ctas.appendChild(el('a', { class: 'btn btn-secondary', href: `/sites/s${o.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →'));
+    }
+    if (o.stats.has_staging) {
+      ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Review Staging'));
+    } else if (!o.stats.live) {
+      ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Deploy'));
+    }
+    container.appendChild(ctas);
+
+    container.appendChild(el('div', { class: 'home-section-head' },
+      el('span', { class: 'sb-section-label' }, 'Recent activity')
+    ));
+    if (o.activity && o.activity.length) {
+      const feed = el('div', { class: 'home-activity' });
+      o.activity.forEach(a => feed.appendChild(renderHomeActivityItem(a)));
+      container.appendChild(feed);
+    } else {
+      container.appendChild(el('div', { class: 'text-muted', style: 'padding:16px 0' }, 'No activity yet.'));
+    }
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
