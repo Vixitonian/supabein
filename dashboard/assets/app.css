@@ -633,6 +633,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .proj-menu-drop { position: absolute; top: calc(100% + 4px); right: 0; z-index: 60; }
 .proj-card-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
 .proj-card-date { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.proj-grid-sentinel { grid-column: 1 / -1; text-align: center; padding: 10px 0 4px; font-size: 12px; color: var(--muted); min-height: 1px; }
 
 /* File browser */
 .fb-row:hover td { background: rgba(255,255,255,0.04); }

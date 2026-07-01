@@ -19,10 +19,25 @@ function register_project_routes(\SupaBein\Router $router): void
 {
     $catalog = \SupaBein\Catalog::getInstance();
 
-    // GET /v1/projects
+    // GET /v1/projects — supports ?limit=&offset= for lazy-loading the project
+    // list; without those params it returns the full array as before (used by
+    // the AI panel's project picker and other callers that want everything).
     $router->get('/v1/projects', function (array $req) use ($catalog): void {
         $projects = $catalog->listProjectsWithStats($req['auth']['user_id']);
-        json_out($projects);
+
+        if (!isset($req['query']['limit'])) {
+            json_out($projects);
+            return;
+        }
+
+        $limit  = max(1, min(100, (int)$req['query']['limit']));
+        $offset = max(0, (int)($req['query']['offset'] ?? 0));
+
+        json_out([
+            'projects' => array_slice($projects, $offset, $limit),
+            'total'    => count($projects),
+            'has_more' => ($offset + $limit) < count($projects),
+        ]);
     }, ['auth_middleware']);
 
     // GET /v1/overview — aggregated data for the Home dashboard
