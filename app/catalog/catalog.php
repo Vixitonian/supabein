@@ -70,6 +70,115 @@ class Catalog
         return $row ? self::castRow($row, ['id', 'owner_user_id']) : null;
     }
 
+    /**
+     * Aggregated data for the Home overview: stats, recent projects, items that
+     * need attention (unpublished staging), and a merged activity feed
+     * (project-created, deploys, AI sessions). One method, a handful of queries.
+     */
+    public function getOverview(int $userId): array
+    {
+        $pdo      = $this->pdo;
+        $projects = $this->listProjects($userId); // id, name, created_at (desc)
+        $ids      = array_map('intval', array_column($projects, 'id'));
+        $nameById = [];
+        foreach ($projects as $p) $nameById[(int)$p['id']] = $p['name'];
+
+        $tablesByProject = [];
+        $sitesByProject  = [];
+        $tableCount = 0;
+        $liveSites  = 0;
+
+        if ($ids) {
+            $in = implode(',', array_fill(0, count($ids), '?'));
+
+            $st = $pdo->prepare("SELECT project_id, COUNT(*) c FROM project_tables WHERE project_id IN ($in) GROUP BY project_id");
+            $st->execute($ids);
+            foreach ($st->fetchAll() as $r) { $tablesByProject[(int)$r['project_id']] = (int)$r['c']; $tableCount += (int)$r['c']; }
+
+            $st = $pdo->prepare("SELECT id, project_id, subdomain, current_deploy_id, staging_deploy_id FROM sites WHERE project_id IN ($in)");
+            $st->execute($ids);
+            foreach ($st->fetchAll() as $r) {
+                $sitesByProject[(int)$r['project_id']] = $r;
+                if (!empty($r['current_deploy_id'])) $liveSites++;
+            }
+        }
+
+        // Recent projects (top 4) enriched with counts + site status.
+        $recentProjects = array_map(function ($p) use ($tablesByProject, $sitesByProject) {
+            $pid  = (int)$p['id'];
+            $site = $sitesByProject[$pid] ?? null;
+            return [
+                'id'          => $pid,
+                'name'        => $p['name'],
+                'created_at'  => $p['created_at'],
+                'tables'      => $tablesByProject[$pid] ?? 0,
+                'site_id'     => $site ? (int)$site['id'] : null,
+                'live'        => (bool)($site && !empty($site['current_deploy_id'])),
+                'has_staging' => (bool)($site && !empty($site['staging_deploy_id'])),
+            ];
+        }, array_slice($projects, 0, 4));
+
+        // Needs attention: sites with an unpublished staging deploy.
+        $needs = [];
+        foreach ($sitesByProject as $pid => $site) {
+            if (!empty($site['staging_deploy_id'])) {
+                $needs[] = [
+                    'type'         => 'staging',
+                    'project_id'   => (int)$pid,
+                    'site_id'      => (int)$site['id'],
+                    'deploy_id'    => (int)$site['staging_deploy_id'],
+                    'project_name' => $nameById[(int)$pid] ?? 'Project',
+                ];
+            }
+        }
+
+        // Merged activity feed.
+        $activity = [];
+        foreach ($projects as $p) {
+            $activity[] = ['type' => 'project_created', 'project_id' => (int)$p['id'], 'project_name' => $p['name'], 'ts' => $p['created_at']];
+        }
+        if ($ids) {
+            $in = implode(',', array_fill(0, count($ids), '?'));
+            $st = $pdo->prepare(
+                "SELECT d.id, d.status, d.uploaded_at, s.project_id, s.current_deploy_id, s.staging_deploy_id
+                 FROM deploys d JOIN sites s ON s.id = d.site_id
+                 WHERE s.project_id IN ($in) ORDER BY d.uploaded_at DESC LIMIT 20"
+            );
+            $st->execute($ids);
+            foreach ($st->fetchAll() as $r) {
+                $target = ((int)$r['current_deploy_id'] === (int)$r['id']) ? 'live'
+                        : (((int)$r['staging_deploy_id'] === (int)$r['id']) ? 'staging' : 'archived');
+                $activity[] = [
+                    'type'         => 'deploy',
+                    'project_id'   => (int)$r['project_id'],
+                    'project_name' => $nameById[(int)$r['project_id']] ?? 'Project',
+                    'target'       => $target,
+                    'status'       => $r['status'],
+                    'ts'           => $r['uploaded_at'],
+                ];
+            }
+        }
+        foreach (array_slice($this->listAiSessions($userId), 0, 20) as $s) {
+            $activity[] = [
+                'type'         => 'session',
+                'session_id'   => (int)$s['id'],
+                'project_id'   => $s['project_id'] ? (int)$s['project_id'] : null,
+                'project_name' => $s['project_id'] ? ($nameById[(int)$s['project_id']] ?? null) : null,
+                'name'         => $s['name'],
+                'ts'           => $s['updated_at'] ?? $s['created_at'],
+            ];
+        }
+        usort($activity, fn($a, $b) => strcmp((string)($b['ts'] ?? ''), (string)($a['ts'] ?? '')));
+        $activity = array_slice($activity, 0, 15);
+
+        return [
+            'stats'           => ['projects' => count($projects), 'tables' => $tableCount, 'live_sites' => $liveSites],
+            'recent_projects' => $recentProjects,
+            'needs_attention' => $needs,
+            'activity'        => $activity,
+        ];
+    }
+
     public function getProjectByIdInternal(int $id): ?array
     {
         $stmt = $this->pdo->prepare(

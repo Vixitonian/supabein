@@ -25,6 +25,11 @@ function register_project_routes(\SupaBein\Router $router): void
         json_out($projects);
     }, ['auth_middleware']);
 
+    // GET /v1/overview — aggregated data for the Home dashboard
+    $router->get('/v1/overview', function (array $req) use ($catalog): void {
+        json_out($catalog->getOverview((int)$req['auth']['user_id']));
+    }, ['auth_middleware']);
+
     // POST /v1/projects
     $router->post('/v1/projects', function (array $req) use ($catalog): void {
         $name = trim($req['body']['name'] ?? '');

@@ -602,7 +602,11 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
     ),
     el('div', { class: 'sb-nav' },
       el('div', { class: 'sb-section-label' }, 'Workspace'),
-      el('a', { href: '#/projects', class: 'sb-link' + (!projectId && activeTab !== 'account' ? ' active' : '') },
+      el('a', { href: '#/home', class: 'sb-link' + (activeTab === 'home' ? ' active' : '') },
+        el('span', { class: 'sb-icon' }, '⌂'),
+        'Home'
+      ),
+      el('a', { href: '#/projects', class: 'sb-link' + (!projectId && activeTab !== 'account' && activeTab !== 'home' ? ' active' : '') },
         el('span', { class: 'sb-icon' }, '⊟'),
         'Projects'
       )
@@ -2988,7 +2992,13 @@ const AiPanel = (() => {
     if (isOpen) close(); else open(options);
   }
 
-  return { open, close, toggle };
+  // Open the panel and jump straight to a specific saved session (used by Home).
+  async function openSession(id) {
+    await open();
+    if (id) { try { await switchSession(id); } catch (_) {} }
+  }
+
+  return { open, close, toggle, openSession };
 })();
 
 function initAiFab() {
@@ -3006,6 +3016,157 @@ function initAiFab() {
 }
 
 // Projects list
+function homeTimeAgo(ts) {
+  if (!ts) return '';
+  const d = new Date((ts || '').replace(' ', 'T'));
+  if (isNaN(d)) return fmtDate(ts);
+  const s = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  if (s < 604800) return Math.floor(s / 86400) + 'd ago';
+  return fmtDate(ts);
+}
+
+function renderHomeActivityItem(a) {
+  const ICON = { project_created: '✦', deploy: '🚀', session: '💬' };
+  let label, sub = a.project_name || '', href = null, onClick = null;
+  if (a.type === 'project_created') {
+    label = 'Created ' + (a.project_name || 'a project');
+    href = '#/projects/' + a.project_id;
+  } else if (a.type === 'deploy') {
+    const t = a.target === 'live' ? 'live' : a.target === 'staging' ? 'staging' : 'archived';
+    label = 'Deployed ' + (a.project_name || '');
+    sub = t.charAt(0).toUpperCase() + t.slice(1) + (a.status && a.status !== 'ready' ? ' · ' + a.status : '');
+    if (a.project_id) href = '#/projects/' + a.project_id + '/sites';
+  } else if (a.type === 'session') {
+    label = a.name && a.name !== 'New session' ? a.name : 'AI session';
+    sub = a.project_name ? 'on ' + a.project_name : 'Platform';
+    onClick = () => AiPanel.openSession(a.session_id);
+  } else {
+    label = a.type;
+  }
+  const row = el('div', { class: 'home-activity-item' + (href || onClick ? ' home-activity-clickable' : '') },
+    el('span', { class: 'home-activity-icon' }, ICON[a.type] || '•'),
+    el('div', { class: 'home-activity-text' },
+      el('div', { class: 'home-activity-label' }, label),
+      sub ? el('div', { class: 'home-activity-sub' }, sub) : null
+    ),
+    el('span', { class: 'home-activity-time' }, homeTimeAgo(a.ts))
+  );
+  if (href) row.addEventListener('click', () => { window.location.hash = href; });
+  else if (onClick) row.addEventListener('click', onClick);
+  return row;
+}
+
+async function renderHome() {
+  if (!requireAuth()) return;
+  const user = Auth.getUser();
+  const name = user?.email ? user.email.split('@')[0] : 'there';
+
+  renderLayout(null, 'home', [
+    el('div', { class: 'home-hero' },
+      el('div', { class: 'home-hero-text' },
+        el('h1', { class: 'home-greeting' }, 'Welcome back, ' + name),
+        el('p', { class: 'home-sub' }, 'Build, edit, and ship your backends.')
+      ),
+      el('div', { class: 'home-hero-actions' },
+        el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open() }, '✦ Build with AI'),
+        el('button', { class: 'btn btn-secondary', onClick: () => showNewProjectModal() }, '+ New Project')
+      )
+    ),
+    el('div', { id: 'home-body' }, el('div', { class: 'home-loading text-muted' }, 'Loading your overview…'))
+  ]);
+
+  let o;
+  try {
+    o = await Api.get('/v1/overview');
+  } catch (e) {
+    const body = document.getElementById('home-body');
+    if (body) { body.innerHTML = ''; body.appendChild(el('div', { class: 'alert alert-error' }, 'Could not load your overview — ' + e.message)); }
+    return;
+  }
+
+  const body = document.getElementById('home-body');
+  if (!body) return;
+  body.innerHTML = '';
+
+  // Empty state — brand new account with no projects.
+  if (!o.stats.projects) {
+    body.appendChild(el('div', { class: 'home-empty' },
+      el('div', { class: 'home-empty-icon' }, '✦'),
+      el('p', {}, 'No projects yet — describe an app and let the AI build it.'),
+      el('button', { class: 'btn btn-ai', style: 'margin-top:8px', onClick: () => AiPanel.open() }, '✦ Build with AI')
+    ));
+    return;
+  }
+
+  // Needs attention.
+  if (o.needs_attention && o.needs_attention.length) {
+    const strip = el('div', { class: 'home-attention' });
+    o.needs_attention.forEach(n => {
+      const a = el('a', { class: 'home-attention-item', href: `#/projects/${n.project_id}/sites/${n.site_id}` },
+        el('span', { class: 'home-attention-dot' }),
+        el('span', {}, el('strong', {}, n.project_name), ' has staging changes not published'),
+        el('span', { class: 'home-attention-cta' }, 'Review & publish →')
+      );
+      strip.appendChild(a);
+    });
+    body.appendChild(strip);
+  }
+
+  // Stats.
+  const stat = (n, label) => el('div', { class: 'home-stat' },
+    el('div', { class: 'home-stat-num' }, String(n)),
+    el('div', { class: 'home-stat-label' }, label)
+  );
+  body.appendChild(el('div', { class: 'home-stats' },
+    stat(o.stats.projects, o.stats.projects === 1 ? 'Project' : 'Projects'),
+    stat(o.stats.tables, o.stats.tables === 1 ? 'Table' : 'Tables'),
+    stat(o.stats.live_sites, o.stats.live_sites === 1 ? 'Live site' : 'Live sites')
+  ));
+
+  // Recent projects.
+  if (o.recent_projects && o.recent_projects.length) {
+    body.appendChild(el('div', { class: 'home-section-head' },
+      el('span', { class: 'sb-section-label' }, 'Recent projects'),
+      el('a', { class: 'home-section-link', href: '#/projects' }, 'All projects →')
+    ));
+    const grid = el('div', { class: 'home-proj-grid' });
+    o.recent_projects.forEach(p => {
+      const links = el('div', { class: 'home-proj-links' });
+      links.appendChild(el('a', { class: 'home-proj-link', href: `#/projects/${p.id}` }, 'Open'));
+      if (p.live && p.site_id) links.appendChild(el('a', { class: 'home-proj-link', href: `/sites/s${p.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View site'));
+      const card = el('div', { class: 'home-proj-card' },
+        el('a', { class: 'home-proj-main', href: `#/projects/${p.id}` },
+          el('div', { class: 'proj-initial' }, (p.name || '?')[0].toUpperCase()),
+          el('div', { class: 'home-proj-body' },
+            el('div', { class: 'home-proj-name' }, p.name),
+            el('div', { class: 'home-proj-meta' },
+              `${p.tables} table${p.tables === 1 ? '' : 's'}`,
+              p.live ? el('span', { class: 'home-badge home-badge-live' }, 'Live')
+                     : (p.has_staging ? el('span', { class: 'home-badge home-badge-staging' }, 'Staging') : null)
+            )
+          )
+        ),
+        links
+      );
+      grid.appendChild(card);
+    });
+    body.appendChild(grid);
+  }
+
+  // Activity.
+  if (o.activity && o.activity.length) {
+    body.appendChild(el('div', { class: 'home-section-head' },
+      el('span', { class: 'sb-section-label' }, 'Recent activity')
+    ));
+    const feed = el('div', { class: 'home-activity' });
+    o.activity.forEach(a => feed.appendChild(renderHomeActivityItem(a)));
+    body.appendChild(feed);
+  }
+}
+
 async function renderProjects() {
   if (!requireAuth()) return;
 
@@ -4320,7 +4481,7 @@ async function loadFileBrowser(projectId, siteId, container, path) {
 }
 
 function render404() {
-  setApp('<div style="padding:48px;text-align:center"><h1 style="font-size:48px;color:var(--muted)">404</h1><p class="text-muted">Page not found</p><a href="#/projects">Go home</a></div>');
+  setApp('<div style="padding:48px;text-align:center"><h1 style="font-size:48px;color:var(--muted)">404</h1><p class="text-muted">Page not found</p><a href="#/home">Go home</a></div>');
 }
 
 // ─── Account ──────────────────────────────────────────────────────────────────
@@ -4568,7 +4729,7 @@ async function renderAccount() {
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 Router.add('', () => {
-  if (Auth.isLoggedIn()) Router.navigate('/projects');
+  if (Auth.isLoggedIn()) Router.navigate('/home');
   else Router.navigate('/login');
 });
 
@@ -4582,6 +4743,7 @@ Router.add('logout', () => {
   Router.navigate('/login');
 });
 
+Router.add('home',                                  renderHome);
 Router.add('projects',                              renderProjects);
 Router.add('projects/:id',                          renderProject);
 Router.add('projects/:id/tables',                   renderTables);
