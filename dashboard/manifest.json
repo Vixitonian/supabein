@@ -5,7 +5,7 @@
   "start_url": "/dashboard/",
   "scope": "/dashboard/",
   "display": "standalone",
-  "orientation": "any",
+  "orientation": "portrait-primary",
   "background_color": "#0f1117",
   "theme_color": "#3ecf8e",
   "lang": "en",
