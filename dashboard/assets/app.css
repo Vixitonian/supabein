@@ -410,6 +410,9 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+/* Project Overview tab */
+.overview-ctas { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 26px; }
+
 /* Progress bar */
 .progress-wrap { background: var(--border); border-radius: 999px; height: 6px; margin-top: 8px; }
 .progress-bar { background: var(--accent); height: 6px; border-radius: 999px; width: 0; transition: width 0.2s; }
@@ -457,10 +460,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   justify-content: flex-end;
   padding: 0 16px;
   flex-shrink: 0;
-  transition: transform 0.25s ease;
-}
-.sb-topbar.sb-topbar-hidden {
-  transform: translateY(-100%);
 }
 .sb-topbar-brand {
   display: none;
@@ -609,12 +608,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 /* Project cards grid */
 .proj-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
 .proj-card {
-  display: flex; align-items: center; gap: 14px;
+  display: flex; flex-direction: column; gap: 12px;
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 12px; padding: 16px 14px; text-decoration: none; color: var(--text);
-  transition: border-color 0.15s, box-shadow 0.15s; position: relative;
+  border-radius: 12px; padding: 16px 14px; position: relative;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 .proj-card:hover { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); }
+.proj-card-main { display: flex; align-items: center; gap: 14px; text-decoration: none !important; color: var(--text); min-width: 0; padding-right: 26px; }
 .proj-initial {
   width: 44px; height: 44px; flex-shrink: 0; border-radius: 10px;
   background: var(--accent); color: #000;
@@ -623,14 +623,16 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 .proj-card-body { flex: 1; min-width: 0; }
 .proj-card-name { font-weight: 600; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.proj-card-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
-.proj-menu-wrap { position: relative; flex-shrink: 0; }
+.proj-card-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 3px; display: flex; align-items: center; gap: 8px; }
+.proj-menu-wrap { position: absolute; top: 14px; right: 12px; }
 .proj-menu-btn {
   background: none; border: none; color: var(--text-muted); cursor: pointer;
   font-size: 18px; line-height: 1; padding: 4px 6px; border-radius: 6px;
 }
 .proj-menu-btn:hover { background: var(--border); color: var(--text); }
 .proj-menu-drop { position: absolute; top: calc(100% + 4px); right: 0; z-index: 60; }
+.proj-card-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+.proj-card-date { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 
 /* File browser */
 .fb-row:hover td { background: rgba(255,255,255,0.04); }
@@ -976,8 +978,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-model-btn:hover { border-color: var(--accent); color: var(--text); }
 .ai-model-dropdown {
   position: absolute;
-  top: calc(100% + 2px);
-  right: 36px;
+  bottom: calc(100% + 4px);
+  left: 14px;
   background: var(--surface, #1a1d27);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1173,6 +1175,7 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-input-bar {
   padding: 10px 14px 16px;
   flex-shrink: 0;
+  position: relative;
 }
 .ai-input-card {
   background: var(--surface);

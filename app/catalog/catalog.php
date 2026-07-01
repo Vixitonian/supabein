@@ -60,6 +60,39 @@ class Catalog
         return self::castRows($stmt->fetchAll(), ['id', 'owner_user_id']);
     }
 
+    /**
+     * Same as listProjects() but enriched with table counts and site status,
+     * so the dashboard's project list can show more than just names.
+     */
+    public function listProjectsWithStats(int $userId): array
+    {
+        $projects = $this->listProjects($userId);
+        $ids = array_map('intval', array_column($projects, 'id'));
+        if (!$ids) return [];
+
+        $in = implode(',', array_fill(0, count($ids), '?'));
+
+        $tablesByProject = [];
+        $st = $this->pdo->prepare("SELECT project_id, COUNT(*) c FROM project_tables WHERE project_id IN ($in) GROUP BY project_id");
+        $st->execute($ids);
+        foreach ($st->fetchAll() as $r) $tablesByProject[(int)$r['project_id']] = (int)$r['c'];
+
+        $sitesByProject = [];
+        $st = $this->pdo->prepare("SELECT id, project_id, current_deploy_id, staging_deploy_id FROM sites WHERE project_id IN ($in)");
+        $st->execute($ids);
+        foreach ($st->fetchAll() as $r) $sitesByProject[(int)$r['project_id']] = $r;
+
+        return array_map(function ($p) use ($tablesByProject, $sitesByProject) {
+            $pid  = (int)$p['id'];
+            $site = $sitesByProject[$pid] ?? null;
+            $p['tables']      = $tablesByProject[$pid] ?? 0;
+            $p['site_id']     = $site ? (int)$site['id'] : null;
+            $p['live']        = (bool)($site && !empty($site['current_deploy_id']));
+            $p['has_staging'] = (bool)($site && !empty($site['staging_deploy_id']));
+            return $p;
+        }, $projects);
+    }
+
     public function getProjectById(int $id, int $userId): ?array
     {
         $stmt = $this->pdo->prepare(
@@ -102,21 +135,6 @@ class Catalog
                 if (!empty($r['current_deploy_id'])) $liveSites++;
             }
         }
-
-        // Recent projects (top 4) enriched with counts + site status.
-        $recentProjects = array_map(function ($p) use ($tablesByProject, $sitesByProject) {
-            $pid  = (int)$p['id'];
-            $site = $sitesByProject[$pid] ?? null;
-            return [
-                'id'          => $pid,
-                'name'        => $p['name'],
-                'created_at'  => $p['created_at'],
-                'tables'      => $tablesByProject[$pid] ?? 0,
-                'site_id'     => $site ? (int)$site['id'] : null,
-                'live'        => (bool)($site && !empty($site['current_deploy_id'])),
-                'has_staging' => (bool)($site && !empty($site['staging_deploy_id'])),
-            ];
-        }, array_slice($projects, 0, 4));
 
         // Needs attention: sites with an unpublished staging deploy.
         $needs = [];
@@ -168,14 +186,112 @@ class Catalog
                 'ts'           => $s['updated_at'] ?? $s['created_at'],
             ];
         }
-        usort($activity, fn($a, $b) => strcmp((string)($b['ts'] ?? ''), (string)($a['ts'] ?? '')));
-        $activity = array_slice($activity, 0, 15);
+        // Last-activity timestamp per project, used to rank "recent projects" by
+        // what actually changed most recently rather than just creation order.
+        $lastActivity = [];
+        foreach ($activity as $a) {
+            $pid = $a['project_id'] ?? null;
+            $ts  = $a['ts'] ?? null;
+            if ($pid === null || $ts === null) continue;
+            if (!isset($lastActivity[$pid]) || strcmp((string)$ts, (string)$lastActivity[$pid]) > 0) {
+                $lastActivity[$pid] = $ts;
+            }
+        }
+
+        $recentProjects = array_map(function ($p) use ($tablesByProject, $sitesByProject, $lastActivity) {
+            $pid  = (int)$p['id'];
+            $site = $sitesByProject[$pid] ?? null;
+            return [
+                'id'          => $pid,
+                'name'        => $p['name'],
+                'created_at'  => $p['created_at'],
+                'updated_at'  => $lastActivity[$pid] ?? $p['created_at'],
+                'tables'      => $tablesByProject[$pid] ?? 0,
+                'site_id'     => $site ? (int)$site['id'] : null,
+                'live'        => (bool)($site && !empty($site['current_deploy_id'])),
+                'has_staging' => (bool)($site && !empty($site['staging_deploy_id'])),
+            ];
+        }, $projects);
+        usort($recentProjects, fn($a, $b) => strcmp((string)$b['updated_at'], (string)$a['updated_at']));
+        $recentProjects = array_slice($recentProjects, 0, 2);
 
         return [
             'stats'           => ['projects' => count($projects), 'tables' => $tableCount, 'live_sites' => $liveSites],
             'recent_projects' => $recentProjects,
             'needs_attention' => $needs,
-            'activity'        => $activity,
+            'activity'        => $this->capActivityWithSession($activity, 4),
+        ];
+    }
+
+    /**
+     * Sort a merged activity feed newest-first, cap it to $limit, and make sure
+     * at least one 'session' entry survives the cap if one exists at all.
+     */
+    private function capActivityWithSession(array $activity, int $limit): array
+    {
+        usort($activity, fn($a, $b) => strcmp((string)($b['ts'] ?? ''), (string)($a['ts'] ?? '')));
+        $top = array_slice($activity, 0, $limit);
+        if (!in_array('session', array_column($top, 'type'), true)) {
+            foreach ($activity as $a) {
+                if ($a['type'] === 'session') {
+                    if (count($top) >= $limit) array_pop($top);
+                    $top[] = $a;
+                    break;
+                }
+            }
+        }
+        return $top;
+    }
+
+    /**
+     * Aggregated data for a single project's Overview tab: stats, the site's
+     * live/staging status, and a merged activity feed scoped to this project.
+     */
+    public function getProjectOverview(int $projectId, int $userId): array
+    {
+        $project = $this->getProjectById($projectId, $userId);
+        if (!$project) return [];
+
+        $tables = $this->listTables($projectId);
+        $sites  = $this->listSites($projectId);
+        $site   = $sites[0] ?? null;
+
+        $activity = [];
+        $activity[] = ['type' => 'project_created', 'project_id' => $projectId, 'project_name' => $project['name'], 'ts' => $project['created_at']];
+        if ($site) {
+            foreach ($this->listDeploys((int)$site['id']) as $d) {
+                $target = ((int)($site['current_deploy_id'] ?? 0) === (int)$d['id']) ? 'live'
+                        : (((int)($site['staging_deploy_id'] ?? 0) === (int)$d['id']) ? 'staging' : 'archived');
+                $activity[] = [
+                    'type'         => 'deploy',
+                    'project_id'   => $projectId,
+                    'project_name' => $project['name'],
+                    'target'       => $target,
+                    'status'       => $d['status'],
+                    'ts'           => $d['uploaded_at'],
+                ];
+            }
+        }
+        foreach ($this->listAiSessionsForProject($projectId, $userId) as $s) {
+            $activity[] = [
+                'type'         => 'session',
+                'session_id'   => (int)$s['id'],
+                'project_id'   => $projectId,
+                'project_name' => $project['name'],
+                'name'         => $s['name'],
+                'ts'           => $s['updated_at'] ?? $s['created_at'],
+            ];
+        }
+
+        return [
+            'project' => $project,
+            'stats' => [
+                'tables'      => count($tables),
+                'live'        => (bool)($site && !empty($site['current_deploy_id'])),
+                'has_staging' => (bool)($site && !empty($site['staging_deploy_id'])),
+            ],
+            'site_id'  => $site ? (int)$site['id'] : null,
+            'activity' => $this->capActivityWithSession($activity, 4),
         ];
     }
 
@@ -531,6 +647,17 @@ class Catalog
              FROM ai_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 100'
         );
         $stmt->execute([$userId]);
+        $rows = $stmt->fetchAll() ?: [];
+        return self::castRows($rows, ['id', 'user_id', 'project_id']);
+    }
+
+    public function listAiSessionsForProject(int $projectId, int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, project_id, name, created_at, updated_at
+             FROM ai_sessions WHERE user_id = ? AND project_id = ? ORDER BY updated_at DESC LIMIT 20'
+        );
+        $stmt->execute([$userId, $projectId]);
         $rows = $stmt->fetchAll() ?: [];
         return self::castRows($rows, ['id', 'user_id', 'project_id']);
     }

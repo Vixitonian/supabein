@@ -28,8 +28,32 @@ const Router = (() => {
     window.location.hash = hash;
   }
 
+  function currentPath() {
+    return (window.location.hash.replace(/^#\/?/, '') || '');
+  }
+
   function init() {
-    window.addEventListener('hashchange', () => dispatch(window.location.hash));
+    // Tag every entry we land on so we can tell "back within the app" apart
+    // from "back past the app boundary" (e.g. arriving via a deep link, or
+    // reload) in the popstate handler below.
+    let lastPath = currentPath();
+    history.replaceState({ sbApp: true }, '', window.location.href);
+
+    window.addEventListener('hashchange', () => {
+      history.replaceState({ sbApp: true }, '', window.location.href);
+      lastPath = currentPath();
+      dispatch(window.location.hash);
+    });
+
+    window.addEventListener('popstate', (e) => {
+      if (e.state && e.state.sbApp) return; // normal back/forward within the app
+      const wasHome = lastPath === '' || lastPath === 'home';
+      if (wasHome) return; // already at the root — let it exit naturally
+      history.pushState({ sbApp: true }, '', '#/home');
+      lastPath = 'home';
+      dispatch('#/home');
+    });
+
     dispatch(window.location.hash);
   }
 
