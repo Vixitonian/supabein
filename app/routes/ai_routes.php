@@ -3552,7 +3552,12 @@ PROMPT;
 
     // ── Run Playwright user-story tests against a deployed site ───────────────
     $router->post('/v1/ai/test', function (array $req): void {
-        set_time_limit(120);
+        // 120s was tight for: AI-generated test script + spinning up a real
+        // browser via Browserless + running each user-story test + a
+        // screenshot — leaving little margin before PHP's execution limit
+        // killed the request outright (no error response, just a dropped
+        // connection the client sees as a generic network failure).
+        set_time_limit(280);
 
         $config    = \App::get('config');
         $catalog   = \SupaBein\Catalog::getInstance();
@@ -3592,6 +3597,13 @@ PROMPT;
         $schema = ai_schema_from_db($projectId, $catalog);
         $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId);
         $result = ai_playwright_test_run($script, $config);
+
+        sb_log('ai_test', $result['error'] ? 'Failed: ' . $result['error'] : 'Complete', [
+            'project_id' => $projectId,
+            'target'     => $target,
+            'passed'     => $result['passed'] ?? null,
+            'failed'     => $result['failed'] ?? null,
+        ]);
 
         json_out($result);
     }, ['auth_middleware']);
