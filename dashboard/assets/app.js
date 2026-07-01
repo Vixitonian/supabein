@@ -3162,6 +3162,52 @@ async function renderHome() {
   }
 }
 
+function buildProjectCard(p) {
+  const initial = (p.name || '?')[0].toUpperCase();
+  const menuBtn = el('button', { class: 'proj-menu-btn', title: 'More options' }, '⋮');
+  const dropdown = el('div', { class: 'proj-menu-drop hidden' },
+    el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Delete')
+  );
+  menuBtn.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    document.querySelectorAll('.proj-menu-drop').forEach(d => { if (d !== dropdown) d.classList.add('hidden'); });
+    dropdown.classList.toggle('hidden');
+  });
+
+  const footerLinks = [
+    el('a', { class: 'home-proj-link', href: `#/projects/${p.id}` }, 'Open')
+  ];
+  if (p.live && p.site_id) {
+    footerLinks.push(el('a', { class: 'home-proj-link', href: `/sites/s${p.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View site'));
+  }
+
+  const card = el('div', { class: 'proj-card' },
+    el('a', { class: 'proj-card-main', href: `#/projects/${p.id}` },
+      el('div', { class: 'proj-initial' }, initial),
+      el('div', { class: 'proj-card-body' },
+        el('div', { class: 'proj-card-name' }, p.name),
+        el('div', { class: 'proj-card-meta' },
+          `${p.tables ?? 0} table${(p.tables ?? 0) === 1 ? '' : 's'}`,
+          p.live ? el('span', { class: 'home-badge home-badge-live' }, 'Live')
+                 : (p.has_staging ? el('span', { class: 'home-badge home-badge-staging' }, 'Staging') : null)
+        )
+      )
+    ),
+    el('div', { class: 'proj-menu-wrap' }, menuBtn, dropdown),
+    el('div', { class: 'proj-card-footer' },
+      ...footerLinks,
+      el('span', { class: 'proj-card-date' }, fmtDate(p.created_at))
+    )
+  );
+
+  dropdown.querySelector('button').addEventListener('click', async e => {
+    e.preventDefault();
+    showDeleteProjectModal(p, () => card.remove());
+  });
+
+  return card;
+}
+
 async function renderProjects() {
   if (!requireAuth()) return;
 
@@ -3172,11 +3218,39 @@ async function renderProjects() {
 
   document.getElementById('new-project').addEventListener('click', () => showNewProjectModal());
 
-  try {
-    const projects = await Api.get('/v1/projects');
-    const list = document.getElementById('project-list');
+  const PAGE_SIZE = 12;
+  let offset = 0;
+  let hasMore = false;
+  let loading = false;
+  let observer = null;
+  let grid = null;
+  let sentinel = null;
 
-    if (!projects.length) {
+  async function loadMore() {
+    if (loading || !hasMore) return;
+    loading = true;
+    sentinel.textContent = 'Loading more…';
+    try {
+      const res = await Api.get(`/v1/projects?limit=${PAGE_SIZE}&offset=${offset}`);
+      const items = res.projects || [];
+      items.forEach(p => grid.insertBefore(buildProjectCard(p), sentinel));
+      offset += items.length;
+      hasMore = !!res.has_more;
+      sentinel.textContent = '';
+      if (!hasMore) { observer?.disconnect(); sentinel.remove(); }
+    } catch (e) {
+      sentinel.textContent = 'Couldn\'t load more — scroll to retry.';
+    } finally {
+      loading = false;
+    }
+  }
+
+  try {
+    const list = document.getElementById('project-list');
+    const first = await Api.get(`/v1/projects?limit=${PAGE_SIZE}&offset=0`);
+    const items = first.projects || [];
+
+    if (!items.length) {
       list.innerHTML = '';
       list.appendChild(el('div', { class: 'ai-empty-state' },
         el('p', { class: 'text-muted' }, 'No projects yet.'),
@@ -3185,54 +3259,23 @@ async function renderProjects() {
       return;
     }
 
-    const grid = el('div', { class: 'proj-grid' },
-      ...projects.map(p => {
-        const initial = (p.name || '?')[0].toUpperCase();
-        const menuBtn = el('button', { class: 'proj-menu-btn', title: 'More options' }, '⋮');
-        const dropdown = el('div', { class: 'proj-menu-drop hidden' },
-          el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Delete')
-        );
-        menuBtn.addEventListener('click', e => {
-          e.preventDefault(); e.stopPropagation();
-          document.querySelectorAll('.proj-menu-drop').forEach(d => { if (d !== dropdown) d.classList.add('hidden'); });
-          dropdown.classList.toggle('hidden');
-        });
-        dropdown.querySelector('button').addEventListener('click', async e => {
-          e.preventDefault();
-          showDeleteProjectModal(p, () => renderProjects());
-        });
+    offset  = items.length;
+    hasMore = !!first.has_more;
 
-        const footerLinks = [
-          el('a', { class: 'home-proj-link', href: `#/projects/${p.id}` }, 'Open')
-        ];
-        if (p.live && p.site_id) {
-          footerLinks.push(el('a', { class: 'home-proj-link', href: `/sites/s${p.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View site'));
-        }
-
-        const card = el('div', { class: 'proj-card' },
-          el('a', { class: 'proj-card-main', href: `#/projects/${p.id}` },
-            el('div', { class: 'proj-initial' }, initial),
-            el('div', { class: 'proj-card-body' },
-              el('div', { class: 'proj-card-name' }, p.name),
-              el('div', { class: 'proj-card-meta' },
-                `${p.tables ?? 0} table${(p.tables ?? 0) === 1 ? '' : 's'}`,
-                p.live ? el('span', { class: 'home-badge home-badge-live' }, 'Live')
-                       : (p.has_staging ? el('span', { class: 'home-badge home-badge-staging' }, 'Staging') : null)
-              )
-            )
-          ),
-          el('div', { class: 'proj-menu-wrap' }, menuBtn, dropdown),
-          el('div', { class: 'proj-card-footer' },
-            ...footerLinks,
-            el('span', { class: 'proj-card-date' }, fmtDate(p.created_at))
-          )
-        );
-        return card;
-      })
-    );
+    sentinel = el('div', { class: 'proj-grid-sentinel' });
+    grid = el('div', { class: 'proj-grid' }, ...items.map(buildProjectCard), sentinel);
 
     list.innerHTML = '';
     list.appendChild(grid);
+
+    if (hasMore) {
+      observer = new IntersectionObserver(entries => {
+        if (entries[0].isIntersecting) loadMore();
+      }, { rootMargin: '300px' });
+      observer.observe(sentinel);
+    } else {
+      sentinel.remove();
+    }
   } catch (e) {
     document.getElementById('project-list').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
