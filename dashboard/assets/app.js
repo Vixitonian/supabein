@@ -1539,8 +1539,16 @@ const AiPanel = (() => {
         (ev) => { applyProgressEvent(progressMsg, ev); renderMessages(); }
       );
 
-      if (!finalEv || finalEv.stage === 'error') {
+      if (!finalEv || finalEv.stage !== 'complete') {
+        // Anything other than an explicit 'complete' event means the stream
+        // ended early — a mid-stream error, or the connection got cut before
+        // the final event (proxy/timeout). Either way there's no usable plan,
+        // so mark the card failed instead of leaving it stuck mid-spin.
         const emsg = (finalEv && finalEv.message) || 'The stream ended unexpectedly — please try again.';
+        // Mark the in-flight stage failed (✗) but let the dedicated error card below
+        // carry the message + Retry, rather than duplicating the text in two places.
+        const active = progressMsg.data.stages.find(s => s.status === 'active');
+        if (active) active.status = 'error';
         liveTraceMsg.data.push({ call: 'POST ' + opts.endpoint, inputs: body, status: 0, outputs: { error: emsg, at: finalEv?.at }, ms: Date.now() - t0 });
         await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
       } else {
