@@ -633,14 +633,18 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
   const burger = el('button', { class: 'sb-hamburger', 'aria-label': 'Toggle menu' },
     el('span'), el('span'), el('span')
   );
-  const aiTopbarBtn = el('button', { class: 'sb-ai-topbar-btn', onClick: () => AiPanel.toggle() }, '✦ AI');
+  // Home already has its own "Build with AI" CTA, so skip the duplicate topbar button there.
+  const topbarRight = el('div', { class: 'sb-topbar-right' });
+  if (activeTab !== 'home') {
+    topbarRight.appendChild(el('button', { class: 'sb-ai-topbar-btn', onClick: () => AiPanel.toggle() }, '✦ AI'));
+  }
   const topbar = el('div', { class: 'sb-topbar' },
     burger,
     el('div', { class: 'sb-topbar-brand' },
       el('span', { class: 'sb-logo-mark' }, 'SB'),
       el('span', { class: 'sb-logo-text' }, 'SupaBein')
     ),
-    el('div', { class: 'sb-topbar-right' }, aiTopbarBtn)
+    topbarRight
   );
 
   // Dark overlay behind the open drawer
@@ -2921,8 +2925,6 @@ const AiPanel = (() => {
     // Show panel immediately so animation starts without waiting for data
     panelEl.classList.add('ai-panel-open');
     getOrCreateBackdrop().classList.add('active');
-    const fab = document.getElementById('ai-fab');
-    if (fab) fab.classList.add('ai-fab-hidden');
     setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
 
     const autoProject = detectCurrentProject();
@@ -2963,14 +2965,6 @@ const AiPanel = (() => {
     renderMessages();
   }
 
-  function updateFabBadge() {
-    const fab = document.getElementById('ai-fab');
-    if (!fab) return;
-    const sess = currentSession();
-    const hasActivity = sess && sess.messages.some(m => m.role === 'ai' || m.role === 'user');
-    fab.classList.toggle('ai-fab-active', !!hasActivity && !isOpen);
-  }
-
   function close() {
     if (!panelEl) return;
     panelEl.classList.remove('ai-panel-open');
@@ -2978,9 +2972,6 @@ const AiPanel = (() => {
     isOpen = false;
     sidebarVisible = false;
     toggleSidebar(false);
-    const fab = document.getElementById('ai-fab');
-    if (fab) fab.classList.remove('ai-fab-hidden');
-    updateFabBadge();
   }
 
   function toggle(options) {
@@ -2995,20 +2986,6 @@ const AiPanel = (() => {
 
   return { open, close, toggle, openSession };
 })();
-
-function initAiFab() {
-  const AUTH_PAGES = new Set(['login', 'signup', 'forgot', 'reset', 'logout']);
-  const fab = el('button', { class: 'ai-fab', id: 'ai-fab', onClick: () => AiPanel.toggle() }, '✦ AI');
-  document.body.appendChild(fab);
-
-  function updateFabVisibility() {
-    const page = location.hash.replace(/^#\/?/, '').split('/')[0];
-    fab.style.display = (!Auth.isLoggedIn() || AUTH_PAGES.has(page)) ? 'none' : '';
-  }
-
-  window.addEventListener('hashchange', updateFabVisibility);
-  updateFabVisibility();
-}
 
 // Projects list
 function homeTimeAgo(ts) {
@@ -3419,32 +3396,6 @@ async function renderProject({ id }) {
       }
     });
 
-    // Async: fetch site to show "View Site" / "View Staging" in header
-    Api.get(`/v1/projects/${id}/sites`).then(sites => {
-      if (!Array.isArray(sites) || !sites.length) return;
-      const hdr = document.querySelector('.page-header');
-      if (!hdr) return;
-      const site = sites[0];
-      if (site.staging_deploy_id && !hdr.querySelector('#proj-view-staging-btn')) {
-        hdr.appendChild(el('a', {
-          id: 'proj-view-staging-btn',
-          class: 'btn btn-secondary btn-sm',
-          href: `/sites/s${site.id}/staging/`,
-          target: '_blank',
-          rel: 'noopener'
-        }, 'View Staging →'));
-      }
-      if (site.current_deploy_id && !hdr.querySelector('#proj-view-site-btn')) {
-        hdr.appendChild(el('a', {
-          id: 'proj-view-site-btn',
-          class: 'btn btn-primary btn-sm',
-          href: `/sites/s${site.id}/current/`,
-          target: '_blank',
-          rel: 'noopener'
-        }, 'View Site →'));
-      }
-    }).catch(() => {});
-
     const content = [
       el('div', { class: 'page-header' },
         el('h1', { class: 'page-title' }, project.name),
@@ -3491,8 +3442,9 @@ async function loadOverviewPane(projectId, container, switchTab) {
     if (o.stats.live && o.site_id) {
       ctas.appendChild(el('a', { class: 'btn btn-secondary', href: `/sites/s${o.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →'));
     }
-    if (o.stats.has_staging) {
-      ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Review Staging'));
+    if (o.stats.has_staging && o.site_id) {
+      ctas.appendChild(el('a', { class: 'btn btn-secondary', href: `/sites/s${o.site_id}/staging/`, target: '_blank', rel: 'noopener' }, 'View Staging →'));
+      ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Publish'));
     } else if (!o.stats.live) {
       ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Deploy'));
     }
@@ -4869,4 +4821,4 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
 });
 
-document.addEventListener('DOMContentLoaded', () => { Router.init(); initAiFab(); });
+document.addEventListener('DOMContentLoaded', () => { Router.init(); });
