@@ -1923,6 +1923,7 @@ const AiPanel = (() => {
         await persistSession(s);
       }
     } catch (err) {
+      console.error('[AiPanel] Run Tests failed', err);
       const s = getSession(sid) || currentSession();
       if (s) {
         s.messages = s.messages.filter(m => m.id !== thinkingId);
@@ -4826,4 +4827,12 @@ document.addEventListener('click', () => {
   document.querySelectorAll('.proj-menu-drop:not(.hidden)').forEach(d => d.classList.add('hidden'));
 });
 
-document.addEventListener('DOMContentLoaded', () => { Router.init(); });
+document.addEventListener('DOMContentLoaded', () => {
+  Router.init();
+  // Belt-and-suspenders for the manifest's orientation lock: installed PWAs
+  // often only re-read manifest fields at install time or on the browser's
+  // own periodic re-check, not the moment the file changes on the server.
+  // This applies immediately for anyone already running in standalone mode
+  // (it silently no-ops in a plain browser tab, which can't lock orientation).
+  try { screen.orientation?.lock?.('portrait')?.catch(() => {}); } catch (_) {}
+});
