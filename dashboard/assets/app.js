@@ -1490,7 +1490,7 @@ const AiPanel = (() => {
   // server-side job (see ai_worker.php) independent of this page's lifetime —
   // reloading and reopening the panel just calls this again with the same
   // jobId (see resumeActiveJob below), picking up wherever it left off.
-  async function pollJob(jobId, progressMsg, pollState) {
+  async function pollJob(jobId, progressMsg, pollState, sess) {
     let since = 0;
     while (!pollState.cancelled) {
       await new Promise(r => setTimeout(r, 2000));
@@ -1504,9 +1504,13 @@ const AiPanel = (() => {
         continue; // transient network hiccup — keep polling
       }
 
+      const hadNewEvents = job.events && job.events.length > 0;
       (job.events || []).forEach(ev => applyProgressEvent(progressMsg, ev));
       since = job.event_count;
       renderMessages();
+      // Keep the persisted snapshot current so leaving mid-job and coming back
+      // shows the real stage instead of whatever was last saved at job-start.
+      if (hadNewEvents && sess) persistSession(sess).catch(() => {});
 
       if (job.status === 'done') {
         progressMsg.data.jobDone = true;
@@ -1568,7 +1572,7 @@ const AiPanel = (() => {
     renderMessages();
     await persistSession(sess);
 
-    const finalEv = await pollJob(jobId, progressMsg, pollState);
+    const finalEv = await pollJob(jobId, progressMsg, pollState, sess);
     if (activeJobPoll === pollState) activeJobPoll = null;
 
     if (!finalEv) {
@@ -1620,7 +1624,7 @@ const AiPanel = (() => {
     }
 
     (async () => {
-      const finalEv = await pollJob(progressMsg.data.jobId, progressMsg, pollState);
+      const finalEv = await pollJob(progressMsg.data.jobId, progressMsg, pollState, sess);
       if (activeJobPoll === pollState) activeJobPoll = null;
       if (finalEv) await onComplete(finalEv);
       if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }

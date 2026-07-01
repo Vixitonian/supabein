@@ -3,9 +3,7 @@
 declare(strict_types=1);
 
 $workerRoot = dirname(dirname(__DIR__));
-defined('SUPABEIN_ROOT') || define('SUPABEIN_ROOT', $workerRoot);
-
-require_once SUPABEIN_ROOT . '/app/bootstrap.php';
+require_once $workerRoot . '/app/bootstrap.php'; // defines SUPABEIN_ROOT
 require_once SUPABEIN_ROOT . '/app/routes/project_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/ai_routes.php';
 
