@@ -834,6 +834,7 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
+  let autoTestEnabled = localStorage.getItem('sb:ai_autotest') !== '0'; // default ON
   let buildMode = localStorage.getItem('sb:ai_build') === '1';
   let liveTraceMsg = null;
   let operationInProgress = false;
@@ -1600,7 +1601,7 @@ const AiPanel = (() => {
   }
 
   // Called when the panel opens or a session is switched to: if the loaded
-  // messages include a build/edit job that never resolved (e.g. the page
+  // messages include a build/edit/test job that never resolved (e.g. the page
   // reloaded mid-operation), resume polling it right where it left off —
   // this is what makes reload/rotate/close-the-tab safe.
   function resumeActiveJobIfAny(sess) {
@@ -1616,6 +1617,11 @@ const AiPanel = (() => {
     activeJobPoll = pollState;
     const onComplete = operationMode === 'build'
       ? (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage })
+      : operationMode === 'test'
+      ? (ev) => { sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
+          stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
+          error: ev.error || null, screenshot: ev.screenshot || null,
+        }}); }
       : (ev) => applyPlan(ev.plan, 'edit', null);
 
     if (!liveTraceMsg) {
@@ -1900,39 +1906,60 @@ const AiPanel = (() => {
   }
 
   let testRunning = false;
-  // Run the Playwright user-story tests for a project and append a result card.
-  async function runProjectTests(projectId, btn) {
+  // Run the Playwright user-story tests for a project as a background job with
+  // a live progress card — same machinery as build/edit, so the run survives
+  // closing the panel or reloading the page (the old synchronous request lost
+  // the result if you navigated away during the 30-60s a run takes).
+  async function runProjectTests(projectId, btn, auto = false) {
     if (!projectId || testRunning) return;
     testRunning = true;
     if (btn) btn.disabled = true;
     let sess = currentSession();
     if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
-    await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
-    const sid = currentSessionId;               // pin the target session
-    const thinkingId = 'test_thinking_' + Date.now();
-    sess = getSession(sid);
-    if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
-    sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'test' });
+    if (!auto) await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
+
+    const progressMsg = makeProgressMsg(TEST_PROGRESS_STAGES, auto ? 'Auto-testing your app' : 'Testing your app', 'test');
+    sess.messages.push(progressMsg);
+    operationInProgress = true;
+    operationMode = 'test';
+    updateSendBtn();
     renderMessages();
+
     try {
-      const result = await Api.post('/v1/ai/test', { project_id: projectId });
-      const s = getSession(sid) || currentSession();
-      if (s) {
-        s.messages = s.messages.filter(m => m.id !== thinkingId);
-        s.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: result || { stories: [], passed: 0, failed: 0 } });
-        await persistSession(s);
+      const jobBody = { project_id: projectId };
+      if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
+      const created = await Api.post('/v1/ai/test/job', jobBody);
+      progressMsg.data.jobId = created.job_id;
+      const pollState = { cancelled: false };
+      activeJobPoll = pollState;
+      await persistSession(sess);
+
+      const finalEv = await pollJob(created.job_id, progressMsg, pollState, sess);
+      if (activeJobPoll === pollState) activeJobPoll = null;
+
+      if (finalEv) {
+        sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
+          stories: finalEv.stories || [], passed: finalEv.passed || 0, failed: finalEv.failed || 0,
+          error: finalEv.error || null, screenshot: finalEv.screenshot || null,
+        }});
+      } else if (!pollState.cancelled) {
+        sess.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test',
+          data: { stories: [], passed: 0, failed: 0, error: progressMsg.data.error || 'Test run failed' } });
       }
     } catch (err) {
       console.error('[AiPanel] Run Tests failed', err);
-      const s = getSession(sid) || currentSession();
-      if (s) {
-        s.messages = s.messages.filter(m => m.id !== thinkingId);
-        s.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test', data: { stories: [], passed: 0, failed: 0, error: err.message } });
-        await persistSession(s);
-      }
+      const active = progressMsg.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
+      progressMsg.data.jobDone = true;
+      sess.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test',
+        data: { stories: [], passed: 0, failed: 0, error: err.message } });
     } finally {
       testRunning = false;
+      operationInProgress = false;
+      operationMode = null;
       if (btn) btn.disabled = false;
+      updateSendBtn();
+      await persistSession(sess);
       renderMessages();
       const c = panelEl?.querySelector('.ai-messages');
       if (c) c.scrollTop = c.scrollHeight;
@@ -2407,6 +2434,11 @@ const AiPanel = (() => {
     { key: 'changes', label: 'Generating changes' },
   ];
 
+  const TEST_PROGRESS_STAGES = [
+    { key: 'script', label: 'Generating test script' },
+    { key: 'run',    label: 'Running browser tests' },
+  ];
+
   function makeProgressMsg(stages, title, mode) {
     const list = stages || BUILD_PROGRESS_STAGES;
     return {
@@ -2710,6 +2742,7 @@ const AiPanel = (() => {
   async function applyPlan(plan, mode, planMsg) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
+    let autoTestProjectId = null;
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
 
     if (!liveTraceMsg) {
@@ -2733,6 +2766,13 @@ const AiPanel = (() => {
 
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+
+      // Auto-test: only when a frontend actually got deployed (there's nothing
+      // to browser-test if the apply was schema-only).
+      if (autoTestEnabled && (result.deploy || result.staging || result.site)) {
+        autoTestProjectId = result.project?.id || result.staging?.project_id
+          || (mode === 'edit' ? plan.project_id : null);
+      }
     } catch(e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
         if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
@@ -2763,6 +2803,10 @@ const AiPanel = (() => {
     if (sess) await persistSession(sess);
 
     renderMessages();
+
+    // Kick off the automatic post-deploy test run after the apply operation
+    // has fully wound down (it manages its own progress card and job state).
+    if (autoTestProjectId) runProjectTests(autoTestProjectId, null, true);
   }
 
   function buildPanel() {
@@ -2822,6 +2866,16 @@ const AiPanel = (() => {
       }
     }, 'Review');
 
+    const autoTestToggle = el('button', {
+      class: 'ai-review-toggle' + (autoTestEnabled ? ' active' : ''),
+      title: 'Automatically run browser tests after every build/edit deploy',
+      onClick: () => {
+        autoTestEnabled = !autoTestEnabled;
+        localStorage.setItem('sb:ai_autotest', autoTestEnabled ? '1' : '0');
+        autoTestToggle.classList.toggle('active', autoTestEnabled);
+      }
+    }, 'Auto-test');
+
     const modeBtn = el('button', {
       class: 'ai-mode-btn' + (buildMode ? ' active' : ''),
       title: buildMode ? 'Switch to Chat mode' : 'Switch to Build mode',
@@ -2878,6 +2932,7 @@ const AiPanel = (() => {
           modelSelectorBtn,
           modeBtn,
           reviewToggle,
+          autoTestToggle,
           sendBtn
         )
       )
