@@ -3321,7 +3321,17 @@ CHAT;
                 $res = $gemini->generateJsonWithHistory($chatSystemPrompt, $history, $userQuestion);
                 $aiTrace[] = ['stage' => 'chat', 'system' => $chatSystemPrompt, 'history' => $history, 'user_msg' => $userQuestion, 'response' => $res, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
             } catch (\RuntimeException $e) {
-                ai_abort_error('chat', $e->getMessage());
+                // Some models ignore the "reply as JSON" instruction for conversational
+                // questions and just answer in plain text. A chat reply doesn't need the
+                // JSON envelope to be useful, so fall back to the raw text rather than
+                // erroring — only genuine failures (network/HTTP/empty response) abort.
+                $rawText = method_exists($gemini, 'getLastRawText') ? $gemini->getLastRawText() : '';
+                if ($rawText !== '') {
+                    $res = ['message' => $rawText];
+                    $aiTrace[] = ['stage' => 'chat', 'system' => $chatSystemPrompt, 'history' => $history, 'user_msg' => $userQuestion, 'response' => $res, 'tokens' => $gemini->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false, 'note' => 'raw-text fallback (model did not wrap reply in JSON)'];
+                } else {
+                    ai_abort_error('chat', $e->getMessage());
+                }
             }
             json_out([
                 'mode'    => 'chat',
