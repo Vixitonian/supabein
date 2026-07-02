@@ -8,6 +8,12 @@ class OpenRouterClient
 {
     private const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
+    // Some models are routed through providers that pre-authorize spend against
+    // max_tokens regardless of actual usage; cap these to what the account can afford.
+    private const MAX_TOKENS_OVERRIDES = [
+        'moonshotai/kimi-k2' => 12000,
+    ];
+
     private array $lastUsage = [];
 
     public function __construct(
@@ -46,10 +52,12 @@ class OpenRouterClient
     private function call(array $messages): array
     {
         $body    = [
-            'model'           => $this->model,
-            'messages'        => $messages,
-            'response_format' => ['type' => 'json_object'],
-            'max_tokens'      => 32768,
+            'model'      => $this->model,
+            'messages'   => $messages,
+            // Not all routed providers support response_format=json_object (some reject
+            // the request outright, others silently drop the final answer into a
+            // "reasoning" field). We rely on the system prompt + ai_lenient_json() instead.
+            'max_tokens' => self::MAX_TOKENS_OVERRIDES[$this->model] ?? 32768,
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 

@@ -1681,23 +1681,19 @@ const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter', 'nvidia'];
 const AI_ALLOWED_MODELS = [
     'gemini' => [
         'gemini-2.5-flash',
-        'gemini-2.5-pro',
-        'gemini-2.0-flash',
     ],
     'openrouter' => [
-        'openai/gpt-4o',
-        'anthropic/claude-sonnet-4-5',
         'mistralai/mistral-small-3.2-24b-instruct',
         'moonshotai/kimi-k2',
-        'google/gemma-4-31b-it:free',
         'google/gemma-4-26b-a4b-it:free',
         'openai/gpt-oss-120b:free',
         'openai/gpt-oss-20b:free',
         'nvidia/nemotron-3-super-120b-a12b:free',
         'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-        'openrouter/owl-alpha',
-        'nex-agi/nex-n2-pro:free',
+        'nex-agi/nex-n2-pro',
         'poolside/laguna-xs.2:free',
+        'poolside/laguna-m.1:free',
+        'cohere/north-mini-code:free',
     ],
     'nvidia' => [
         'qwen/qwen3.5-122b-a10b',
