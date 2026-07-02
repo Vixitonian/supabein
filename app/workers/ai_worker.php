@@ -76,7 +76,7 @@ try {
 
     } elseif ($mode === 'test') {
         $projectId = (int)($payload['project_id'] ?? 0);
-        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report);
+        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'test'], $result));
 
     } else {

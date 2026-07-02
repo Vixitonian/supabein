@@ -792,4 +792,33 @@ class Catalog
         $this->pdo->prepare("UPDATE ai_jobs SET status = 'cancelled' WHERE id = ?")->execute([$jobId]);
         return $row['pid'] !== null ? (int)$row['pid'] : null;
     }
+
+    /**
+     * Latest finished test-job verdict for a project — used to warn before
+     * publishing a staging deploy to live. project_id lives inside the job's
+     * JSON payload (not a column), so scan the recent test jobs and match.
+     */
+    public function getLatestTestStatus(int $projectId, int $userId): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT id, status, result, error, payload, updated_at FROM ai_jobs
+             WHERE user_id = ? AND mode = 'test' AND status IN ('done','failed')
+             ORDER BY id DESC LIMIT 25"
+        );
+        $stmt->execute([$userId]);
+        foreach ($stmt->fetchAll() as $row) {
+            $payload = json_decode($row['payload'], true) ?? [];
+            if ((int)($payload['project_id'] ?? 0) !== $projectId) continue;
+            $result = $row['result'] !== null ? (json_decode($row['result'], true) ?? []) : [];
+            return [
+                'tested' => true,
+                'job_id' => (int)$row['id'],
+                'passed' => (int)($result['passed'] ?? 0),
+                'failed' => (int)($result['failed'] ?? 0),
+                'error'  => $row['status'] === 'failed' ? $row['error'] : ($result['error'] ?? null),
+                'at'     => $row['updated_at'],
+            ];
+        }
+        return null;
+    }
 }
