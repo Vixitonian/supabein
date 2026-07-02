@@ -2655,6 +2655,56 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace];
 }
 
+// Runs the Playwright user-story tests for a project against its most recent
+// deploy (staging if present — edits land there by design — else live).
+// Called from the worker's 'test' job mode; throws on unrecoverable failure.
+function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report): array
+{
+    $project = $catalog->getProjectById($projectId, $userId);
+    if (!$project) throw new \RuntimeException('Project not found');
+
+    $sites = $catalog->listSites($projectId);
+    if (!$sites) throw new \RuntimeException('No deployed site found — build the project first');
+
+    $site = $sites[0];
+    if ($site['staging_deploy_id'] ?? null) {
+        $target = 'staging';
+    } elseif ($site['current_deploy_id'] ?? null) {
+        $target = 'current';
+    } else {
+        throw new \RuntimeException('No deploy found — build or edit the project first');
+    }
+
+    $browserlessToken = $config['BROWSERLESS_TOKEN'] ?? '';
+    if (!$browserlessToken) throw new \RuntimeException('Browserless token not configured (add BROWSERLESS_TOKEN to config/secrets.php)');
+
+    $report(['stage' => 'script', 'status' => 'start', 'label' => 'Generating test script…']);
+    $siteId    = (int)$site['id'];
+    $sitesPath = rtrim($config['SITES_PATH'], '/');
+    $appUrl    = rtrim($config['API_BASE_URL'], '/') . "/sites/s{$siteId}/{$target}/";
+    $indexPath = "{$sitesPath}/s{$siteId}/{$target}/index.html";
+    $indexHtml = file_exists($indexPath) ? (string)file_get_contents($indexPath) : '';
+
+    $schema = ai_schema_from_db($projectId, $catalog);
+    $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId);
+    $report(['stage' => 'script', 'status' => 'done', 'label' => 'Test script ready']);
+
+    $report(['stage' => 'run', 'status' => 'start', 'label' => 'Running browser tests…']);
+    $result = ai_playwright_test_run($script, $config);
+    $report(['stage' => 'run', 'status' => 'done',
+             'label'  => 'Tests finished',
+             'detail' => ($result['passed'] ?? 0) . ' passed, ' . ($result['failed'] ?? 0) . ' failed']);
+
+    sb_log('ai_test', !empty($result['error']) ? 'Failed: ' . $result['error'] : 'Complete', [
+        'project_id' => $projectId,
+        'target'     => $target,
+        'passed'     => $result['passed'] ?? null,
+        'failed'     => $result['failed'] ?? null,
+    ]);
+
+    return array_merge($result, ['target' => $target]);
+}
+
 // Spawns a fully independent OS process to run one job. This — not a shared
 // queue/consumer — is what lets every user's build/edit run in true parallel:
 // each job gets its own process the moment it's created, so nobody waits on
@@ -3550,15 +3600,11 @@ PROMPT;
         json_out(['ok' => true]);
     }, ['auth_middleware']);
 
-    // ── Run Playwright user-story tests against a deployed site ───────────────
-    $router->post('/v1/ai/test', function (array $req): void {
-        // 120s was tight for: AI-generated test script + spinning up a real
-        // browser via Browserless + running each user-story test + a
-        // screenshot — leaving little margin before PHP's execution limit
-        // killed the request outright (no error response, just a dropped
-        // connection the client sees as a generic network failure).
-        set_time_limit(280);
-
+    // ── Run Playwright user-story tests as a background job — same pattern as
+    //    build/edit jobs, so a test run survives the panel closing or the page
+    //    reloading (a run takes 30-60s+; the old synchronous route quietly lost
+    //    the result if the user navigated away while it ran).
+    $router->post('/v1/ai/test/job', function (array $req): void {
         $config    = \App::get('config');
         $catalog   = \SupaBein\Catalog::getInstance();
         $userId    = (int)$req['auth']['user_id'];
@@ -3569,43 +3615,22 @@ PROMPT;
         $project = $catalog->getProjectById($projectId, $userId);
         if (!$project) abort(404, 'Project not found');
 
+        // Pre-flight the obvious failure modes so they come back as an
+        // immediate 4xx instead of a job that fails a few seconds later.
         $sites = $catalog->listSites($projectId);
         if (!$sites) abort(422, 'No deployed site found — build the project first');
-
         $site = $sites[0];
-        // Test whatever was deployed most recently: edits land in staging (by
-        // design — you review before publishing), so requiring a live deploy
-        // meant "Run Tests" right after an edit always failed even though the
-        // just-edited app was sitting right there in staging.
-        if ($site['staging_deploy_id'] ?? null) {
-            $target = 'staging';
-        } elseif ($site['current_deploy_id'] ?? null) {
-            $target = 'current';
-        } else {
+        if (!($site['staging_deploy_id'] ?? null) && !($site['current_deploy_id'] ?? null)) {
             abort(422, 'No deploy found — build or edit the project first');
         }
+        if (empty($config['BROWSERLESS_TOKEN'])) {
+            abort(500, 'Browserless token not configured (add BROWSERLESS_TOKEN to config/secrets.php)');
+        }
 
-        $browserlessToken = $config['BROWSERLESS_TOKEN'] ?? '';
-        if (!$browserlessToken) abort(500, 'Browserless token not configured (add BROWSERLESS_TOKEN to config/secrets.php)');
-
-        $siteId    = (int)$site['id'];
-        $sitesPath = rtrim($config['SITES_PATH'], '/');
-        $appUrl    = rtrim($config['API_BASE_URL'], '/') . "/sites/s{$siteId}/{$target}/";
-        $indexPath = "{$sitesPath}/s{$siteId}/{$target}/index.html";
-        $indexHtml = file_exists($indexPath) ? (string)file_get_contents($indexPath) : '';
-
-        $schema = ai_schema_from_db($projectId, $catalog);
-        $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId);
-        $result = ai_playwright_test_run($script, $config);
-
-        sb_log('ai_test', $result['error'] ? 'Failed: ' . $result['error'] : 'Complete', [
-            'project_id' => $projectId,
-            'target'     => $target,
-            'passed'     => $result['passed'] ?? null,
-            'failed'     => $result['failed'] ?? null,
-        ]);
-
-        json_out($result);
+        $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
+        $job = $catalog->createJob($userId, $sessionId, 'test', ['project_id' => $projectId]);
+        ai_spawn_job_worker($config, (int)$job['id']);
+        json_out(['job_id' => (int)$job['id']], 202);
     }, ['auth_middleware']);
 
 }

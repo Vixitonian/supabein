@@ -74,6 +74,11 @@ try {
         $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'edit'], $result));
 
+    } elseif ($mode === 'test') {
+        $projectId = (int)($payload['project_id'] ?? 0);
+        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report);
+        $catalog->markJobDone($jobId, array_merge(['mode' => 'test'], $result));
+
     } else {
         throw new \RuntimeException('Unknown job mode: ' . $mode);
     }
