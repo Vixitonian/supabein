@@ -1926,7 +1926,8 @@ const AiPanel = (() => {
     renderMessages();
 
     try {
-      const jobBody = { project_id: projectId };
+      const { provider, model } = getSelectedModel();
+      const jobBody = { project_id: projectId, provider, model };
       if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
       const created = await Api.post('/v1/ai/test/job', jobBody);
       progressMsg.data.jobId = created.job_id;
@@ -2304,6 +2305,12 @@ const AiPanel = (() => {
       publishBtn.addEventListener('click', async () => {
         publishBtn.disabled = true;
         const orig = publishBtn.textContent;
+        // Publish gate: warn (don't block) when the latest test run failed.
+        const warn = await latestTestWarning(data.staging.project_id);
+        if (warn && !confirm('⚠ ' + warn + '.\n\nPublish to live anyway?')) {
+          publishBtn.disabled = false;
+          return;
+        }
         publishBtn.textContent = '⏳ Publishing…';
         try {
           const { project_id, site_id, deploy_id } = data.staging;
@@ -2435,8 +2442,9 @@ const AiPanel = (() => {
   ];
 
   const TEST_PROGRESS_STAGES = [
-    { key: 'script', label: 'Generating test script' },
-    { key: 'run',    label: 'Running browser tests' },
+    { key: 'script',  label: 'Preparing test script' },
+    { key: 'stories', label: 'Writing user-story tests' },
+    { key: 'run',     label: 'Running browser tests' },
   ];
 
   function makeProgressMsg(stages, title, mode) {
@@ -4310,6 +4318,19 @@ async function renderSiteManager({ id, site_id }) {
   await loadDeployContent(id, site_id);
 }
 
+// Latest test verdict for a project, phrased as a publish warning — null when
+// tests pass, were never run, or the check itself fails (never blocks publish).
+async function latestTestWarning(projectId) {
+  try {
+    const ts = await Api.get(`/v1/projects/${projectId}/test-status`);
+    if (ts && ts.tested) {
+      if (ts.error) return `The last test run errored: ${ts.error}`;
+      if (ts.failed > 0) return `${ts.failed} of ${ts.passed + ts.failed} test stories failed on the last run`;
+    }
+  } catch (_) { /* no verdict — don't block */ }
+  return null;
+}
+
 async function loadDeployContent(projectId, siteId) {
   const content = document.getElementById('deploy-content');
 
@@ -4417,7 +4438,8 @@ async function loadDeployContent(projectId, siteId) {
                 class: 'btn btn-sm btn-primary',
                 style: 'margin-right:6px',
                 onClick: async () => {
-                  if (!confirm('Publish this staging deploy to live?')) return;
+                  const warn = await latestTestWarning(projectId);
+                  if (!confirm((warn ? '⚠ ' + warn + '.\n\n' : '') + 'Publish this staging deploy to live?')) return;
                   try {
                     await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/publish`);
                     loadDeployContent(projectId, siteId);

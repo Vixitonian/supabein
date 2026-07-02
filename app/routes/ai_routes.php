@@ -1939,7 +1939,8 @@ function ai_playwright_test_generate(
     string $token,
     array  $schema,
     string $indexHtml,
-    int    $projectId
+    int    $projectId,
+    string $storyBlock = ''
 ): string {
     // ── Schema analysis ────────────────────────────────────────────────────────────
     $authTable  = null;
@@ -1963,7 +1964,6 @@ function ai_playwright_test_generate(
         }
     }
     $hasAuth = $authTable !== null;
-    $sbPid   = 'p' . $projectId;
 
     // ── Route detection from deployed index.html ───────────────────────────────────
     $newRoute        = null;
@@ -2054,8 +2054,8 @@ function ai_playwright_test_generate(
         ? 'a[href="#' . $newRoute . '"], a:has-text("New")'
         : 'a:has-text("New")';
 
-    $authTableJson = json_encode($authTable ?? 'users');
-    $sbPidJson     = json_encode($sbPid);
+    $authTableJson   = json_encode($authTable ?? 'users');
+    $firstTableJson  = json_encode($firstTable['name'] ?? null);
 
     // For list assertion: if edit route exists record A will have been edited
     if ($editRouteExists) {
@@ -2100,7 +2100,7 @@ async function waitLoggedIn(pg, ms = 15000) {
   );
 }
 
-function apiDelete(apiUrl, bearerToken) {
+function apiRequest(method, apiUrl, bearerToken) {
   return new Promise((resolve) => {
     let u;
     try { u = new URL(apiUrl); } catch (_) { resolve(0); return; }
@@ -2109,7 +2109,7 @@ function apiDelete(apiUrl, bearerToken) {
       hostname: u.hostname,
       port: u.port ? parseInt(u.port) : (isHttps ? 443 : 80),
       path: u.pathname,
-      method: 'DELETE',
+      method,
       headers: { 'Authorization': 'Bearer ' + bearerToken }
     };
     const req = (isHttps ? https : http).request(opts, res => { res.resume(); resolve(res.statusCode); });
@@ -2117,13 +2117,18 @@ function apiDelete(apiUrl, bearerToken) {
     req.end();
   });
 }
+const apiDelete = (apiUrl, bearerToken) => apiRequest('DELETE', apiUrl, bearerToken);
+const apiGet    = (apiUrl, bearerToken) => apiRequest('GET', apiUrl, bearerToken);
 JSEOF;
 
     // ── Dynamic constants ──────────────────────────────────────────────────────────
+    // PID is the numeric project id — the data API casts :project_id to int, so
+    // the old 'p<id>' form silently resolved to project 0 and cleanup never worked.
     $constants = 'const TOKEN      = ' . $tokenJson . ";\n"
                . 'const APP_URL    = ' . $urlJson . ";\n"
-               . 'const SB_PID     = ' . $sbPidJson . ";\n"
+               . 'const PID        = ' . $projectId . ";\n"
                . 'const AUTH_TABLE = ' . $authTableJson . ";\n"
+               . 'const FIRST_TABLE = ' . $firstTableJson . ";\n"
                . 'const TEST_EMAIL   = `pw-a-${Date.now()}@testmail.dev`;' . "\n"
                . 'const TEST_EMAIL_B = `pw-b-${Date.now() + 1}@testmail.dev`;' . "\n"
                . "const TEST_PASS    = 'TestPass123!';\n"
@@ -2241,7 +2246,10 @@ JSEOF;
         $crudBlock .= "    );\n";
         $crudBlock .= "  } catch (_) {}\n";
         $crudBlock .= "  assert('After create, navigated to detail view',\n";
-        $crudBlock .= "    page.url().includes('" . $ipfx . "/') && !page.url().includes('/new'), 'url: ' + page.url());\n\n";
+        $crudBlock .= "    page.url().includes('" . $ipfx . "/') && !page.url().includes('/new'), 'url: ' + page.url());\n";
+        $crudBlock .= "  // Record A's id, used later for direct-API policy checks\n";
+        $crudBlock .= "  const recAIdMatch = page.url().match(/\\/(\\d+)(?:[?#].*)?\$/);\n";
+        $crudBlock .= "  const recAId = recAIdMatch ? recAIdMatch[1] : null;\n\n";
 
         $crudBlock .= "  log('Story: Created record content is displayed');\n";
         $crudBlock .= "  const bodyTxtA = await page.textContent('body').catch(() => '');\n";
@@ -2344,6 +2352,15 @@ JSEOF;
         $isolationBlock .= "      await pageB.waitForTimeout(1500);\n";
         $isolationBlock .= "      const pageBBody = await pageB.textContent('body').catch(() => '');\n";
         $isolationBlock .= "      assert('User B cannot see User A records', !pageBBody.includes(" . $listAssertJson . "));\n";
+        $isolationBlock .= "      // Direct-API policy checks: the UI may filter client-side, but the\n";
+        $isolationBlock .= "      // API itself must refuse cross-user access to User A's record.\n";
+        $isolationBlock .= "      if (tokenB && recAId && FIRST_TABLE) {\n";
+        $isolationBlock .= "        log('Story: API blocks cross-user record access');\n";
+        $isolationBlock .= "        const stGet = await apiGet(SB_API + '/data/' + PID + '/' + FIRST_TABLE + '/' + recAId, tokenB);\n";
+        $isolationBlock .= "        assert('API refuses User B reading User A record directly', stGet === 403 || stGet === 404, 'GET status: ' + stGet);\n";
+        $isolationBlock .= "        const stDel = await apiDelete(SB_API + '/data/' + PID + '/' + FIRST_TABLE + '/' + recAId, tokenB);\n";
+        $isolationBlock .= "        assert('API refuses User B deleting User A record directly', stDel === 403 || stDel === 404, 'DELETE status: ' + stDel);\n";
+        $isolationBlock .= "      }\n";
         $isolationBlock .= "    } catch (_) {\n";
         $isolationBlock .= "      assert('User B signup for isolation test', bLoggedIn, 'signup failed');\n";
         $isolationBlock .= "    }\n";
@@ -2419,8 +2436,8 @@ JSEOF;
     if ($hasAuth) {
         $cleanupBlock .= "// Cleanup test users via API\n";
         $cleanupBlock .= "try {\n";
-        $cleanupBlock .= "  if (tokenA && userIdA) await apiDelete(SB_API + '/data/' + SB_PID + '/' + AUTH_TABLE + '/' + userIdA, tokenA);\n";
-        $cleanupBlock .= "  if (tokenB && userIdB) await apiDelete(SB_API + '/data/' + SB_PID + '/' + AUTH_TABLE + '/' + userIdB, tokenB);\n";
+        $cleanupBlock .= "  if (tokenA && userIdA) await apiDelete(SB_API + '/data/' + PID + '/' + AUTH_TABLE + '/' + userIdA, tokenA);\n";
+        $cleanupBlock .= "  if (tokenB && userIdB) await apiDelete(SB_API + '/data/' + PID + '/' + AUTH_TABLE + '/' + userIdB, tokenB);\n";
         $cleanupBlock .= "} catch (_) {}\n\n";
     }
 
@@ -2435,12 +2452,20 @@ console.log('__STORIES_JSON__' + JSON.stringify(stories));
 process.exit(failed > 0 ? 1 : 0);
 JSEOF;
 
+    // AI-generated story tests run after the CRUD block (records exist, User A
+    // is logged in). Wrapped in their own braces so any const/let the AI
+    // declares can't collide with the harness's own declarations.
+    $storySection = $storyBlock !== ''
+        ? "  // ── AI-generated user-story tests ──\n  {\n" . $storyBlock . "\n  }\n\n"
+        : '';
+
     return $header . "\n\n"
          . $constants . "\n"
          . $connect . "\n\n"
          . "try {\n"
          . $authBlock
          . $crudBlock
+         . $storySection
          . $isolationBlock
          . $deleteAllBlock
          . $reloginBlock
@@ -2658,7 +2683,84 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
 // Runs the Playwright user-story tests for a project against its most recent
 // deploy (staging if present — edits land there by design — else live).
 // Called from the worker's 'test' job mode; throws on unrecoverable failure.
-function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report): array
+const AI_STORY_TESTS_PROMPT = <<<'PROMPT'
+You write a block of Playwright test code that verifies specific user stories against a deployed web app. Your code is inserted verbatim into an existing test harness, inside an async context, its own block scope, and a surrounding try/catch. Already defined and available to you:
+
+- `page` — a Playwright Page, already open on the app and logged in as a test user (when the app has auth)
+- `APP_URL` — string constant, the app's base URL (a hash-routed SPA)
+- `log(msg)` — prints a section header
+- `assert(label, condition, detailString)` — records one pass/fail story result
+- `pageErrors` — array collecting the page's console/runtime errors so far
+
+STRICT RULES — violating any of these makes your output unusable:
+1. Respond with JSON only: {"code": "<the JavaScript block>"}.
+2. For EACH user story you are given, produce exactly this shape (nothing outside it):
+   log('Story: <short story label>');
+   try {
+     await page.goto(APP_URL, { waitUntil: 'networkidle' });
+     await page.waitForTimeout(800);
+     // ...actions: page.fill / page.click / page.textContent / page.$ ...
+     assert('<short story label>', <boolean expression>, <short detail string>);
+   } catch (e) { assert('<short story label>', false, e.message); }
+3. Selectors: use ONLY names, ids, hrefs and visible text (via :has-text()) that actually appear in the provided index.html. Never invent selectors.
+4. FORBIDDEN anywhere in your code: import, require, process, browser, chromium, fetch, XMLHttpRequest, page.close, page.context, eval, while loops, waitForTimeout above 3000, loops over 10 iterations.
+5. Each story must be self-contained: navigate first, create any data it needs through the UI, and make ONE meaningful assertion about the story's outcome (not just "element exists" unless that IS the story).
+6. If a story cannot be verified through this UI (needs email, external services, etc.), emit exactly:
+   log('Story: <label>');
+   assert('<label> (skipped — not verifiable in browser)', true, 'skipped');
+7. Keep the whole block under 200 lines. Prefer covering fewer stories well over covering all of them badly.
+PROMPT;
+
+// Validate an AI-written JS block compiles — a syntax error in the block would
+// otherwise be a parse error for the ENTIRE test script, producing zero results.
+function ai_js_block_syntax_ok(string $block, array $config): bool
+{
+    $nodeBin = $config['NODE_BIN'] ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
+    $tmp = sys_get_temp_dir() . '/sb_storycheck_' . getmypid() . '_' . time() . '.mjs';
+    file_put_contents($tmp, "async function __sbStories(page, APP_URL, log, assert, pageErrors) {\n{\n" . $block . "\n}\n}\n");
+    exec(escapeshellarg($nodeBin) . ' --check ' . escapeshellarg($tmp) . ' 2>&1', $out, $code);
+    @unlink($tmp);
+    return $code === 0;
+}
+
+/**
+ * Turn the project's saved user stories (from the Review flow's intent,
+ * stored in project_requirements) into an AI-written Playwright test block.
+ * Returns '' when there are no usable stories or the AI output fails
+ * validation — story tests are additive, never a reason to fail the run.
+ */
+function ai_generate_story_tests(object $client, array $requirements, array $schema, string $indexHtml, array $config): string
+{
+    $stories = [];
+    foreach (($requirements['actors'] ?? []) as $actor) {
+        if (!is_array($actor)) continue;
+        foreach (($actor['stories'] ?? []) as $s) {
+            $label = is_string($s) ? $s : (string)($s['title'] ?? '');
+            if (trim($label) !== '') $stories[] = trim($label);
+        }
+    }
+    $stories = array_slice(array_values(array_unique($stories)), 0, 8);
+    if (!$stories) return '';
+
+    $userMsg = "User stories to verify (one test each):\n"
+             . implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . $s, $stories, array_keys($stories)))
+             . "\n\nSchema:\n" . ai_schema_to_context($schema)
+             . "\n\nDeployed index.html (selectors must come from here):\n"
+             . mb_substr($indexHtml, 0, 8000);
+
+    $res  = $client->generateJson(AI_STORY_TESTS_PROMPT, $userMsg);
+    $code = trim((string)($res['code'] ?? ''));
+    if ($code === '' || strlen($code) > 20000) return '';
+
+    foreach (['import ', 'require(', 'process.', 'browser.', 'chromium', 'fetch(', 'XMLHttpRequest', 'page.close', 'page.context', 'eval('] as $banned) {
+        if (stripos($code, $banned) !== false) return '';
+    }
+    if (!ai_js_block_syntax_ok($code, $config)) return '';
+
+    return $code;
+}
+
+function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, ?object $client = null): array
 {
     $project = $catalog->getProjectById($projectId, $userId);
     if (!$project) throw new \RuntimeException('Project not found');
@@ -2678,7 +2780,7 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     $browserlessToken = $config['BROWSERLESS_TOKEN'] ?? '';
     if (!$browserlessToken) throw new \RuntimeException('Browserless token not configured (add BROWSERLESS_TOKEN to config/secrets.php)');
 
-    $report(['stage' => 'script', 'status' => 'start', 'label' => 'Generating test script…']);
+    $report(['stage' => 'script', 'status' => 'start', 'label' => 'Preparing test script…']);
     $siteId    = (int)$site['id'];
     $sitesPath = rtrim($config['SITES_PATH'], '/');
     $appUrl    = rtrim($config['API_BASE_URL'], '/') . "/sites/s{$siteId}/{$target}/";
@@ -2686,8 +2788,28 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     $indexHtml = file_exists($indexPath) ? (string)file_get_contents($indexPath) : '';
 
     $schema = ai_schema_from_db($projectId, $catalog);
-    $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId);
     $report(['stage' => 'script', 'status' => 'done', 'label' => 'Test script ready']);
+
+    // Story-driven tests: the user stories captured in the Review flow (saved
+    // to project_requirements) become their own AI-written test cases. Best
+    // effort — any failure here just means the template tests run alone.
+    $storyBlock = '';
+    if ($client) {
+        $requirements = $catalog->getProjectRequirements($projectId);
+        if ($requirements) {
+            $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Writing user-story tests…']);
+            try {
+                $storyBlock = ai_generate_story_tests($client, $requirements, $schema, $indexHtml, $config);
+                $report(['stage' => 'stories', 'status' => 'done',
+                         'label'  => $storyBlock !== '' ? 'Story tests ready' : 'No story tests',
+                         'detail' => $storyBlock !== '' ? substr_count($storyBlock, "log('Story:") . ' user stories covered' : 'stories could not be turned into tests']);
+            } catch (\Throwable $e) {
+                $report(['stage' => 'stories', 'status' => 'done', 'label' => 'Story tests skipped', 'detail' => $e->getMessage()]);
+            }
+        }
+    }
+
+    $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId, $storyBlock);
 
     $report(['stage' => 'run', 'status' => 'start', 'label' => 'Running browser tests…']);
     $result = ai_playwright_test_run($script, $config);
@@ -3600,6 +3722,16 @@ PROMPT;
         json_out(['ok' => true]);
     }, ['auth_middleware']);
 
+    // ── Latest test verdict for a project — used by the dashboard to warn
+    //    before publishing a staging deploy that has failing tests.
+    $router->get('/v1/projects/:id/test-status', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        json_out($catalog->getLatestTestStatus($projectId, $userId) ?? ['tested' => false]);
+    }, ['auth_middleware']);
+
     // ── Run Playwright user-story tests as a background job — same pattern as
     //    build/edit jobs, so a test run survives the panel closing or the page
     //    reloading (a run takes 30-60s+; the old synchronous route quietly lost
@@ -3628,7 +3760,12 @@ PROMPT;
         }
 
         $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
-        $job = $catalog->createJob($userId, $sessionId, 'test', ['project_id' => $projectId]);
+        $job = $catalog->createJob($userId, $sessionId, 'test', [
+            'project_id' => $projectId,
+            // Story-test generation uses the same model the user picked in the panel.
+            'provider'   => $req['body']['provider'] ?? null,
+            'model'      => $req['body']['model'] ?? null,
+        ]);
         ai_spawn_job_worker($config, (int)$job['id']);
         json_out(['job_id' => (int)$job['id']], 202);
     }, ['auth_middleware']);
