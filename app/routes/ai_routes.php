@@ -1701,7 +1701,7 @@ const AI_ALLOWED_MODELS = [
     ],
     'nvidia' => [
         'qwen/qwen3.5-122b-a10b',
-        'z-ai/glm-5.1',
+        'z-ai/glm-5.2',
         'deepseek-ai/deepseek-v4-pro',
         'deepseek-ai/deepseek-v4-flash',
         'nvidia/nemotron-3-ultra-550b-a55b',
