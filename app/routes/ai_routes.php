@@ -1682,25 +1682,27 @@ const AI_ALLOWED_MODELS = [
     'gemini' => [
         'gemini-2.5-flash',
     ],
+    // Ordered best-to-least capable within each provider (index 0 is also that
+    // provider's fallback default when an unrecognized model is requested).
     'openrouter' => [
-        'mistralai/mistral-small-3.2-24b-instruct',
         'moonshotai/kimi-k2',
-        'google/gemma-4-26b-a4b-it:free',
-        'openai/gpt-oss-120b:free',
-        'openai/gpt-oss-20b:free',
         'nvidia/nemotron-3-super-120b-a12b:free',
-        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-        'nex-agi/nex-n2-pro',
-        'poolside/laguna-xs.2:free',
+        'openai/gpt-oss-120b:free',
         'poolside/laguna-m.1:free',
         'cohere/north-mini-code:free',
+        'mistralai/mistral-small-3.2-24b-instruct',
+        'nex-agi/nex-n2-pro',
+        'google/gemma-4-26b-a4b-it:free',
+        'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+        'openai/gpt-oss-20b:free',
+        'poolside/laguna-xs.2:free',
     ],
     'nvidia' => [
-        'qwen/qwen3.5-122b-a10b',
+        'nvidia/nemotron-3-ultra-550b-a55b',
         'z-ai/glm-5.2',
         'deepseek-ai/deepseek-v4-pro',
+        'qwen/qwen3.5-122b-a10b',
         'deepseek-ai/deepseek-v4-flash',
-        'nvidia/nemotron-3-ultra-550b-a55b',
     ],
 ];
 
