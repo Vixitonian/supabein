@@ -2723,13 +2723,9 @@ function ai_js_block_syntax_ok(string $block, array $config): bool
     return $code === 0;
 }
 
-/**
- * Turn the project's saved user stories (from the Review flow's intent,
- * stored in project_requirements) into an AI-written Playwright test block.
- * Returns '' when there are no usable stories or the AI output fails
- * validation — story tests are additive, never a reason to fail the run.
- */
-function ai_generate_story_tests(object $client, array $requirements, array $schema, string $indexHtml, array $config): string
+// Pull the flat list of user-story labels out of a saved project_requirements
+// intent (the Review flow's nested actors[].stories[] shape).
+function ai_extract_saved_stories(?array $requirements): array
 {
     $stories = [];
     foreach (($requirements['actors'] ?? []) as $actor) {
@@ -2739,7 +2735,36 @@ function ai_generate_story_tests(object $client, array $requirements, array $sch
             if (trim($label) !== '') $stories[] = trim($label);
         }
     }
-    $stories = array_slice(array_values(array_unique($stories)), 0, 8);
+    return array_values(array_unique($stories));
+}
+
+const AI_INFER_STORIES_PROMPT = <<<'PROMPT'
+You are given a web app's database schema and its deployed frontend HTML. Infer the concrete user stories the app is meant to support — the things a real user would actually do with it — so they can be turned into browser tests. Base every story on evidence in the schema/HTML; do not invent features that aren't there. Respond with JSON only: {"stories": ["short imperative story", ...]}. Return at most 6 stories, each a short phrase like "Create a task with a due date" or "Mark an item as purchased". Prefer the app's distinctive features over generic CRUD.
+PROMPT;
+
+// Fallback for projects that never went through the Review flow (no saved
+// requirements): ask the model to infer user stories from the schema + the
+// deployed frontend, so any project still gets story-driven tests.
+function ai_infer_stories(object $client, array $schema, string $indexHtml): array
+{
+    $userMsg = "Schema:\n" . ai_schema_to_context($schema)
+             . "\n\nDeployed index.html:\n" . mb_substr($indexHtml, 0, 8000);
+    $res = $client->generateJson(AI_INFER_STORIES_PROMPT, $userMsg);
+    $out = [];
+    foreach ((array)($res['stories'] ?? []) as $s) {
+        if (is_string($s) && trim($s) !== '') $out[] = trim($s);
+    }
+    return array_values(array_unique($out));
+}
+
+/**
+ * Turn a list of user-story labels into an AI-written Playwright test block.
+ * Returns '' when there are no stories or the AI output fails validation —
+ * story tests are additive, never a reason to fail the run.
+ */
+function ai_generate_story_tests(object $client, array $stories, array $schema, string $indexHtml, array $config): string
+{
+    $stories = array_slice($stories, 0, 8);
     if (!$stories) return '';
 
     $userMsg = "User stories to verify (one test each):\n"
@@ -2791,21 +2816,29 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     $report(['stage' => 'script', 'status' => 'done', 'label' => 'Test script ready']);
 
     // Story-driven tests: the user stories captured in the Review flow (saved
-    // to project_requirements) become their own AI-written test cases. Best
-    // effort — any failure here just means the template tests run alone.
+    // to project_requirements) become their own AI-written test cases. If the
+    // project never went through Review, infer stories from the schema + the
+    // deployed frontend instead, so every project still gets story tests. Best
+    // effort throughout — any failure here just means the template tests run alone.
     $storyBlock = '';
     if ($client) {
-        $requirements = $catalog->getProjectRequirements($projectId);
-        if ($requirements) {
-            $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Writing user-story tests…']);
-            try {
-                $storyBlock = ai_generate_story_tests($client, $requirements, $schema, $indexHtml, $config);
-                $report(['stage' => 'stories', 'status' => 'done',
-                         'label'  => $storyBlock !== '' ? 'Story tests ready' : 'No story tests',
-                         'detail' => $storyBlock !== '' ? substr_count($storyBlock, "log('Story:") . ' user stories covered' : 'stories could not be turned into tests']);
-            } catch (\Throwable $e) {
-                $report(['stage' => 'stories', 'status' => 'done', 'label' => 'Story tests skipped', 'detail' => $e->getMessage()]);
+        $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Writing user-story tests…']);
+        try {
+            $stories = ai_extract_saved_stories($catalog->getProjectRequirements($projectId));
+            $source  = 'saved';
+            if (!$stories) {
+                $stories = ai_infer_stories($client, $schema, $indexHtml);
+                $source  = 'inferred';
             }
+            $storyBlock = $stories ? ai_generate_story_tests($client, $stories, $schema, $indexHtml, $config) : '';
+            $covered    = $storyBlock !== '' ? substr_count($storyBlock, "log('Story:") : 0;
+            $report(['stage' => 'stories', 'status' => 'done',
+                     'label'  => $storyBlock !== '' ? 'Story tests ready' : 'No story tests',
+                     'detail' => $storyBlock !== ''
+                         ? "$covered user stories covered (" . $source . ")"
+                         : 'stories could not be turned into tests']);
+        } catch (\Throwable $e) {
+            $report(['stage' => 'stories', 'status' => 'done', 'label' => 'Story tests skipped', 'detail' => $e->getMessage()]);
         }
     }
 
