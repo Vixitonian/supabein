@@ -15,6 +15,7 @@ class OpenRouterClient
     ];
 
     private array $lastUsage = [];
+    private string $lastRawText = '';
 
     public function __construct(
         private string $apiKey,
@@ -24,6 +25,12 @@ class OpenRouterClient
     public function getLastUsage(): array
     {
         return $this->lastUsage;
+    }
+
+    /** The raw model reply text, populated even when it failed to parse as JSON. */
+    public function getLastRawText(): string
+    {
+        return $this->lastRawText;
     }
 
     public function generateJson(string $systemPrompt, string $userPrompt): array
@@ -103,6 +110,7 @@ class OpenRouterClient
         if ($text === null) {
             throw new \RuntimeException('OpenRouter returned no content in response');
         }
+        $this->lastRawText = $text;
 
         $plan = json_decode($text, true);
         if (!is_array($plan)) {

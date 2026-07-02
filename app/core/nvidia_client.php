@@ -9,6 +9,7 @@ class NvidiaClient
     private const ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
     private array $lastUsage = [];
+    private string $lastRawText = '';
 
     public function __construct(
         private string $apiKey,
@@ -18,6 +19,12 @@ class NvidiaClient
     public function getLastUsage(): array
     {
         return $this->lastUsage;
+    }
+
+    /** The raw model reply text, populated even when it failed to parse as JSON. */
+    public function getLastRawText(): string
+    {
+        return $this->lastRawText;
     }
 
     public function generateJson(string $systemPrompt, string $userPrompt): array
@@ -117,6 +124,7 @@ class NvidiaClient
             // Strip <think>...</think> blocks that reasoning models prepend
             $text = preg_replace('/<think>.*?<\/think>/s', '', $text);
             $text = trim($text);
+            $this->lastRawText = $text;
 
             $plan = json_decode($text, true);
             if (!is_array($plan)) {

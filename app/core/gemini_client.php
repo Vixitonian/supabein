@@ -9,6 +9,7 @@ class GeminiClient
     private const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent';
 
     private array $lastUsage = [];
+    private string $lastRawText = '';
 
     public function __construct(
         private string $apiKey,
@@ -18,6 +19,12 @@ class GeminiClient
     public function getLastUsage(): array
     {
         return $this->lastUsage;
+    }
+
+    /** The raw model reply text, populated even when it failed to parse as JSON. */
+    public function getLastRawText(): string
+    {
+        return $this->lastRawText;
     }
 
     /**
@@ -93,6 +100,7 @@ class GeminiClient
         if ($text === null) {
             throw new \RuntimeException('Gemini returned no content in response');
         }
+        $this->lastRawText = $text;
 
         $plan = json_decode($text, true);
         if (!is_array($plan)) {
