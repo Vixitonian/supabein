@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'supabein-v3';
+const CACHE_NAME = 'supabein-v4';
 
 const PRECACHE_ASSETS = [
   '/dashboard/',
