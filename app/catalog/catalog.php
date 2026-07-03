@@ -662,12 +662,37 @@ class Catalog
         return self::castRows($rows, ['id', 'user_id', 'project_id']);
     }
 
+    // Sessions started before a build finished creating a project (Home's
+    // "Build with AI" flow, before the new project exists yet).
+    public function listAiSessionsUnassigned(int $userId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, user_id, project_id, name, created_at, updated_at
+             FROM ai_sessions WHERE user_id = ? AND project_id IS NULL ORDER BY updated_at DESC LIMIT 20'
+        );
+        $stmt->execute([$userId]);
+        $rows = $stmt->fetchAll() ?: [];
+        return self::castRows($rows, ['id', 'user_id', 'project_id']);
+    }
+
     public function updateAiSession(int $id, int $userId, string $name, array $messages): bool
     {
         $stmt = $this->pdo->prepare(
             'UPDATE ai_sessions SET name = ?, messages = ? WHERE id = ? AND user_id = ?'
         );
         $stmt->execute([$name, json_encode($messages, JSON_UNESCAPED_UNICODE), $id, $userId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // Attaches a session to the project a completed build just created, so the
+    // conversation that built it shows up in that project's own history from
+    // then on instead of staying in the unassigned "Build with AI" bucket.
+    public function setAiSessionProject(int $id, int $userId, int $projectId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE ai_sessions SET project_id = ? WHERE id = ? AND user_id = ?'
+        );
+        $stmt->execute([$projectId, $id, $userId]);
         return $stmt->rowCount() > 0;
     }
 

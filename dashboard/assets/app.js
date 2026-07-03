@@ -593,11 +593,11 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
   const burger = el('button', { class: 'sb-hamburger', 'aria-label': 'Toggle menu' },
     el('span'), el('span'), el('span')
   );
-  // Home already has its own "Build with AI" CTA, so skip the duplicate topbar button there.
+  // No global AI entry point: Home's "Build with AI" starts new projects, and
+  // each project's Overview tab has its own "Edit with AI" scoped to it — the
+  // AI panel is always tied to a specific project (or none, for a new build),
+  // never switchable mid-conversation.
   const topbarRight = el('div', { class: 'sb-topbar-right' });
-  if (activeTab !== 'home') {
-    topbarRight.appendChild(el('button', { class: 'sb-ai-topbar-btn', onClick: () => AiPanel.toggle() }, '✦ AI'));
-  }
   const topbar = el('div', { class: 'sb-topbar' },
     burger,
     el('div', { class: 'sb-topbar-brand' },
@@ -1038,6 +1038,11 @@ const AiPanel = (() => {
   function getSession(id) { return sessions.find(s => String(s.id) === String(id)) || null; }
   function currentSession() { return getSession(currentSessionId); }
 
+  // Per-project "last open session" key, so returning to a project's AI panel
+  // resumes where you left off there specifically, instead of colliding with
+  // whatever project was last active.
+  function aiSidKey() { return 'sb:ai_sid:' + (selectedProjectId || 'none'); }
+
   async function persistSession(sess) {
     if (!sess) return;
     // Never store a session that has no messages yet — keeps empty "New session"
@@ -1053,7 +1058,7 @@ const AiPanel = (() => {
         sess.id = created.id;
         sess._new = false;
         // The temp id was used as currentSessionId — point it at the real id now.
-        if (currentSessionId === oldId) { currentSessionId = sess.id; localStorage.setItem('sb:ai_sid', String(sess.id)); }
+        if (currentSessionId === oldId) { currentSessionId = sess.id; localStorage.setItem(aiSidKey(), String(sess.id)); }
         // The POST only created the row; push the messages we already have.
         if (sess.messages.length) {
           await Api.patch('/v1/ai/sessions/' + sess.id, { name: sess.name, messages: sess.messages });
@@ -1067,9 +1072,12 @@ const AiPanel = (() => {
     } catch(e) { /* non-fatal — UI already updated */ }
   }
 
-  async function loadSessions() {
+  // Project-scoped: pass a projectId for that project's own history, or null
+  // for the "Build with AI" bucket (sessions that haven't created a project yet).
+  async function loadSessions(projectId) {
     try {
-      const result = await Api.get('/v1/ai/sessions');
+      const qs = projectId ? `?project_id=${projectId}` : '?project_id=none';
+      const result = await Api.get('/v1/ai/sessions' + qs);
       sessions = Array.isArray(result) ? result : [];
       sessions.forEach(s => { s.messages = s.messages || []; });
     } catch(e) {
@@ -2572,16 +2580,15 @@ const AiPanel = (() => {
     );
   }
 
+  // Despite the name, this no longer renders a picker — it just reflects the
+  // fixed project the panel was opened for (read-only; see projectLabel above).
   function renderProjectPicker() {
     if (!panelEl) return;
-    const picker = panelEl.querySelector('#ai-project-picker');
-    if (!picker) return;
-    const current = picker.value;
-    picker.innerHTML = '';
-    picker.appendChild(el('option', { value: '' }, '✦ Platform'));
-    projects.forEach(p => picker.appendChild(el('option', { value: String(p.id) }, p.name)));
-    picker.value = selectedProjectId ? String(selectedProjectId) : '';
-    if (picker.value === '' && current) picker.value = '';
+    const label = panelEl.querySelector('.ai-project-label');
+    if (label) {
+      const proj = projects.find(p => String(p.id) === String(selectedProjectId));
+      label.textContent = proj ? proj.name : (selectedProjectId ? '' : '✦ New project');
+    }
     const testBtn = panelEl.querySelector('.ai-run-tests-btn');
     if (testBtn) testBtn.style.display = selectedProjectId ? '' : 'none';
   }
@@ -2602,9 +2609,9 @@ const AiPanel = (() => {
 
   async function switchSession(id) {
     currentSessionId = id;
-    localStorage.setItem('sb:ai_sid', id);
     const sess = getSession(id);
     if (sess) selectedProjectId = sess.projectId;
+    localStorage.setItem(aiSidKey(), id);
     renderSidebar();
     renderMessages();
     renderProjectPicker();
@@ -2616,7 +2623,7 @@ const AiPanel = (() => {
   async function newSession() {
     const sess = await createSession(selectedProjectId);
     currentSessionId = sess.id;
-    localStorage.setItem('sb:ai_sid', sess.id);
+    localStorage.setItem(aiSidKey(), sess.id);
     renderSidebar();
     renderMessages();
   }
@@ -2640,9 +2647,6 @@ const AiPanel = (() => {
     if (!currentSessionId || !getSession(currentSessionId)) {
       const sess = await createSession(selectedProjectId);
       currentSessionId = sess.id;
-    } else {
-      const sess = currentSession();
-      if (sess) { sess.projectId = selectedProjectId; persistSession(sess); }
     }
 
     await addMessage(currentSessionId, { role: 'user', content: prompt });
@@ -2787,6 +2791,23 @@ const AiPanel = (() => {
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
 
+      // A build starts with no project (selectedProjectId is null) — once it
+      // creates one, attach this session to it so it shows up in THAT
+      // project's own history from now on instead of staying in the
+      // unassigned "Build with AI" bucket.
+      if (mode === 'build' && result.project?.id && !selectedProjectId) {
+        const oldKey = aiSidKey();
+        selectedProjectId = result.project.id;
+        if (sess) sess.projectId = selectedProjectId;
+        if (!projects.some(p => String(p.id) === String(selectedProjectId))) {
+          projects.push(result.project);
+        }
+        localStorage.removeItem(oldKey);
+        localStorage.setItem(aiSidKey(), currentSessionId);
+        try { await Api.patch('/v1/ai/sessions/' + currentSessionId, { project_id: selectedProjectId }); } catch (_) {}
+        renderProjectPicker();
+      }
+
       // Auto-test: only when a frontend actually got deployed (there's nothing
       // to browser-test if the apply was schema-only).
       if (autoTestEnabled && (result.deploy || result.staging || result.site)) {
@@ -2846,11 +2867,10 @@ const AiPanel = (() => {
 
     const messages = el('div', { class: 'ai-messages' });
 
-    const projectPicker = el('select', { id: 'ai-project-picker', class: 'ai-project-picker' });
-    projectPicker.addEventListener('change', () => {
-      selectedProjectId = projectPicker.value ? parseInt(projectPicker.value) : null;
-      runTestsBtn.style.display = selectedProjectId ? '' : 'none';
-    });
+    // Read-only — the panel is always scoped to whatever project it was opened
+    // for (or no project, for a fresh "Build with AI"); it can never be
+    // switched mid-conversation, so history stays per-project.
+    const projectLabel = el('span', { class: 'ai-project-label' }, '');
 
     const runTestsBtn = el('button', {
       class: 'btn btn-secondary btn-sm ai-run-tests-btn',
@@ -2947,7 +2967,6 @@ const AiPanel = (() => {
       el('div', { class: 'ai-input-card' },
         textarea,
         el('div', { class: 'ai-input-actions' },
-          projectPicker,
           runTestsBtn,
           modelSelectorBtn,
           modeBtn,
@@ -2965,7 +2984,10 @@ const AiPanel = (() => {
     const header = el('div', { class: 'ai-header' },
       el('div', { class: 'ai-header-left' },
         hamburgerBtn,
-        el('span', { class: 'ai-header-title' }, '✦ SupaBein AI')
+        el('div', { class: 'ai-header-titles' },
+          el('span', { class: 'ai-header-title' }, '✦ SupaBein AI'),
+          projectLabel
+        )
       ),
       newSessionBtn,
       closeBtn
@@ -3002,15 +3024,21 @@ const AiPanel = (() => {
     const autoProject = detectCurrentProject();
     selectedProjectId = (options.projectId !== undefined) ? options.projectId : autoProject;
 
-    await Promise.all([loadSessions(), loadProjects()]);
+    // Sessions are loaded scoped to this exact project (or the unassigned
+    // "Build with AI" bucket when there's none) — a different project's
+    // history never leaks in, and the panel can't switch projects mid-chat.
+    await Promise.all([loadSessions(selectedProjectId), loadProjects()]);
     renderProjectPicker();
 
-    // Figure out which session to open. If the last-used session (this page
-    // load or, after a reload, from localStorage) has a build/edit job that
-    // never resolved, reopen THAT session instead of starting fresh so the
-    // panel can reconnect to it — this is what survives a reload/rotation,
-    // since it doesn't depend on the in-memory operationInProgress flag.
-    const lastId = currentSessionId || localStorage.getItem('sb:ai_sid');
+    // Figure out which session to open. If the last-used session for THIS
+    // project (this page load, or from localStorage after a reload) has a
+    // build/edit job that never resolved, reopen THAT session instead of
+    // starting fresh so the panel can reconnect to it — this is what survives
+    // a reload/rotation, since it doesn't depend on the in-memory
+    // operationInProgress flag. currentSessionId may be left over from a
+    // different project's panel within the same page lifetime, so only trust
+    // it if it's actually in this project's (already project-scoped) list.
+    const lastId = (currentSessionId && getSession(currentSessionId)) ? currentSessionId : localStorage.getItem(aiSidKey());
     let resumeTarget = null;
     if (lastId && getSession(lastId)) {
       await loadSessionMessages(lastId);
@@ -3022,14 +3050,13 @@ const AiPanel = (() => {
 
     if (resumeTarget) {
       currentSessionId = resumeTarget.id;
-      selectedProjectId = resumeTarget.projectId ?? selectedProjectId;
     } else if (operationInProgress && getSession(currentSessionId)) {
       // Panel was just closed and reopened within the same page lifetime — keep going.
     } else {
       // Always start fresh on open so the user isn't confused by a previous project's chat
       const sess = await createSession(selectedProjectId);
       currentSessionId = sess.id;
-      localStorage.setItem('sb:ai_sid', currentSessionId);
+      localStorage.setItem(aiSidKey(), currentSessionId);
     }
 
     renderSidebar();
