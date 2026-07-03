@@ -1884,16 +1884,17 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
 // nav check that depends on a file the edit didn't touch — this reads the
 // complete current deploy so the delta can be merged onto it before validating,
 // mirroring exactly what ai_deploy_files($mergeFromCurrent=true) does on disk).
-function ai_read_full_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId): array
+function ai_read_full_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId, string $target = 'current'): array
 {
     $sites = $catalog->listSites($projectId);
     if (empty($sites)) return [];
 
     $site = $sites[0];
-    if (!($site['current_deploy_id'] ?? null)) return [];
+    $deployIdKey = $target === 'staging' ? 'staging_deploy_id' : 'current_deploy_id';
+    if (!($site[$deployIdKey] ?? null)) return [];
 
     $sitesPath  = rtrim($config['SITES_PATH'], '/');
-    $currentDir = $sitesPath . '/s' . $site['id'] . '/current';
+    $currentDir = $sitesPath . '/s' . $site['id'] . '/' . $target;
     if (!is_dir($currentDir)) return [];
 
     $textExts = ['html', 'css', 'js', 'json'];
@@ -3234,7 +3235,26 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
         'failed'     => $result['failed'] ?? null,
     ]);
 
-    return array_merge($result, ['target' => $target]);
+    // Validate the same deployed files being tested, so one job produces one
+    // combined picture of the app's health instead of two separate checks.
+    $validation = [];
+    $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
+    try {
+        $frontendFiles = ai_read_full_frontend_files($config, $catalog, $projectId, $target);
+        $validation    = ai_validator_check_project($schema, $frontendFiles);
+        if ($client && array_filter($validation, fn($f) => $f['severity'] === 'error')) {
+            $validation = ai_validator_explain_findings($validation, $client);
+        }
+        $errCount  = count(array_filter($validation, fn($f) => $f['severity'] === 'error'));
+        $warnCount = count(array_filter($validation, fn($f) => $f['severity'] === 'warning'));
+        $report(['stage' => 'validate', 'status' => 'done',
+                 'label'  => $validation ? 'Validation found issues' : 'No issues found',
+                 'detail' => $validation ? "{$errCount} error(s), {$warnCount} warning(s)" : '']);
+    } catch (\Throwable $e) {
+        $report(['stage' => 'validate', 'status' => 'done', 'label' => 'Validation skipped', 'detail' => $e->getMessage()]);
+    }
+
+    return array_merge($result, ['target' => $target, 'validation' => $validation]);
 }
 
 // Spawns a fully independent OS process to run one job. This — not a shared
