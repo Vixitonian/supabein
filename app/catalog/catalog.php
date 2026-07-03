@@ -283,12 +283,16 @@ class Catalog
             ];
         }
 
+        $seedStmt = $this->pdo->prepare('SELECT 1 FROM project_seed_rows WHERE project_id = ? LIMIT 1');
+        $seedStmt->execute([$projectId]);
+
         return [
             'project' => $project,
             'stats' => [
-                'tables'      => count($tables),
-                'live'        => (bool)($site && !empty($site['current_deploy_id'])),
-                'has_staging' => (bool)($site && !empty($site['staging_deploy_id'])),
+                'tables'         => count($tables),
+                'live'           => (bool)($site && !empty($site['current_deploy_id'])),
+                'has_staging'    => (bool)($site && !empty($site['staging_deploy_id'])),
+                'has_seed_data'  => (bool)$seedStmt->fetchColumn(),
             ],
             'site_id'  => $site ? (int)$site['id'] : null,
             'activity' => $this->capActivityWithSession($activity, 4),

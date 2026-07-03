@@ -3058,6 +3058,44 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
+const AI_SEED_PROMPT = <<<'PROMPT'
+You generate realistic sample/demo data for an existing app's database, given its exact schema.
+Return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text:
+
+{ "seed_data": { "<table_name>": [ { "<col>": <value>, ... } ] } }
+
+Rules:
+- Target only tables that already exist in the given schema.
+- Never seed auth/users tables or rows that must belong to a real logged-in user (anything relying
+  on a current-user/owner column) — only seed "global"/catalogue-style data real visitors would see.
+- Generate 5-10 realistic rows per eligible table. Cap at 50 rows per table.
+- Omit "id" and "created_at" — they are inserted automatically.
+- Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL).
+- If no table is eligible for seeding, return "seed_data": {}.
+PROMPT;
+
+// On-demand seeding for the "Seed App" button — same seed_data shape and
+// insertion path as build's initial seed and edit mode's "seed N rows"
+// requests (ai_insert_seed_data), just triggered directly instead of via a
+// natural-language edit prompt.
+function ai_run_project_seed(int $projectId, \SupaBein\Catalog $catalog, \PDO $pdo, object $client, callable $report): array
+{
+    $report(['stage' => 'schema', 'status' => 'start', 'label' => 'Reading schema…']);
+    $schema = ai_schema_from_db($projectId, $catalog);
+    $report(['stage' => 'schema', 'status' => 'done', 'label' => 'Schema loaded']);
+
+    $report(['stage' => 'generate', 'status' => 'start', 'label' => 'Generating sample data…']);
+    $result = $client->generateJson(AI_SEED_PROMPT, "Exact schema:\n" . ai_schema_to_context($schema));
+    $seedData = is_array($result['seed_data'] ?? null) ? $result['seed_data'] : [];
+    $report(['stage' => 'generate', 'status' => 'done', 'label' => 'Sample data generated', 'detail' => count($seedData) . ' table(s)']);
+
+    $report(['stage' => 'insert', 'status' => 'start', 'label' => 'Inserting rows…']);
+    $seeded = ai_insert_seed_data($pdo, $catalog, $projectId, $seedData);
+    $report(['stage' => 'insert', 'status' => 'done', 'label' => 'Done', 'detail' => $seeded ? implode(', ', $seeded) : 'No eligible tables found']);
+
+    return ['seeded' => $seeded, 'usage' => $client->getLastUsage()];
+}
+
 // Runs the Playwright user-story tests for a project against its most recent
 // deploy (staging if present — edits land there by design — else live).
 // Called from the worker's 'test' job mode; throws on unrecoverable failure.
@@ -4224,6 +4262,31 @@ PROMPT;
         $job = $catalog->createJob($userId, $sessionId, 'test', [
             'project_id' => $projectId,
             // Story-test generation uses the same model the user picked in the panel.
+            'provider'   => $req['body']['provider'] ?? null,
+            'model'      => $req['body']['model'] ?? null,
+        ]);
+        ai_spawn_job_worker($config, (int)$job['id']);
+        json_out(['job_id' => (int)$job['id']], 202);
+    }, ['auth_middleware']);
+
+    // ── Generate + insert sample data for the "Seed App" button — same
+    //    background-job pattern as build/edit/test so it survives the panel
+    //    closing while the AI call is in flight.
+    $router->post('/v1/ai/seed/job', function (array $req): void {
+        $config    = \App::get('config');
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)($req['body']['project_id'] ?? 0);
+
+        if (!$projectId) abort(422, 'project_id is required');
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) abort(404, 'Project not found');
+
+        if (!$catalog->listTables($projectId)) abort(422, 'This project has no tables to seed yet');
+
+        $job = $catalog->createJob($userId, null, 'seed', [
+            'project_id' => $projectId,
             'provider'   => $req['body']['provider'] ?? null,
             'model'      => $req['body']['model'] ?? null,
         ]);

@@ -1928,6 +1928,68 @@ const AiPanel = (() => {
     );
   }
 
+  let seedRunning = false;
+  const SEED_PROGRESS_STAGES = [
+    { key: 'schema',   label: 'Reading schema' },
+    { key: 'generate', label: 'Generating sample data' },
+    { key: 'insert',   label: 'Inserting rows' },
+  ];
+
+  // Seed the project's tables with realistic sample data on demand — same
+  // background-job machinery as Run Tests, just a simpler job with no cards
+  // of its own; the outcome is reported as a plain chat message.
+  async function runProjectSeed(projectId, btn) {
+    if (!projectId || seedRunning) return;
+    seedRunning = true;
+    if (btn) btn.disabled = true;
+    let sess = currentSession();
+    if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
+
+    const progressMsg = makeProgressMsg(SEED_PROGRESS_STAGES, 'Seeding your app', 'seed');
+    sess.messages.push(progressMsg);
+    operationInProgress = true;
+    operationMode = 'seed';
+    updateSendBtn();
+    renderMessages();
+
+    try {
+      const jobBody = { project_id: projectId };
+      if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
+      const created = await Api.post('/v1/ai/seed/job', jobBody);
+      progressMsg.data.jobId = created.job_id;
+      const pollState = { cancelled: false };
+      activeJobPoll = pollState;
+      await persistSession(sess);
+
+      const finalEv = await pollJob(created.job_id, progressMsg, pollState, sess);
+      if (activeJobPoll === pollState) activeJobPoll = null;
+
+      if (finalEv) {
+        const seeded = finalEv.seeded || [];
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat',
+          content: seeded.length ? 'Seeded: ' + seeded.join(', ') + '.' : 'No eligible tables found to seed.' });
+      } else if (!pollState.cancelled) {
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: progressMsg.data.error || 'Seeding failed' });
+      }
+    } catch (err) {
+      console.error('[AiPanel] Seed App failed', err);
+      const active = progressMsg.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
+      progressMsg.data.jobDone = true;
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: err.message });
+    } finally {
+      seedRunning = false;
+      operationInProgress = false;
+      operationMode = null;
+      if (btn) btn.disabled = false;
+      updateSendBtn();
+      await persistSession(sess);
+      renderMessages();
+      const c = panelEl?.querySelector('.ai-messages');
+      if (c) c.scrollTop = c.scrollHeight;
+    }
+  }
+
   let testRunning = false;
   // Run the Playwright user-story tests for a project as a background job with
   // a live progress card — same machinery as build/edit, so the run survives
@@ -2435,6 +2497,10 @@ const AiPanel = (() => {
       const runBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '▶ Run Tests');
       runBtn.addEventListener('click', () => runProjectTests(testProjectId, runBtn));
       actions.appendChild(runBtn);
+
+      const seedBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '🌱 Seed App');
+      seedBtn.addEventListener('click', () => runProjectSeed(testProjectId, seedBtn));
+      actions.appendChild(seedBtn);
     }
 
     if (actions.children.length) card.appendChild(actions);
@@ -3103,10 +3169,11 @@ const AiPanel = (() => {
     history.pushState({ aiPanel: true }, '');
     historyPushed = true;
 
-    // Show panel immediately so animation starts without waiting for data
+    // Show panel immediately so animation starts without waiting for data.
+    // Deliberately NOT auto-focusing the textarea here — that pops the mobile
+    // keyboard the instant the panel opens. Focus only when the user taps in.
     panelEl.classList.add('ai-panel-open');
     getOrCreateBackdrop().classList.add('active');
-    setTimeout(() => panelEl.querySelector('#ai-textarea')?.focus(), 100);
 
     const autoProject = detectCurrentProject();
     selectedProjectId = (options.projectId !== undefined) ? options.projectId : autoProject;
@@ -3625,6 +3692,20 @@ async function renderProject({ id }) {
   }
 }
 
+// Minimal job poller for one-off actions triggered outside the AI panel
+// (e.g. the Overview page's "Seed App" button) — no progress card, just
+// waits for the job to resolve and hands back its final result.
+async function pollJobUntilDone(jobId) {
+  let since = 0;
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    const job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
+    since = job.event_count;
+    if (job.status === 'done') return { ok: true, result: job.result };
+    if (job.status === 'failed' || job.status === 'cancelled') return { ok: false, error: job.error };
+  }
+}
+
 async function loadOverviewPane(projectId, container, switchTab) {
   container.innerHTML = '';
   container.appendChild(el('div', { class: 'text-muted' }, 'Loading…'));
@@ -3654,23 +3735,51 @@ async function loadOverviewPane(projectId, container, switchTab) {
     } else if (!o.stats.live) {
       ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Deploy'));
     }
-    const clearSeedBtn = el('button', { class: 'btn btn-secondary' }, 'Clear Seed Data');
-    clearSeedBtn.addEventListener('click', async () => {
-      if (!confirm('Remove all AI-seeded sample data from this app\'s tables? Rows you or your users entered yourself are not affected.')) return;
-      clearSeedBtn.disabled = true;
-      try {
-        const res = await Api.post(`/v1/projects/${projectId}/seed/clear`, {});
-        const counts = Object.entries(res.deleted || {});
-        alert(counts.length
-          ? 'Cleared: ' + counts.map(([t, n]) => `${t} (${n})`).join(', ')
-          : 'No seeded rows found — nothing to clear.');
-      } catch (e) {
-        alert(e.message);
-      } finally {
-        clearSeedBtn.disabled = false;
-      }
-    });
-    ctas.appendChild(clearSeedBtn);
+    if (o.stats.tables > 0) {
+      const seedAppBtn = el('button', { class: 'btn btn-secondary' }, '🌱 Seed App');
+      seedAppBtn.addEventListener('click', async () => {
+        seedAppBtn.disabled = true;
+        const orig = seedAppBtn.textContent;
+        seedAppBtn.textContent = '⏳ Seeding…';
+        try {
+          const { job_id } = await Api.post('/v1/ai/seed/job', { project_id: projectId });
+          const outcome = await pollJobUntilDone(job_id);
+          if (outcome.ok) {
+            const seeded = outcome.result.seeded || [];
+            alert(seeded.length ? 'Seeded: ' + seeded.join(', ') : 'No eligible tables found to seed.');
+            if (seeded.length) loadOverviewPane(projectId, container, switchTab); // refresh so Clear Seed Data now shows
+          } else {
+            alert('Seeding failed: ' + (outcome.error || 'try again'));
+          }
+        } catch (e) {
+          alert(e.message);
+        } finally {
+          seedAppBtn.disabled = false;
+          seedAppBtn.textContent = orig;
+        }
+      });
+      ctas.appendChild(seedAppBtn);
+    }
+    if (o.stats.has_seed_data) {
+      const clearSeedBtn = el('button', { class: 'btn btn-secondary' }, 'Clear Seed Data');
+      clearSeedBtn.addEventListener('click', async () => {
+        if (!confirm('Remove all AI-seeded sample data from this app\'s tables? Rows you or your users entered yourself are not affected.')) return;
+        clearSeedBtn.disabled = true;
+        try {
+          const res = await Api.post(`/v1/projects/${projectId}/seed/clear`, {});
+          const counts = Object.entries(res.deleted || {});
+          alert(counts.length
+            ? 'Cleared: ' + counts.map(([t, n]) => `${t} (${n})`).join(', ')
+            : 'No seeded rows found — nothing to clear.');
+          loadOverviewPane(projectId, container, switchTab); // refresh to hide the button now that it's empty
+        } catch (e) {
+          alert(e.message);
+        } finally {
+          clearSeedBtn.disabled = false;
+        }
+      });
+      ctas.appendChild(clearSeedBtn);
+    }
     container.appendChild(ctas);
 
     container.appendChild(el('div', { class: 'home-section-head' },

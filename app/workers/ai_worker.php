@@ -81,6 +81,11 @@ try {
         $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'test'], $result));
 
+    } elseif ($mode === 'seed') {
+        $projectId = (int)($payload['project_id'] ?? 0);
+        $result = ai_run_project_seed($projectId, $catalog, $db, $client, $report);
+        $catalog->markJobDone($jobId, array_merge(['mode' => 'seed'], $result));
+
     } else {
         throw new \RuntimeException('Unknown job mode: ' . $mode);
     }
