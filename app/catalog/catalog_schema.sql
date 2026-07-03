@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS `ai_jobs` (
     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `user_id`    INT UNSIGNED NOT NULL,
     `session_id` INT UNSIGNED DEFAULT NULL,
-    `mode`       ENUM('build','edit','test') NOT NULL,
+    `mode`       ENUM('build','edit','test','seed') NOT NULL,
     `payload`    LONGTEXT NOT NULL,
     `progress`   LONGTEXT DEFAULT NULL,
     `status`     ENUM('queued','running','done','failed','cancelled') NOT NULL DEFAULT 'queued',
@@ -267,3 +267,7 @@ SET foreign_key_checks = 1;
 --     KEY `idx_project_table` (`project_id`, `table_name`),
 --     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE
 -- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ─── Migration: ai_jobs seed mode (run once on existing installs) ───────────
+-- ALTER TABLE `ai_jobs`
+--   MODIFY COLUMN `mode` ENUM('build','edit','test','seed') NOT NULL;
