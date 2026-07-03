@@ -1586,6 +1586,12 @@ const AiPanel = (() => {
     updateSendBtn();
     renderMessages();
 
+    // Persist BEFORE creating the job — a session that's still a local "tmp_"
+    // id at this point would make the job's session_id silently come back
+    // null (the check below only attaches it when the id is already real),
+    // permanently orphaning the job from this session in the database.
+    await persistSession(sess);
+
     const { provider, model } = getSelectedModel();
     const t0 = Date.now();
 
@@ -1973,6 +1979,11 @@ const AiPanel = (() => {
     updateSendBtn();
     renderMessages();
 
+    // Persist BEFORE creating the job so a brand-new session's tmp_ id has
+    // already become a real id — otherwise session_id below stays unset and
+    // the job is permanently orphaned from this session.
+    await persistSession(sess);
+
     try {
       const jobBody = { project_id: projectId };
       if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
@@ -2030,6 +2041,13 @@ const AiPanel = (() => {
     operationMode = 'test';
     updateSendBtn();
     renderMessages();
+
+    // Persist BEFORE creating the job so a brand-new session's tmp_ id has
+    // already become a real id — otherwise session_id below stays unset and
+    // the job is permanently orphaned from this session (this was the cause
+    // of test/build jobs seeming to land in "a new session" when they were
+    // the very first action taken in a freshly-opened panel).
+    await persistSession(sess);
 
     try {
       const { provider, model } = getSelectedModel();
