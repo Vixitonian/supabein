@@ -1,7 +1,8 @@
 <?php
 /**
  * PHP proxy for serving deployed user sites.
- * Handles /sites/s{id}/current/{path} → SITES_PATH/s{id}/current/{path}
+ * Handles /sites/s{id}/current/{path} and /sites/s{id}/staging/{path}
+ * → SITES_PATH/s{id}/{current|staging}/{path}
  */
 
 declare(strict_types=1);
@@ -11,23 +12,24 @@ require_once __DIR__ . '/app/bootstrap.php';
 $config    = App::get('config');
 $sitesPath = rtrim($config['SITES_PATH'], '/');
 
-// Parse: /sites/s{siteId}/current/{path}
+// Parse: /sites/s{siteId}/{current|staging}/{path}
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $uri = ltrim($uri, '/');
 
-if (!preg_match('#^sites/s(\d+)/current(?:/(.*))?$#', $uri, $m)) {
+if (!preg_match('#^sites/s(\d+)/(current|staging)(?:/(.*))?$#', $uri, $m)) {
     http_response_code(404); echo 'Not found'; exit;
 }
 
 $siteId  = (int)$m[1];
-$reqPath = $m[2] ?? '';
+$variant = $m[2];
+$reqPath = $m[3] ?? '';
 
 // Normalize trailing slash → index.html
 if ($reqPath === '' || str_ends_with($reqPath, '/')) {
     $reqPath = rtrim($reqPath, '/') . '/index.html';
 }
 
-$base     = $sitesPath . '/s' . $siteId . '/current';
+$base     = $sitesPath . '/s' . $siteId . '/' . $variant;
 $fullPath = \SupaBein\Deploy::normalizePath($base . '/' . $reqPath);
 
 // Path traversal guard
