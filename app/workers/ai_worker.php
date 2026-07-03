@@ -64,14 +64,16 @@ try {
         $prompt         = $payload['prompt']  ?? '';
         $history        = $payload['history'] ?? [];
         $approvedIntent = $payload['intent']  ?? null;
-        $result = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $report);
+        $validate       = $payload['validate'] ?? true;
+        $result = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $report, $validate);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'build'], $result));
 
     } elseif ($mode === 'edit') {
         $projectId = (int)($payload['project_id'] ?? 0);
         $prompt    = $payload['prompt']  ?? '';
         $history   = $payload['history'] ?? [];
-        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report);
+        $validate  = $payload['validate'] ?? true;
+        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'edit'], $result));
 
     } elseif ($mode === 'test') {
