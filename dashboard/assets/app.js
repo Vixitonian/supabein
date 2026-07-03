@@ -4951,5 +4951,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // own periodic re-check, not the moment the file changes on the server.
   // This applies immediately for anyone already running in standalone mode
   // (it silently no-ops in a plain browser tab, which can't lock orientation).
-  try { screen.orientation?.lock?.('portrait')?.catch(() => {}); } catch (_) {}
+  // Some engines reject the call this early (before first paint) or drop the
+  // lock when the app is backgrounded then resumed, so retry on 'load' and
+  // whenever the page becomes visible again, not just once at DOMContentLoaded.
+  const tryLockPortrait = () => { try { screen.orientation?.lock?.('portrait')?.catch(() => {}); } catch (_) {} };
+  tryLockPortrait();
+  window.addEventListener('load', tryLockPortrait);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) tryLockPortrait(); });
 });

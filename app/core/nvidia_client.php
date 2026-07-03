@@ -54,7 +54,7 @@ class NvidiaClient
         $body    = [
             'model'                => $this->model,
             'messages'             => $messages,
-            'max_tokens'           => 32768,
+            'max_tokens'           => 65536,
             'stream'               => false,
             'chat_template_kwargs' => ['enable_thinking' => false],
         ];

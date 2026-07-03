@@ -59,7 +59,7 @@ class GeminiClient
         $payload = json_encode([
             'systemInstruction' => ['parts' => [['text' => $systemPrompt]]],
             'contents'          => $contents,
-            'generationConfig'  => ['responseMimeType' => 'application/json'],
+            'generationConfig'  => ['responseMimeType' => 'application/json', 'maxOutputTokens' => 65536],
         ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
         $ch = curl_init($url);

@@ -181,6 +181,7 @@ The inline bootstrap contains ONLY:
 
     router.defineRoute('/', featureA.renderView);
     router.defineRoute('/login', auth.renderAuthForms);
+    router.defineRoute('/items/:id', featureA.renderDetail); // ':id' → handler receives {id}
     /* ... all other routes ... */
 
     document.getElementById('nav-toggle').addEventListener('click', () => {
@@ -195,30 +196,19 @@ The inline bootstrap contains ONLY:
     });
   </script>
 
-core/router.js must NEVER call defineRoute() itself — it only exports the router API.
-core/router.js MUST be EXACTLY this file (copy verbatim — an empty initial hash MUST resolve
-to the home route '/', otherwise the very first page load shows a bogus "404 - Not Found"):
+core/router.js and core/api.js are PROVIDED BY THE PLATFORM — do NOT include "core/router.js" or
+"core/api.js" in your files array at all, even for a full rebuild; the platform always injects its
+own known-working versions of both after your output, so anything you write for those two paths is
+discarded. This also means: NEVER invent your own routing scheme (no dynamic per-route script
+loading, no dispatch-by-string-name via window[featureName] — that requires every feature module to
+attach itself to `window`, which they do not, and causes "Module X not found" errors). All feature
+scripts are already loaded upfront via <script src> tags (see STRUCTURE), so route handlers are
+always a direct function reference to something already in scope — `router.defineRoute(path, fn)` —
+never a string that gets looked up dynamically.
 
-  const router = (() => {
-    const routes = {};
-    const appDiv = document.getElementById('app');
-    const defineRoute = (path, handler) => { routes[path] = handler; };
-    const navigate = (path) => { window.location.hash = path; };
-    const onHashChange = async () => {
-      // Empty hash (first load, or "#") means the home route, never 404.
-      const path = window.location.hash.replace(/^#/, '') || '/';
-      const handler = routes[path] || routes['/404'] ||
-        (() => { appDiv.innerHTML = '<h1 class="text-2xl text-red-400 p-8">404 - Not Found</h1>'; });
-      if (!appDiv) return;
-      appDiv.innerHTML = '<p class="text-gray-400 animate-pulse text-center p-8">Loading...</p>';
-      try { await handler(); }
-      catch (error) {
-        appDiv.innerHTML = '<p class="text-red-400 text-center p-8">Error: ' + error.message + '</p>';
-        console.error('Routing error:', error);
-      }
-    };
-    return { defineRoute, navigate, onHashChange };
-  })();
+router.defineRoute(path, handler) registers a route; path segments starting with ':' are wildcards
+(e.g. '/items/:id' matches '/items/42' and calls handler({id: '42'})); a path with no ':' segments
+calls handler({}). router.navigate(path) and router.onHashChange() work as already described above.
 
 ═══════════════════════════════════════════════════════
 RULE 3 — AUTH INITIALISATION RACE
@@ -251,46 +241,19 @@ Also guard interpolation: use ${item.description ?? ''} so a null never renders 
 RULE 6 — DATA ACCESS: USE THE api CLIENT ONLY
 ═══════════════════════════════════════════════════════
 NEVER call fetch() for data yourself and NEVER build data URLs by hand in feature code.
-Use the api client exclusively. core/api.js MUST be EXACTLY this file (copy verbatim,
-do not change the signatures — this is what keeps every build consistent):
+core/api.js is PROVIDED BY THE PLATFORM (like core/router.js) — do NOT include "core/api.js" in
+your files array; the platform injects its own known-working version. Feature code calls it exactly
+as follows (this is the real interface — code against it, do not redeclare or reimplement any of it):
 
-  const api = (() => {
-    const goLogin = () => {
-      localStorage.removeItem('sb:token');
-      if (!String(location.hash).toLowerCase().includes('login')) location.hash = '#/login';
-    };
-    const authHeader = () => {
-      const t = localStorage.getItem('sb:token');
-      if (!t) return {};
-      // Drop our own expired token so we never send a dead one and hit "not found".
-      try {
-        const exp = JSON.parse(atob(t.split('.')[1])).exp;
-        if (exp && Date.now() / 1000 > exp) { goLogin(); return {}; }
-      } catch {}
-      return { 'Authorization': 'Bearer ' + t };
-    };
-    const base = (table) => `${SB_URL}/data/${SB_PID}/${table}`;
-    // Tolerate either a bare array OR a wrapped envelope from the data API.
-    const unwrap = (j) => Array.isArray(j) ? j : (j && (j.data ?? j.rows ?? j.records)) ?? j;
-    const req = async (url, opts = {}) => {
-      const hadToken = !!localStorage.getItem('sb:token');
-      const res = await fetch(url, {
-        ...opts,
-        headers: { 'Content-Type': 'application/json', ...authHeader(), ...(opts.headers || {}) }
-      });
-      // A logged-in user being denied means their session is stale — re-login
-      // instead of showing a dead-end "not found / no permission".
-      if (res.status === 401 || (hadToken && res.status === 403)) { goLogin(); throw new Error('Your session expired — please log in again.'); }
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      return res.status === 204 ? null : res.json();
-    };
-    const list   = async (table)         => unwrap(await req(base(table)));
-    const get    = async (table, id)     => req(`${base(table)}/${id}`);
-    const create = async (table, data)   => req(base(table), { method: 'POST',   body: JSON.stringify(data) });
-    const update = async (table, id, d)  => req(`${base(table)}/${id}`, { method: 'PUT', body: JSON.stringify(d) });
-    const remove = async (table, id)     => req(`${base(table)}/${id}`, { method: 'DELETE' });
-    return { list, get, create, update, remove };
-  })();
+  api.list(table)          → Promise<array>            all rows (array always, even if empty)
+  api.get(table, id)       → Promise<object>            one row
+  api.create(table, data)  → Promise<object>            inserts, returns the created row
+  api.update(table, id, d) → Promise<object>             updates, returns the updated row
+  api.remove(table, id)    → Promise<null>               deletes
+
+All five throw on failure (network error, non-2xx) — wrap calls in try/catch and show the error
+message. A 401 (or a 403 when the user was already logged in) auto-redirects to /login itself —
+your catch block still fires, so still show/log the error, just don't also hand-navigate on those.
 
 Feature code uses ONLY: api.list('table'), api.get('table', id), api.create('table', {...}),
 api.update('table', id, {...}), api.remove('table', id). api.list() always returns an array.
@@ -324,13 +287,15 @@ STRUCTURE (define each name once, in its own file)
 ═══════════════════════════════════════════════════════
     index.html                         ← SPA entry + bootstrap ONLY (no module re-declarations)
     core/config.js                     ← SB_URL / SB_KEY / SB_PID globals (declared once, here)
-    core/api.js                        ← the exact api client from RULE 6
-    core/router.js                     ← router API only (no defineRoute calls)
+    core/api.js                        ← PLATFORM-PROVIDED — do not include this path in your output
+    core/router.js                     ← PLATFORM-PROVIDED — do not include this path in your output
     features/auth/auth.js              ← login, signup, logout, ready promise
                                        (ONLY include when schema has a PASSWORD column)
     features/<feature>/<feature>.js    ← one subfolder per feature
 Load with RELATIVE paths in dependency order (config → api → router → auth → features → bootstrap).
 Absolute paths like /core/config.js break the site. No frameworks, no npm, no build tools.
+index.html still needs <script src="./core/api.js"> and <script src="./core/router.js"> tags in that
+load order — the platform writes the files to disk, you just need to reference them normally.
 
 ═══════════════════════════════════════════════════════
 STYLING
@@ -571,9 +536,14 @@ Return ONLY a single valid JSON object — no markdown fences, no explanation, n
 The "frontend" key is OPTIONAL.
 - OMIT "frontend" for a pure schema change (add column, change policy).
 - INCLUDE "frontend" for any UI / visual / navigation / "broken" / "blank page" request.
-- When included, output EVERY file the site needs to run standalone — index.html, core/*, and
-  all feature files — even unchanged ones. Returned files are MERGED over the existing deploy,
-  but any file you DO return fully replaces its old version, so a half-written file breaks the site.
+- When included, output ONLY the files that actually need to change: the file(s) implementing the
+  request, plus any file whose wiring must change as a direct result (e.g. adding a nav link or a
+  new route touches index.html; a brand-new feature needs its own new file). Do NOT re-output a file
+  that needs no change under this request — every path you omit is left exactly as it is in the
+  current live deploy (see MERGE below), so reproducing an untouched file from memory only adds
+  tokens and risk of introducing an unrelated regression in something that already worked.
+- MERGE: any path you DO return fully REPLACES its old version, so a half-written file breaks the
+  site — never return a partial/truncated file. Any path you do NOT return keeps its current content.
 - Use the exact column names from the "Exact schema" context — do NOT invent or rename them.
 
 The "seed_data" key is OPTIONAL — only include it when the user's request is EXPLICITLY about
@@ -603,6 +573,116 @@ PROMPT;
 
 const AI_EDIT_SYSTEM_PROMPT = AI_EDIT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
 
+// ─── Platform-provided boilerplate (never AI-authored) ──────────────────────
+// core/router.js and core/api.js are the two files every "route not found" /
+// "module not found" style bug traced back to — either the AI silently
+// deviated from the verbatim template (most often inventing a lazy per-route
+// script-loader with a window[featureName] lookup, which requires every
+// feature module to attach itself to `window`, which they never do), or a
+// later edit regenerated the file from scratch and lost a previous fix.
+// Since both files are pure boilerplate with zero app-specific content, the
+// server injects its own known-good copy after every deploy, unconditionally,
+// regardless of what (if anything) the AI wrote for those two paths.
+
+const AI_CANONICAL_ROUTER_JS = <<<'JS'
+const router = (() => {
+  const routes = {};
+  const appDiv = document.getElementById('app');
+  const defineRoute = (path, handler) => { routes[path] = handler; };
+  const navigate = (path) => { window.location.hash = path; };
+
+  // Matches a static route first, then falls back to a ':param' pattern of
+  // the same segment length (e.g. '/items/:id' matches '/items/42').
+  const matchRoute = (path) => {
+    if (routes[path]) return { handler: routes[path], params: {} };
+    const segs = path.split('/');
+    for (const pattern in routes) {
+      const pSegs = pattern.split('/');
+      if (pSegs.length !== segs.length) continue;
+      const params = {};
+      let ok = true;
+      for (let i = 0; i < pSegs.length; i++) {
+        if (pSegs[i].startsWith(':')) params[pSegs[i].slice(1)] = decodeURIComponent(segs[i]);
+        else if (pSegs[i] !== segs[i]) { ok = false; break; }
+      }
+      if (ok) return { handler: routes[pattern], params };
+    }
+    return null;
+  };
+
+  const onHashChange = async () => {
+    // Empty hash (first load, or "#") means the home route, never 404.
+    const path = window.location.hash.replace(/^#/, '') || '/';
+    const match = matchRoute(path);
+    const handler = match ? match.handler : (routes['/404'] ||
+      (() => { appDiv.innerHTML = '<h1 class="text-2xl text-red-400 p-8">404 - Not Found</h1>'; }));
+    if (!appDiv) return;
+    appDiv.innerHTML = '<p class="text-gray-400 animate-pulse text-center p-8">Loading...</p>';
+    try { await handler(match ? match.params : {}); }
+    catch (error) {
+      appDiv.innerHTML = '<p class="text-red-400 text-center p-8">Error: ' + error.message + '</p>';
+      console.error('Routing error:', error);
+    }
+  };
+  return { defineRoute, navigate, onHashChange };
+})();
+JS;
+
+const AI_CANONICAL_API_JS = <<<'JS'
+const api = (() => {
+  const goLogin = () => {
+    localStorage.removeItem('sb:token');
+    if (!String(location.hash).toLowerCase().includes('login')) location.hash = '#/login';
+  };
+  const authHeader = () => {
+    const t = localStorage.getItem('sb:token');
+    if (!t) return {};
+    // Drop our own expired token so we never send a dead one and hit "not found".
+    try {
+      const exp = JSON.parse(atob(t.split('.')[1])).exp;
+      if (exp && Date.now() / 1000 > exp) { goLogin(); return {}; }
+    } catch {}
+    return { 'Authorization': 'Bearer ' + t };
+  };
+  const base = (table) => `${SB_URL}/data/${SB_PID}/${table}`;
+  // Tolerate either a bare array OR a wrapped envelope from the data API.
+  const unwrap = (j) => Array.isArray(j) ? j : (j && (j.data ?? j.rows ?? j.records)) ?? j;
+  const req = async (url, opts = {}) => {
+    const hadToken = !!localStorage.getItem('sb:token');
+    const res = await fetch(url, {
+      ...opts,
+      headers: { 'Content-Type': 'application/json', ...authHeader(), ...(opts.headers || {}) }
+    });
+    // A logged-in user being denied means their session is stale — re-login
+    // instead of showing a dead-end "not found / no permission".
+    if (res.status === 401 || (hadToken && res.status === 403)) { goLogin(); throw new Error('Your session expired — please log in again.'); }
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.status === 204 ? null : res.json();
+  };
+  const list   = async (table)         => unwrap(await req(base(table)));
+  const get    = async (table, id)     => req(`${base(table)}/${id}`);
+  const create = async (table, data)   => req(base(table), { method: 'POST',   body: JSON.stringify(data) });
+  const update = async (table, id, d)  => req(`${base(table)}/${id}`, { method: 'PUT', body: JSON.stringify(d) });
+  const remove = async (table, id)     => req(`${base(table)}/${id}`, { method: 'DELETE' });
+  return { list, get, create, update, remove };
+})();
+JS;
+
+// Force these two paths to the canonical platform content, adding them if the
+// AI omitted them (both are required for every app) and overwriting them if
+// the AI wrote something else (its content is always discarded either way).
+function ai_inject_canonical_frontend_files(array $frontendFiles): array
+{
+    $byPath = [];
+    foreach ($frontendFiles as $f) {
+        if (!is_array($f) || !isset($f['path'])) continue;
+        $byPath[ltrim((string)$f['path'], '/')] = $f;
+    }
+    $byPath['core/router.js'] = ['path' => 'core/router.js', 'content' => AI_CANONICAL_ROUTER_JS];
+    $byPath['core/api.js']    = ['path' => 'core/api.js',    'content' => AI_CANONICAL_API_JS];
+    return array_values($byPath);
+}
+
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
 
 function ai_deploy_files(
@@ -614,6 +694,7 @@ function ai_deploy_files(
     bool $mergeFromCurrent = false,
     bool $publishLive = true
 ): array {
+    $frontendFiles = ai_inject_canonical_frontend_files($frontendFiles);
     $sitesPath = rtrim($config['SITES_PATH'], '/');
     $label     = 'ai-generated-' . date('Y-m-d');
 

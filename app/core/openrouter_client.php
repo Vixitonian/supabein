@@ -64,7 +64,7 @@ class OpenRouterClient
             // Not all routed providers support response_format=json_object (some reject
             // the request outright, others silently drop the final answer into a
             // "reasoning" field). We rely on the system prompt + ai_lenient_json() instead.
-            'max_tokens' => self::MAX_TOKENS_OVERRIDES[$this->model] ?? 32768,
+            'max_tokens' => self::MAX_TOKENS_OVERRIDES[$this->model] ?? 65536,
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
