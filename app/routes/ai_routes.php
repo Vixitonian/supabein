@@ -3840,10 +3840,21 @@ PROMPT;
 
     // ── AI Sessions (DB-backed) ────────────────────────────────────────────────
 
+    // History is project-scoped: pass ?project_id=<id> for a specific project's
+    // sessions, ?project_id=none for the "Build with AI" bucket (no project yet),
+    // or omit entirely for the full unscoped list.
     $router->get('/v1/ai/sessions', function (array $req): void {
-        $userId  = (int)$req['auth']['user_id'];
-        $catalog = \SupaBein\Catalog::getInstance();
-        json_out($catalog->listAiSessions($userId));
+        $userId    = (int)$req['auth']['user_id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $projectId = $req['query']['project_id'] ?? null;
+
+        if ($projectId === 'none') {
+            json_out($catalog->listAiSessionsUnassigned($userId));
+        } elseif ($projectId !== null && $projectId !== '') {
+            json_out($catalog->listAiSessionsForProject((int)$projectId, $userId));
+        } else {
+            json_out($catalog->listAiSessions($userId));
+        }
     }, ['auth_middleware']);
 
     // Generate a short, descriptive title for a chat session from its first message.
@@ -3894,6 +3905,11 @@ PROMPT;
         $newName     = $name ?: $sess['name'];
         $newMessages = is_array($messages) ? $messages : $sess['messages'];
         $catalog->updateAiSession($sessionId, $userId, $newName, $newMessages);
+        // Attach the session to the project a completed build just created —
+        // only ever moves a session FROM unassigned TO a project, never away.
+        if (isset($req['body']['project_id']) && $sess['project_id'] === null) {
+            $catalog->setAiSessionProject($sessionId, $userId, (int)$req['body']['project_id']);
+        }
         json_out($catalog->getAiSession($sessionId, $userId));
     }, ['auth_middleware']);
 
