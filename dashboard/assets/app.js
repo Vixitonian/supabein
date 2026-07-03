@@ -848,6 +848,8 @@ const AiPanel = (() => {
   // Ordered best-to-least capable for software/frontend generation (scale, tier, coding
   // pedigree, context window, and OpenRouter pricing as a capability proxy where relevant).
   const AI_MODELS = [
+    { label: 'Claude Opus 4.8',      provider: 'anthropic',  model: 'claude-opus-4-8',                                   badge: 'Claude' },
+    { label: 'Claude Sonnet 5',      provider: 'anthropic',  model: 'claude-sonnet-5',                                   badge: 'Claude' },
     { label: 'Nemotron 3 Ultra 550B',provider: 'nvidia',     model: 'nvidia/nemotron-3-ultra-550b-a55b',                 badge: 'NVIDIA' },
     { label: 'Kimi K2',              provider: 'openrouter', model: 'moonshotai/kimi-k2',                                badge: 'OpenRouter' },
     { label: 'GLM 5.2',              provider: 'nvidia',     model: 'z-ai/glm-5.2',                                      badge: 'NVIDIA' },

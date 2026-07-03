@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
 require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';
+require_once SUPABEIN_ROOT . '/app/core/anthropic_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 require_once SUPABEIN_ROOT . '/app/core/ai_validator.php';
 
@@ -1988,10 +1989,14 @@ function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $
 
 // ─── AI provider factory ─────────────────────────────────────────────────────
 
-const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter', 'nvidia'];
+const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter', 'nvidia', 'anthropic'];
 const AI_ALLOWED_MODELS = [
     'gemini' => [
         'gemini-2.5-flash',
+    ],
+    'anthropic' => [
+        'claude-opus-4-8',
+        'claude-sonnet-5',
     ],
     // Ordered best-to-least capable within each provider (index 0 is also that
     // provider's fallback default when an unrecognized model is requested).
@@ -2037,6 +2042,14 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
         $allowed = AI_ALLOWED_MODELS['nvidia'];
         $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
         return new \SupaBein\NvidiaClient($key, $model);
+    }
+
+    if ($provider === 'anthropic') {
+        $key = $config['ANTHROPIC_API_KEY'] ?? '';
+        if (!$key) abort(503, 'Anthropic API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['anthropic'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\AnthropicClient($key, $model);
     }
 
     // Default: Gemini
