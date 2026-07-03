@@ -6,6 +6,7 @@ require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
 require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
+require_once SUPABEIN_ROOT . '/app/core/ai_validator.php';
 
 // ─── Gemini system prompts ───────────────────────────────────────────────────
 
@@ -1875,6 +1876,37 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
 
 // ─── Frontend file reader ────────────────────────────────────────────────────
 
+// Full, unfiltered file dump for the validator (an edit's delta only contains
+// CHANGED files, so validating it alone would false-positive on every route/
+// nav check that depends on a file the edit didn't touch — this reads the
+// complete current deploy so the delta can be merged onto it before validating,
+// mirroring exactly what ai_deploy_files($mergeFromCurrent=true) does on disk).
+function ai_read_full_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId): array
+{
+    $sites = $catalog->listSites($projectId);
+    if (empty($sites)) return [];
+
+    $site = $sites[0];
+    if (!($site['current_deploy_id'] ?? null)) return [];
+
+    $sitesPath  = rtrim($config['SITES_PATH'], '/');
+    $currentDir = $sitesPath . '/s' . $site['id'] . '/current';
+    if (!is_dir($currentDir)) return [];
+
+    $textExts = ['html', 'css', 'js', 'json'];
+    $files    = [];
+    $iterator = new \RecursiveIteratorIterator(
+        new \RecursiveDirectoryIterator($currentDir, \RecursiveDirectoryIterator::SKIP_DOTS)
+    );
+    foreach ($iterator as $file) {
+        if (!$file->isFile()) continue;
+        if (!in_array(strtolower($file->getExtension()), $textExts, true)) continue;
+        $rel = ltrim(substr($file->getPathname(), strlen($currentDir)), '/');
+        $files[] = ['path' => $rel, 'content' => (string)file_get_contents($file->getPathname())];
+    }
+    return $files;
+}
+
 function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId, string $prompt = ''): string
 {
     $sites = $catalog->listSites($projectId);
@@ -2837,7 +2869,7 @@ function ai_playwright_test_run(string $script, array $config): array
 // stream's $emit() was; failures throw instead of emitting an 'error' event
 // and returning, since callers now run inside a job, not a live HTTP response.
 
-function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report): array
+function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate = true): array
 {
     $aiTrace = [];
 
@@ -2898,16 +2930,31 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     unset($file);
     $report(['stage' => 'frontend', 'status' => 'done', 'label' => 'Frontend generated', 'detail' => count($plan['frontend']['files']) . ' file' . (count($plan['frontend']['files']) === 1 ? '' : 's')]);
 
+    // ── Stage 4: validate (deterministic; AI only explains, never detects) ──
+    $validation = [];
+    if ($validate) {
+        $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
+        $validation = ai_validator_check_project($plan, $plan['frontend']['files']);
+        if (array_filter($validation, fn($f) => $f['severity'] === 'error')) {
+            $validation = ai_validator_explain_findings($validation, $client);
+        }
+        $errCount  = count(array_filter($validation, fn($f) => $f['severity'] === 'error'));
+        $warnCount = count(array_filter($validation, fn($f) => $f['severity'] === 'warning'));
+        $report(['stage' => 'validate', 'status' => 'done',
+                 'label'  => $validation ? 'Validation found issues' : 'No issues found',
+                 'detail' => $validation ? "{$errCount} error(s), {$warnCount} warning(s)" : '']);
+    }
+
     $summary = [
         'project_name'   => $plan['project_name'],
         'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
         'frontend_files' => count($plan['frontend']['files'] ?? []),
     ];
 
-    return ['plan' => $plan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace];
+    return ['plan' => $plan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
-function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report): array
+function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true): array
 {
     $aiTrace = [];
 
@@ -2943,6 +2990,39 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     }
     $report(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready', 'detail' => (count($delta['add_tables'] ?? []) + count($delta['add_columns'] ?? []) + count($delta['update_policies'] ?? [])) . ' schema change(s), ' . count($delta['frontend']['files'] ?? []) . ' file(s)']);
 
+    // ── Validate (deterministic; AI only explains, never detects) ─────────
+    // An edit's delta only contains CHANGED files, so validate against the
+    // full current file set with the delta merged on top — the same
+    // mergeFromCurrent view ai_deploy_files() will actually publish — and
+    // the schema as it will look once add_tables/add_columns are applied.
+    $validation = [];
+    if ($validate) {
+        $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
+
+        $mergedSchema = $existingSchema;
+        foreach ($delta['add_tables'] ?? [] as $t) $mergedSchema['tables'][] = $t;
+        foreach ($delta['add_columns'] ?? [] as $entry) {
+            foreach ($mergedSchema['tables'] as &$t) {
+                if ($t['name'] === $entry['table']) $t['columns'] = array_merge($t['columns'] ?? [], $entry['columns'] ?? []);
+            }
+            unset($t);
+        }
+
+        $byPath = [];
+        foreach (ai_read_full_frontend_files($config, $catalog, $projectId) as $f) $byPath[$f['path']] = $f;
+        foreach ($delta['frontend']['files'] ?? [] as $f) $byPath[$f['path']] = $f;
+
+        $validation = ai_validator_check_project($mergedSchema, array_values($byPath));
+        if (array_filter($validation, fn($f) => $f['severity'] === 'error')) {
+            $validation = ai_validator_explain_findings($validation, $client);
+        }
+        $errCount  = count(array_filter($validation, fn($f) => $f['severity'] === 'error'));
+        $warnCount = count(array_filter($validation, fn($f) => $f['severity'] === 'warning'));
+        $report(['stage' => 'validate', 'status' => 'done',
+                 'label'  => $validation ? 'Validation found issues' : 'No issues found',
+                 'detail' => $validation ? "{$errCount} error(s), {$warnCount} warning(s)" : '']);
+    }
+
     $summary = [
         'add_tables'      => array_column($delta['add_tables'] ?? [], 'name'),
         'add_columns'     => array_merge(...array_map(fn($e) => array_map(fn($c) => $e['table'] . '.' . $c['name'], $e['columns'] ?? []), $delta['add_columns'] ?? []) ?: [[]]),
@@ -2952,7 +3032,7 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
 
     $editPlan = array_merge($delta, ['project_id' => $projectId]);
 
-    return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace];
+    return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
 // Runs the Playwright user-story tests for a project against its most recent
@@ -3815,6 +3895,7 @@ PROMPT;
             'intent'   => $intent,
             'provider' => $req['body']['provider'] ?? null,
             'model'    => $req['body']['model'] ?? null,
+            'validate' => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
@@ -3852,6 +3933,7 @@ PROMPT;
             'history'    => $history,
             'provider'   => $req['body']['provider'] ?? null,
             'model'      => $req['body']['model'] ?? null,
+            'validate'   => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
         ];
         $job = $catalog->createJob($userId, $sessionId, 'edit', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);

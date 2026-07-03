@@ -836,6 +836,7 @@ const AiPanel = (() => {
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
   let autoTestEnabled = localStorage.getItem('sb:ai_autotest') !== '0'; // default ON
+  let validateEnabled = localStorage.getItem('sb:ai_validate') !== '0'; // default ON
   let buildMode = localStorage.getItem('sb:ai_build') === '1';
   let liveTraceMsg = null;
   let operationInProgress = false;
@@ -1478,7 +1479,7 @@ const AiPanel = (() => {
       stages: BUILD_PROGRESS_STAGES,
       mode: 'build',
       title: 'Building your app',
-      onComplete: (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage }),
+      onComplete: (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation }),
     });
   }
 
@@ -1490,7 +1491,7 @@ const AiPanel = (() => {
       title: 'Updating your app',
       // Auto-apply the edit straight to staging (no extra Deploy click), then the
       // result card offers View Staging + Publish to Live.
-      onComplete: (ev) => applyPlan(ev.plan, 'edit', null),
+      onComplete: (ev) => applyPlan(ev.plan, 'edit', null, ev.validation),
     });
   }
 
@@ -1635,13 +1636,13 @@ const AiPanel = (() => {
     const pollState = { cancelled: false };
     activeJobPoll = pollState;
     const onComplete = operationMode === 'build'
-      ? (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage })
+      ? (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation })
       : operationMode === 'test'
       ? (ev) => { sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
           error: ev.error || null, screenshot: ev.screenshot || null,
         }}); }
-      : (ev) => applyPlan(ev.plan, 'edit', null);
+      : (ev) => applyPlan(ev.plan, 'edit', null, ev.validation);
 
     if (!liveTraceMsg) {
       liveTraceMsg = sess.messages.find(m => m.type === 'trace' && m.live) || { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
@@ -2044,6 +2045,52 @@ const AiPanel = (() => {
     return card;
   }
 
+  const VALIDATION_SEVERITY_STYLE = {
+    error:   { color: 'var(--danger)', icon: '✗' },
+    warning: { color: '#f59e0b',       icon: '⚠' },
+    info:    { color: 'var(--text-muted)', icon: 'ℹ' },
+  };
+
+  // Shared by the standalone validation card (edit mode, after auto-deploy)
+  // and the plan card's validation section (build mode, before the user applies).
+  function renderValidationList(findings) {
+    const list = el('div', { style: 'display:flex;flex-direction:column;gap:4px' });
+    findings.forEach(f => {
+      const style = VALIDATION_SEVERITY_STYLE[f.severity] || VALIDATION_SEVERITY_STYLE.info;
+      const det = el('details', { style: 'font-size:0.8rem' });
+      det.appendChild(el('summary', { style: `display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;padding:1px 0` },
+        el('span', { style: `color:${style.color};font-weight:700;flex-shrink:0` }, style.icon),
+        el('span', { style: 'color:var(--text)' }, f.message)
+      ));
+      const detailText = [f.explanation, f.detail].filter(Boolean).join(' — ');
+      if (detailText) {
+        det.appendChild(el('div', { style: 'margin:4px 0 4px 18px;font-size:0.72rem;color:var(--text-muted);background:rgba(148,163,184,0.08);padding:6px 8px;border-radius:4px;border-left:2px solid var(--border);white-space:pre-wrap;word-break:break-word' }, detailText));
+      }
+      list.appendChild(det);
+    });
+    return list;
+  }
+
+  function renderValidationCard(msg) {
+    const findings  = msg.data?.findings || [];
+    const errCount  = findings.filter(f => f.severity === 'error').length;
+    const warnCount = findings.filter(f => f.severity === 'warning').length;
+    const statusColor = errCount ? 'var(--danger)' : warnCount ? '#f59e0b' : '#22c55e';
+    const statusText  = !findings.length ? 'No issues found ✓'
+      : `${errCount} error${errCount !== 1 ? 's' : ''} · ${warnCount} warning${warnCount !== 1 ? 's' : ''}`;
+
+    const card = el('div', { class: 'ai-msg ai-msg-ai', style: 'padding:0;overflow:hidden' },
+      el('div', { style: 'padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)' },
+        el('span', { style: 'font-weight:600;font-size:0.875rem' }, '⚑ Validation'),
+        el('span', { style: `color:${statusColor};font-size:0.8rem;font-weight:600` }, statusText)
+      )
+    );
+    if (findings.length) {
+      card.appendChild(el('div', { style: 'padding:10px 14px' }, renderValidationList(findings)));
+    }
+    return card;
+  }
+
   function renderMessage(msg) {
     if (msg.role === 'user') {
       return el('div', { class: 'ai-msg ai-msg-user' }, msg.content);
@@ -2098,6 +2145,7 @@ const AiPanel = (() => {
     }
     if (msg.type === 'trace') return renderTraceCard(msg);
     if (msg.type === 'test')  return renderTestCard(msg);
+    if (msg.type === 'validation') return renderValidationCard(msg);
     const bubble = el('div', { class: 'ai-msg ai-msg-ai' }, msg.content);
     const tokenEl = renderTokenUsage(msg.usage);
     if (tokenEl) bubble.appendChild(tokenEl);
@@ -2176,6 +2224,17 @@ const AiPanel = (() => {
           )
         );
         lines.push(filesDetails);
+      }
+
+      // Validation — checked before you decide whether to build this at all.
+      if (msg.data.validation && msg.data.validation.length) {
+        const errCount = msg.data.validation.filter(f => f.severity === 'error').length;
+        const validationDetails = el('details', { class: 'ai-plan-details', open: errCount > 0 },
+          el('summary', { class: 'ai-plan-details-summary' },
+            `⚑ Validation (${msg.data.validation.length})`),
+          renderValidationList(msg.data.validation)
+        );
+        lines.push(validationDetails);
       }
 
       // Download plan JSON button
@@ -2656,7 +2715,7 @@ const AiPanel = (() => {
     const sess = currentSession();
 
     // Build conversation history for Gemini context
-    const body = { prompt };
+    const body = { prompt, validate: validateEnabled };
     if (selectedProjectId) body.project_id = selectedProjectId;
     const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
     if (priorMessages.length > 0) {
@@ -2763,7 +2822,7 @@ const AiPanel = (() => {
     return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
   }
 
-  async function applyPlan(plan, mode, planMsg) {
+  async function applyPlan(plan, mode, planMsg, validation) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
     let autoTestProjectId = null;
@@ -2790,6 +2849,13 @@ const AiPanel = (() => {
 
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+
+      // Edits auto-apply (no separate review step), so validation shows here,
+      // after the deploy — build mode already showed it in the plan card
+      // before the user chose to apply at all.
+      if (mode === 'edit' && validation) {
+        await addMessage(currentSessionId, { role: 'ai', type: 'validation', content: '', data: { findings: validation } });
+      }
 
       // A build starts with no project (selectedProjectId is null) — once it
       // creates one, attach this session to it so it shows up in THAT
@@ -2916,6 +2982,16 @@ const AiPanel = (() => {
       }
     }, 'Auto-test');
 
+    const validateToggle = el('button', {
+      class: 'ai-review-toggle' + (validateEnabled ? ' active' : ''),
+      title: 'Check the generated app for mismatches (broken routes, dead links, seed data the frontend never uses, etc.) after every build/edit',
+      onClick: () => {
+        validateEnabled = !validateEnabled;
+        localStorage.setItem('sb:ai_validate', validateEnabled ? '1' : '0');
+        validateToggle.classList.toggle('active', validateEnabled);
+      }
+    }, 'Validate');
+
     const modeBtn = el('button', {
       class: 'ai-mode-btn' + (buildMode ? ' active' : ''),
       title: buildMode ? 'Switch to Chat mode' : 'Switch to Build mode',
@@ -2972,6 +3048,7 @@ const AiPanel = (() => {
           modeBtn,
           reviewToggle,
           autoTestToggle,
+          validateToggle,
           sendBtn
         )
       )
