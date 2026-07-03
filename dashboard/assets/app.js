@@ -826,6 +826,7 @@ function renderReset() {
 
 const AiPanel = (() => {
   let isOpen = false;
+  let historyPushed = false;
   let sessions = [];
   let currentSessionId = null;
   let projects = [];
@@ -1492,6 +1493,8 @@ const AiPanel = (() => {
   // jobId (see resumeActiveJob below), picking up wherever it left off.
   async function pollJob(jobId, progressMsg, pollState, sess) {
     let since = 0;
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 15; // ~30s of nothing-but-errors — give up rather than spin forever
     while (!pollState.cancelled) {
       await new Promise(r => setTimeout(r, 2000));
       if (pollState.cancelled) return null;
@@ -1499,8 +1502,17 @@ const AiPanel = (() => {
       let job;
       try {
         job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
+        consecutiveFailures = 0;
       } catch (e) {
         if (e.status === 401 || e.status === 404) return null;
+        consecutiveFailures++;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          progressMsg.data.jobDone = true;
+          const active = progressMsg.data.stages.find(s => s.status === 'active');
+          if (active) active.status = 'error';
+          progressMsg.data.error = 'Lost connection to the server — please try again.';
+          return null;
+        }
         continue; // transient network hiccup — keep polling
       }
 
@@ -2739,6 +2751,7 @@ const AiPanel = (() => {
       if (result.added_tables?.length)     lines.push(`Added ${result.added_tables.length} new table${result.added_tables.length !== 1 ? 's' : ''}: ${result.added_tables.join(', ')}.`);
       if (result.added_columns?.length)    lines.push(`Added ${result.added_columns.length} column${result.added_columns.length !== 1 ? 's' : ''}.`);
       if (result.updated_policies?.length) lines.push(`Updated ${result.updated_policies.length} polic${result.updated_policies.length !== 1 ? 'ies' : 'y'}.`);
+      if (result.seeded?.length)           lines.push(`Seeded ${result.seeded.join(', ')}.`);
       if (result.staging)                  lines.push('Changes deployed to staging — preview, then publish to live.');
       else if (result.deploy)              lines.push('Frontend redeployed.');
       if (!lines.length)                   lines.push('No changes were needed.');
@@ -2976,6 +2989,11 @@ const AiPanel = (() => {
       document.body.appendChild(panelEl);
     }
 
+    // Push a history entry so the phone/browser back button closes the panel
+    // and returns to the page behind it instead of leaving the app entirely.
+    history.pushState({ aiPanel: true }, '');
+    historyPushed = true;
+
     // Show panel immediately so animation starts without waiting for data
     panelEl.classList.add('ai-panel-open');
     getOrCreateBackdrop().classList.add('active');
@@ -3038,9 +3056,16 @@ const AiPanel = (() => {
     panelEl.classList.remove('ai-panel-open');
     if (backdropEl) backdropEl.classList.remove('active');
     isOpen = false;
+    historyPushed = false;
     sidebarVisible = false;
     toggleSidebar(false);
   }
+
+  // Let the phone/browser back button close the panel instead of leaving the
+  // app — open() pushes a history entry for this exact reason.
+  window.addEventListener('popstate', () => {
+    if (isOpen) close();
+  });
 
   function toggle(options) {
     if (isOpen) close(); else open(options);
@@ -3504,8 +3529,7 @@ async function loadOverviewPane(projectId, container, switchTab) {
     ));
 
     const ctas = el('div', { class: 'overview-ctas' },
-      el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open({ projectId: parseInt(projectId) }) }, '✦ Edit with AI'),
-      el('button', { class: 'btn btn-secondary', onClick: () => switchTab(1) }, '▦ Open Tables')
+      el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open({ projectId: parseInt(projectId) }) }, '✦ Edit with AI')
     );
     if (o.stats.live && o.site_id) {
       ctas.appendChild(el('a', { class: 'btn btn-secondary', href: `/sites/s${o.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →'));
@@ -3516,6 +3540,23 @@ async function loadOverviewPane(projectId, container, switchTab) {
     } else if (!o.stats.live) {
       ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Deploy'));
     }
+    const clearSeedBtn = el('button', { class: 'btn btn-secondary' }, 'Clear Seed Data');
+    clearSeedBtn.addEventListener('click', async () => {
+      if (!confirm('Remove all AI-seeded sample data from this app\'s tables? Rows you or your users entered yourself are not affected.')) return;
+      clearSeedBtn.disabled = true;
+      try {
+        const res = await Api.post(`/v1/projects/${projectId}/seed/clear`, {});
+        const counts = Object.entries(res.deleted || {});
+        alert(counts.length
+          ? 'Cleared: ' + counts.map(([t, n]) => `${t} (${n})`).join(', ')
+          : 'No seeded rows found — nothing to clear.');
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        clearSeedBtn.disabled = false;
+      }
+    });
+    ctas.appendChild(clearSeedBtn);
     container.appendChild(ctas);
 
     container.appendChild(el('div', { class: 'home-section-head' },
