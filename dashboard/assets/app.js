@@ -835,8 +835,9 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
+  // Single toggle covers both: validate generated code for mismatches, and
+  // (for build/edit) automatically run the combined test+validate job after deploy.
   let autoTestEnabled = localStorage.getItem('sb:ai_autotest') !== '0'; // default ON
-  let validateEnabled = localStorage.getItem('sb:ai_validate') !== '0'; // default ON
   let buildMode = localStorage.getItem('sb:ai_build') === '1';
   let liveTraceMsg = null;
   let operationInProgress = false;
@@ -1964,6 +1965,7 @@ const AiPanel = (() => {
         sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: finalEv.stories || [], passed: finalEv.passed || 0, failed: finalEv.failed || 0,
           error: finalEv.error || null, screenshot: finalEv.screenshot || null,
+          validation: finalEv.validation || [],
         }});
       } else if (!pollState.cancelled) {
         sess.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test',
@@ -1990,7 +1992,7 @@ const AiPanel = (() => {
   }
 
   function renderTestCard(msg) {
-    const { stories = [], passed = 0, failed = 0, error, screenshot } = msg.data || {};
+    const { stories = [], passed = 0, failed = 0, error, screenshot, validation = [] } = msg.data || {};
     const total = passed + failed;
     const statusColor = error ? 'var(--danger)' : total === 0 ? 'var(--text-muted)' : failed === 0 ? '#22c55e' : 'var(--danger)';
     const statusText  = error
@@ -2042,6 +2044,19 @@ const AiPanel = (() => {
       det.appendChild(img);
       det.appendChild(el('div', { style: 'margin-top:4px;font-size:0.7rem;color:var(--text-muted)' }, 'Tap image to open full size'));
       card.appendChild(det);
+    }
+
+    const errCount  = validation.filter(f => f.severity === 'error').length;
+    const warnCount = validation.filter(f => f.severity === 'warning').length;
+    const validationStatus = !validation.length ? 'No issues found ✓'
+      : `${errCount} error${errCount !== 1 ? 's' : ''} · ${warnCount} warning${warnCount !== 1 ? 's' : ''}`;
+    const validationColor = errCount ? 'var(--danger)' : warnCount ? '#f59e0b' : '#22c55e';
+    card.appendChild(el('div', { style: 'padding:10px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--border)' },
+      el('span', { style: 'font-weight:600;font-size:0.875rem' }, '⚑ Validation'),
+      el('span', { style: `color:${validationColor};font-size:0.8rem;font-weight:600` }, validationStatus)
+    ));
+    if (validation.length) {
+      card.appendChild(el('div', { style: 'padding:10px 14px;border-top:1px solid var(--border)' }, renderValidationList(validation)));
     }
 
     return card;
@@ -2522,9 +2537,10 @@ const AiPanel = (() => {
   ];
 
   const TEST_PROGRESS_STAGES = [
-    { key: 'script',  label: 'Preparing test script' },
-    { key: 'stories', label: 'Writing user-story tests' },
-    { key: 'run',     label: 'Running browser tests' },
+    { key: 'script',   label: 'Preparing test script' },
+    { key: 'stories',  label: 'Writing user-story tests' },
+    { key: 'run',      label: 'Running browser tests' },
+    { key: 'validate', label: 'Checking for mismatches' },
   ];
 
   function makeProgressMsg(stages, title, mode) {
@@ -2717,7 +2733,7 @@ const AiPanel = (() => {
     const sess = currentSession();
 
     // Build conversation history for Gemini context
-    const body = { prompt, validate: validateEnabled };
+    const body = { prompt, validate: autoTestEnabled };
     if (selectedProjectId) body.project_id = selectedProjectId;
     const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
     if (priorMessages.length > 0) {
@@ -2854,8 +2870,11 @@ const AiPanel = (() => {
 
       // Edits auto-apply (no separate review step), so validation shows here,
       // after the deploy — build mode already showed it in the plan card
-      // before the user chose to apply at all.
-      if (mode === 'edit' && validation) {
+      // before the user chose to apply at all. Skip this when auto-test is
+      // about to fire anyway — its combined test+validate card will show the
+      // same findings fresh moments later, and showing both would be redundant.
+      const willAutoTest = autoTestEnabled && (result.deploy || result.staging || result.site);
+      if (mode === 'edit' && validation && !willAutoTest) {
         await addMessage(currentSessionId, { role: 'ai', type: 'validation', content: '', data: { findings: validation } });
       }
 
@@ -2878,7 +2897,7 @@ const AiPanel = (() => {
 
       // Auto-test: only when a frontend actually got deployed (there's nothing
       // to browser-test if the apply was schema-only).
-      if (autoTestEnabled && (result.deploy || result.staging || result.site)) {
+      if (willAutoTest) {
         autoTestProjectId = result.project?.id || result.staging?.project_id
           || (mode === 'edit' ? plan.project_id : null);
       }
@@ -2976,23 +2995,13 @@ const AiPanel = (() => {
 
     const autoTestToggle = el('button', {
       class: 'ai-review-toggle' + (autoTestEnabled ? ' active' : ''),
-      title: 'Automatically run browser tests after every build/edit deploy',
+      title: 'Automatically check for mismatches and run browser tests after every build/edit deploy',
       onClick: () => {
         autoTestEnabled = !autoTestEnabled;
         localStorage.setItem('sb:ai_autotest', autoTestEnabled ? '1' : '0');
         autoTestToggle.classList.toggle('active', autoTestEnabled);
       }
     }, 'Auto-test');
-
-    const validateToggle = el('button', {
-      class: 'ai-review-toggle' + (validateEnabled ? ' active' : ''),
-      title: 'Check the generated app for mismatches (broken routes, dead links, seed data the frontend never uses, etc.) after every build/edit',
-      onClick: () => {
-        validateEnabled = !validateEnabled;
-        localStorage.setItem('sb:ai_validate', validateEnabled ? '1' : '0');
-        validateToggle.classList.toggle('active', validateEnabled);
-      }
-    }, 'Validate');
 
     const modeBtn = el('button', {
       class: 'ai-mode-btn' + (buildMode ? ' active' : ''),
@@ -3050,7 +3059,6 @@ const AiPanel = (() => {
           modeBtn,
           reviewToggle,
           autoTestToggle,
-          validateToggle,
           sendBtn
         )
       )
