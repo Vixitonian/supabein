@@ -9,8 +9,8 @@ RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
 # Block direct access to sensitive backend directories
 RewriteRule ^(app|config|storage|vendor)(/.*)? - [F,NC,L]
 
-# sites/s{id}/current/* — proxied through PHP (Apache can't serve files outside web root)
-RewriteRule ^sites/s[0-9]+/current(/.*)?$ /site-serve.php [QSA,L,NC]
+# sites/s{id}/current/* and /staging/* — proxied through PHP (Apache can't serve files outside web root)
+RewriteRule ^sites/s[0-9]+/(current|staging)(/.*)?$ /site-serve.php [QSA,L,NC]
 
 # Block direct access to any other sites/ paths
 RewriteRule ^sites(/.*)?$ - [F,L]
