@@ -87,6 +87,11 @@ Rules:
 - policy.constraint_sql: WHERE-style expression or null; use ":current_user_id" for logged-in user ID
   Do NOT use "auth.uid()" — it is not supported.
 - Always include at least one table.
+- Each table needs enough columns to support a genuinely useful UI — typically 4-8 real columns
+  beyond id/created_at. A table with only 1-2 columns (e.g. just "title") can't support a proper
+  detail view or status badges no matter how well the frontend is laid out; think through what a
+  real record of this type actually needs (status/state, a date, an amount, a description, a
+  relation) rather than the bare minimum implied by a short request.
 
 AUTHENTICATION (read carefully — this is the most common design failure):
 - If the app stores or scopes data per user — anything involving "my", accounts, profiles,
@@ -180,7 +185,8 @@ The inline bootstrap contains ONLY:
     function updateNav() { /* toggle nav links based on auth.getCurrentUser() */ }
 
     router.defineRoute('/', featureA.renderView);
-    router.defineRoute('/login', auth.renderAuthForms);
+    router.defineRoute('/login', auth.renderLogin);   // only if schema has a PASSWORD column
+    router.defineRoute('/signup', auth.renderSignup); // only if schema has a PASSWORD column
     router.defineRoute('/items/:id', featureA.renderDetail); // ':id' → handler receives {id}
     /* ... all other routes ... */
 
@@ -211,15 +217,21 @@ router.defineRoute(path, handler) registers a route; path segments starting with
 calls handler({}). router.navigate(path) and router.onHashChange() work as already described above.
 
 ═══════════════════════════════════════════════════════
-RULE 3 — AUTH INITIALISATION RACE
+RULE 3 — AUTH: PLATFORM-PROVIDED, TWO SEPARATE ROUTES
 ═══════════════════════════════════════════════════════
-features/auth/auth.js must expose a `ready` promise resolved after loadUser() completes.
-loadUser() is async; if the router fires first, getCurrentUser() returns null and protected
-pages show "Access Denied" even for logged-in users.
+features/auth/auth.js is PLATFORM-PROVIDED — do NOT include "features/auth/auth.js" in your files
+array (only include it in the STRUCTURE at all when the schema has a PASSWORD column; when it does,
+still never write the file yourself). It exposes: ready (a promise resolved after loadUser()
+completes — the router must wait on this or protected pages flash "Access Denied" for logged-in
+users), getCurrentUser(), login(identifier, password), signup(identifier, password), logout(),
+renderLogin(), renderSignup().
 
-Do NOT hand-write this module. Copy the verbatim auth.js given in the PLACEHOLDERS + AUTH
-section below (it already implements `ready`, loadUser, login, signup, logout, getCurrentUser,
-and renderAuthForms). Define it ONCE, in features/auth/auth.js only.
+Register BOTH as separate routes — they are two real, separate, properly laid-out pages, not one
+combined screen:
+  router.defineRoute('/login', auth.renderLogin);
+  router.defineRoute('/signup', auth.renderSignup);
+Each page already cross-links to the other (Login → "Sign up", Signup → "Log in"), so nav only ever
+needs a single "Login" link — same as before, nothing extra required for signup to stay reachable.
 
 ═══════════════════════════════════════════════════════
 RULE 4 — ROUTER NAVIGATION PATHS
@@ -272,7 +284,8 @@ Every async render shows a loading indicator before the fetch, then real content
   try { const rows = await api.list('table'); el.innerHTML = /* content */; }
   catch (e) { el.innerHTML = `<p class="text-red-400">Failed to load: ${e.message}</p>`; }
 
-NAVIGATION — choose based on app complexity:
+NAVIGATION — if a Design Brief is present in the user message, its "layout" field is authoritative;
+use the rules below only when no brief was given (e.g. some edit-mode requests):
 - For apps with ≤4 nav links: use a top bar with links hidden on mobile behind a hamburger toggle:
     <button id="nav-toggle" class="md:hidden p-2 rounded text-gray-300 hover:text-white">☰</button>
     <nav id="nav-menu" class="hidden md:flex items-center gap-4">...links...</nav>
@@ -289,8 +302,8 @@ STRUCTURE (define each name once, in its own file)
     core/config.js                     ← SB_URL / SB_KEY / SB_PID globals (declared once, here)
     core/api.js                        ← PLATFORM-PROVIDED — do not include this path in your output
     core/router.js                     ← PLATFORM-PROVIDED — do not include this path in your output
-    features/auth/auth.js              ← login, signup, logout, ready promise
-                                       (ONLY include when schema has a PASSWORD column)
+    features/auth/auth.js              ← PLATFORM-PROVIDED — do not include this path in your output
+                                       (only load it via <script src> when schema has a PASSWORD column)
     features/<feature>/<feature>.js    ← one subfolder per feature
 Load with RELATIVE paths in dependency order (config → api → router → auth → features → bootstrap).
 Absolute paths like /core/config.js break the site. No frameworks, no npm, no build tools.
@@ -306,8 +319,11 @@ STYLING
   Add class="dark" to <html>. No separate CSS file.
 - Base colours (always): bg-gray-950 (page), bg-gray-900 (cards),
   text-gray-100 (primary text), text-gray-400 (muted), text-red-400 (danger).
-- Accent colour — pick ONE based on the app's domain. Use it consistently for interactive
-  elements (links, primary buttons, focus rings, active states):
+- Accent colour — if a Design Brief is present in the user message, its "accent_color" is
+  authoritative: use exactly that Tailwind color name (e.g. "rose" → text-rose-400, bg-rose-500
+  hover:bg-rose-600, ring-rose-500) and ignore the domain table below entirely. Only use the table
+  below when no brief was given (e.g. some edit-mode requests) — pick ONE based on the app's domain
+  and use it consistently for interactive elements (links, primary buttons, focus rings, active states):
     productivity / tasks / notes  → indigo  (text-indigo-400, bg-indigo-500 hover:bg-indigo-600, ring-indigo-500)
     food / recipes / restaurant   → orange  (text-orange-400, bg-orange-500 hover:bg-orange-600, ring-orange-500)
     finance / budget / invoices   → blue    (text-blue-400,   bg-blue-500   hover:bg-blue-600,   ring-blue-500)
@@ -404,6 +420,33 @@ wireframe, even if it's technically correct and bug-free. Every major page needs
 - This is about layout richness, not scope creep: do not invent features, tables, or columns the
   schema doesn't have. Present what's really there with more visual structure, not more content.
 
+  ✗ SCANTY — a bare list, no stats, no state, one plain block:
+    appDiv.innerHTML = `
+      <ul>${rows.map(r => `<li>${r.name}</li>`).join('')}</ul>
+    `;
+
+  ✓ RICH — same data, a stats strip + a card grid with real per-row detail and state:
+    appDiv.innerHTML = `
+      <div class="grid grid-cols-3 gap-4 mb-6">
+        <div class="bg-gray-900 rounded-lg p-4"><div class="text-2xl font-bold">${rows.length}</div><div class="text-sm text-gray-400">Total</div></div>
+        <div class="bg-gray-900 rounded-lg p-4"><div class="text-2xl font-bold">${rows.filter(r => r.status === 'active').length}</div><div class="text-sm text-gray-400">Active</div></div>
+        <div class="bg-gray-900 rounded-lg p-4"><div class="text-2xl font-bold">$${rows.reduce((s, r) => s + r.amount, 0)}</div><div class="text-sm text-gray-400">Total value</div></div>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        ${rows.map(r => `
+          <div class="bg-gray-900 rounded-lg p-4">
+            <div class="flex justify-between items-start">
+              <span class="font-medium">${r.name}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full ${r.status === 'active' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-gray-700 text-gray-400'}">${r.status}</span>
+            </div>
+            <div class="text-sm text-gray-400 mt-1">$${r.amount} · ${r.created_at}</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  Same underlying data both times — the difference is entirely the two rules above (stats strip
+  first, cards with 3+ fields + a status badge instead of a bare name).
+
 ═══════════════════════════════════════════════════════
 PLACEHOLDERS + OWNERSHIP
 ═══════════════════════════════════════════════════════
@@ -412,82 +455,17 @@ PLACEHOLDERS + OWNERSHIP
     const SB_URL = window.location.origin + '/api/v1';
     const SB_PID = '__SB_PID__';
   Declared once. Never redeclare anywhere. No SB_KEY — public requests need no auth token.
-- Auth (include features/auth/auth.js ONLY when the schema has a table with a PASSWORD column;
-  if no PASSWORD column exists, omit auth.js and any /login route entirely).
-  Copy this file VERBATIM. The placeholders __AUTH_TABLE__ and __AUTH_FIELD__ are already filled
-  in for you with the real users-table name and its identifier column — do not change them.
-
-  features/auth/auth.js:
-    const auth = (() => {
-      const TABLE = '__AUTH_TABLE__';   // users table from the schema
-      const FIELD = '__AUTH_FIELD__';   // its non-password identifier column (email/username)
-      let currentUser = null;
-      let _resolveReady;
-      const ready = new Promise(res => { _resolveReady = res; });
-
-      const loadUser = async () => {
-        const t = localStorage.getItem('sb:token');
-        if (!t) { _resolveReady(null); document.dispatchEvent(new CustomEvent('auth_status_change')); return; }
-        try {
-          const payload = JSON.parse(atob(t.split('.')[1]));
-          currentUser = { id: parseInt(payload.sub, 10) };
-        } catch { localStorage.removeItem('sb:token'); }
-        _resolveReady(currentUser);
-        document.dispatchEvent(new CustomEvent('auth_status_change'));
-      };
-
-      const getCurrentUser = () => currentUser;
-
-      const login = async (identifier, password) => {
-        const res = await fetch(`${SB_URL}/data/${SB_PID}/${TABLE}/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ [FIELD]: identifier, password })
-        });
-        if (!res.ok) throw new Error('Invalid credentials');
-        const { token, user } = await res.json();
-        localStorage.setItem('sb:token', token);
-        currentUser = { id: user.id };
-        document.dispatchEvent(new CustomEvent('auth_status_change'));
-        return currentUser;
-      };
-
-      const signup = async (identifier, password) => {
-        await api.create(TABLE, { [FIELD]: identifier, password });
-        return login(identifier, password);   // auto-login after signup
-      };
-
-      const logout = () => {
-        localStorage.removeItem('sb:token');
-        currentUser = null;
-        document.dispatchEvent(new CustomEvent('auth_status_change'));
-        router.navigate('/login');
-      };
-
-      const renderAuthForms = () => {
-        // MUST render BOTH a login form and a signup form (two panels or tabs) into #app.
-        // Each submit calls auth.login(...) / auth.signup(...) then router.navigate('/').
-        // Show errors inline (text-red-400). Use FIELD as the first input's name.
-      };
-
-      loadUser();
-      return { ready, getCurrentUser, login, logout, signup, renderAuthForms };
-    })();
-
-  Auth wiring requirements (all three are mandatory when auth exists):
-  1. renderAuthForms MUST render BOTH login AND signup on the /login screen — never login only.
-  2. updateNav() MUST show a "Login" link (href="#/login") when auth.getCurrentUser() is null,
-     and a "Logout" button calling auth.logout() when a user is set. There must always be a
-     visible way to reach /login.
-  3. Protected routes MUST redirect, not dead-end: if a gated render finds no current user, call
+- Auth (only load features/auth/auth.js via <script src> when the schema has a table with a
+  PASSWORD column; if no PASSWORD column exists, omit the script tag and both routes entirely).
+  See RULE 3 — the file itself is platform-provided, never written by you. The real users-table
+  name is "__AUTH_TABLE__" and its identifier column is "__AUTH_FIELD__", in case you need to
+  reference them elsewhere (e.g. displaying the logged-in user's email on a profile page).
+  Auth wiring requirements (mandatory when auth exists):
+  1. updateNav() MUST show a "Login" link (href="#/login") when auth.getCurrentUser() is null,
+     and a "Logout" button calling auth.logout() when a user is set.
+  2. Protected routes MUST redirect, not dead-end: if a gated render finds no current user, call
      router.navigate('/login') instead of printing "Access Denied" — otherwise the form is
      unreachable.
-  - Signup/login server contract (already handled by the verbatim file above):
-      signup → POST ${SB_URL}/data/${SB_PID}/{TABLE}            {FIELD: "...", password: "..."}
-               server auto-hashes the password; returns the new user row (password is null)
-      login  → POST ${SB_URL}/data/${SB_PID}/{TABLE}/login      {FIELD: "...", password: "..."}
-               returns {token, user} where user.password is null
-    Store the JWT as "sb:token" in localStorage (the file does this).
 - When a table has user_id for ownership, set it on INSERT from the stored token:
     const payload = JSON.parse(atob(localStorage.getItem('sb:token').split('.')[1]));
     data.user_id = parseInt(payload.sub, 10);
@@ -668,10 +646,134 @@ const api = (() => {
 })();
 JS;
 
-// Force these two paths to the canonical platform content, adding them if the
-// AI omitted them (both are required for every app) and overwriting them if
-// the AI wrote something else (its content is always discarded either way).
-function ai_inject_canonical_frontend_files(array $frontendFiles): array
+// features/auth/auth.js — like router.js/api.js, this used to be a "copy verbatim"
+// instruction the AI could deviate from. It also used to force login+signup onto
+// one screen ("MUST render BOTH... never login only") purely as a defensive
+// workaround: the prompt only ever guaranteed a nav link to /login, never to
+// /signup, so a separate signup route risked becoming an unreachable dead end.
+// Injecting this file lets /login and /signup be real, separate, properly laid
+// out routes (each cross-links to the other) without reintroducing that risk —
+// reachability no longer depends on the AI remembering a second nav link.
+// __AUTH_TABLE__ / __AUTH_FIELD__ are substituted with the real schema values
+// at deploy time, exactly like __SB_PID__ already is.
+const AI_CANONICAL_AUTH_JS = <<<'JS'
+const auth = (() => {
+  const TABLE = '__AUTH_TABLE__';
+  const FIELD = '__AUTH_FIELD__';
+  let currentUser = null;
+  let _resolveReady;
+  const ready = new Promise(res => { _resolveReady = res; });
+
+  const loadUser = async () => {
+    const t = localStorage.getItem('sb:token');
+    if (!t) { _resolveReady(null); document.dispatchEvent(new CustomEvent('auth_status_change')); return; }
+    try {
+      const payload = JSON.parse(atob(t.split('.')[1]));
+      currentUser = { id: parseInt(payload.sub, 10) };
+    } catch { localStorage.removeItem('sb:token'); }
+    _resolveReady(currentUser);
+    document.dispatchEvent(new CustomEvent('auth_status_change'));
+  };
+
+  const getCurrentUser = () => currentUser;
+
+  const login = async (identifier, password) => {
+    const res = await fetch(`${SB_URL}/data/${SB_PID}/${TABLE}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [FIELD]: identifier, password })
+    });
+    if (!res.ok) throw new Error('Invalid credentials');
+    const { token, user } = await res.json();
+    localStorage.setItem('sb:token', token);
+    currentUser = { id: user.id };
+    document.dispatchEvent(new CustomEvent('auth_status_change'));
+    return currentUser;
+  };
+
+  const signup = async (identifier, password) => {
+    await api.create(TABLE, { [FIELD]: identifier, password });
+    return login(identifier, password); // auto-login after signup
+  };
+
+  const logout = () => {
+    localStorage.removeItem('sb:token');
+    currentUser = null;
+    document.dispatchEvent(new CustomEvent('auth_status_change'));
+    router.navigate('/login');
+  };
+
+  const fieldLabel = FIELD.charAt(0).toUpperCase() + FIELD.slice(1).replace(/_/g, ' ');
+
+  // Neutral dark styling (no accent-color dependency) so this always looks at
+  // home regardless of whichever accent color the rest of the app picked.
+  const renderAuthCard = (heading, submitLabel, onSubmit, footerHtml) => {
+    const appDiv = document.getElementById('app');
+    appDiv.innerHTML = `
+      <div class="min-h-[100dvh] flex items-center justify-center p-4">
+        <div class="w-full max-w-sm bg-gray-900 border border-gray-800 rounded-xl shadow-lg p-6">
+          <h1 class="text-xl font-semibold text-gray-100 mb-6">${heading}</h1>
+          <form id="auth-form" class="flex flex-col gap-4">
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">${fieldLabel}</label>
+              <input type="text" id="auth-identifier" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full focus:outline-none focus:ring-2 focus:ring-gray-500" required>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-1">Password</label>
+              <input type="password" id="auth-password" class="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-full focus:outline-none focus:ring-2 focus:ring-gray-500" required>
+            </div>
+            <p id="auth-error" class="text-red-400 text-sm hidden"></p>
+            <button type="submit" class="rounded-lg px-4 py-2 font-medium transition bg-gray-100 hover:bg-white text-gray-900">${submitLabel}</button>
+          </form>
+          <p class="text-sm text-gray-400 mt-4 text-center">${footerHtml}</p>
+        </div>
+      </div>
+    `;
+    const form  = document.getElementById('auth-form');
+    const errEl = document.getElementById('auth-error');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errEl.classList.add('hidden');
+      const btn = form.querySelector('button[type=submit]');
+      btn.disabled = true;
+      try {
+        await onSubmit(
+          document.getElementById('auth-identifier').value.trim(),
+          document.getElementById('auth-password').value
+        );
+        router.navigate('/');
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.classList.remove('hidden');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  };
+
+  const renderLogin = () => renderAuthCard(
+    'Log in', 'Log in', login,
+    `Don't have an account? <a href="#/signup" class="text-gray-200 underline">Sign up</a>`
+  );
+
+  const renderSignup = () => renderAuthCard(
+    'Create account', 'Sign up', signup,
+    `Already have an account? <a href="#/login" class="text-gray-200 underline">Log in</a>`
+  );
+
+  loadUser();
+  return { ready, getCurrentUser, login, logout, signup, renderLogin, renderSignup };
+})();
+JS;
+
+// Force these platform-provided paths to their canonical content, adding them
+// if the AI omitted them (all are required whenever frontend files are being
+// deployed) and overwriting them if the AI wrote something else (its content
+// for these paths is always discarded either way). $authInfo (from
+// ai_detect_auth) is null/no-table when the app has no PASSWORD column — auth.js
+// is only injected when auth actually exists, matching the AI's own instruction
+// to omit auth.js entirely for auth-less apps.
+function ai_inject_canonical_frontend_files(array $frontendFiles, ?array $authInfo = null): array
 {
     $byPath = [];
     foreach ($frontendFiles as $f) {
@@ -680,6 +782,14 @@ function ai_inject_canonical_frontend_files(array $frontendFiles): array
     }
     $byPath['core/router.js'] = ['path' => 'core/router.js', 'content' => AI_CANONICAL_ROUTER_JS];
     $byPath['core/api.js']    = ['path' => 'core/api.js',    'content' => AI_CANONICAL_API_JS];
+    if (!empty($authInfo['table'])) {
+        $authJs = str_replace(
+            ['__AUTH_TABLE__', '__AUTH_FIELD__'],
+            [$authInfo['table'], $authInfo['field'] ?? 'email'],
+            AI_CANONICAL_AUTH_JS
+        );
+        $byPath['features/auth/auth.js'] = ['path' => 'features/auth/auth.js', 'content' => $authJs];
+    }
     return array_values($byPath);
 }
 
@@ -692,9 +802,10 @@ function ai_deploy_files(
     array $project,
     array $frontendFiles,
     bool $mergeFromCurrent = false,
-    bool $publishLive = true
+    bool $publishLive = true,
+    ?array $authInfo = null
 ): array {
-    $frontendFiles = ai_inject_canonical_frontend_files($frontendFiles);
+    $frontendFiles = ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
     $sitesPath = rtrim($config['SITES_PATH'], '/');
     $label     = 'ai-generated-' . date('Y-m-d');
 
@@ -1639,7 +1750,10 @@ function ai_execute_build(array $plan, int $userId): array
             $catalog,
             (int)$site['id'],
             $project,
-            $plan['frontend']['files']
+            $plan['frontend']['files'],
+            false,
+            true,
+            ai_detect_auth($plan)
         );
         if ($deployResult['error']) {
             sb_log('ai_build', 'Deploy failed (non-fatal): ' . $deployResult['error']);
@@ -3811,10 +3925,13 @@ PROMPT;
                 $editSites  = $catalog->listSites($projectId);
                 if ($editSites) {
                     $editSiteId = (int)$editSites[0]['id'];
+                    // Re-fetch schema post-edit so a users table added in THIS
+                    // same edit is picked up for auth.js injection immediately.
+                    $updatedSchema = ai_schema_from_db($projectId, $catalog);
                     // Edits deploy to STAGING (preview) — the user publishes to live explicitly.
                     $deployResult = ai_deploy_files($editConfig, $catalog, $editSiteId,
                                                     $project, $plan['frontend']['files'],
-                                                    true, false);
+                                                    true, false, ai_detect_auth($updatedSchema));
                     if (!empty($deployResult['deploy'])) {
                         $result['deploy'] = $deployResult['deploy'];
                         $apiBase = rtrim($editConfig['API_BASE_URL'] ?? '', '/');
