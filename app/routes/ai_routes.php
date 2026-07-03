@@ -463,7 +463,9 @@ PLACEHOLDERS + OWNERSHIP
   reference them elsewhere (e.g. displaying the logged-in user's email on a profile page).
   Auth wiring requirements (mandatory when auth exists):
   1. updateNav() MUST show a "Login" link (href="#/login") when auth.getCurrentUser() is null,
-     and a "Logout" button calling auth.logout() when a user is set.
+     and a Logout button with the EXACT id="nav-logout" calling auth.logout() when a user is set
+     (the automated test suite looks for this exact id — a differently-named logout button is
+     invisible to it and reports as "missing", even though it works fine for real users).
   2. Protected routes MUST redirect, not dead-end: if a gated render finds no current user, call
      router.navigate('/login') instead of printing "Access Denied" — otherwise the form is
      unreachable.
@@ -2350,7 +2352,6 @@ function ai_playwright_test_generate(
     $hasCrud   = $firstTable !== null && $newRoute !== null;
     $tokenJson = json_encode($token);
     $urlJson   = json_encode($appUrl);
-    $afJson    = json_encode($authField);
     $avJson    = json_encode($assertValue);
     $av2Json   = json_encode($assertValue2);
     $fillStr   = implode("\n", $fillLines);
@@ -2462,36 +2463,42 @@ page.on('pageerror', e => pageErrors.push(e.message));
 JSEOF;
 
     // ── Auth block ─────────────────────────────────────────────────────────────────
+    // Login and signup are platform-provided, separate routes (features/auth/auth.js,
+    // see ai_routes.php's AI_CANONICAL_AUTH_JS) — same #auth-form/#auth-identifier/
+    // #auth-password/#auth-error ids regardless of which route rendered them, so tests
+    // navigate to the right route first rather than assuming a combined page.
     $authBlock = '';
     if ($hasAuth) {
         $authBlock .= "  log('Story: Wrong credentials are rejected');\n";
-        $authBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $authBlock .= "  await page.goto(APP_URL + '#/login', { waitUntil: 'networkidle' });\n";
         $authBlock .= "  await page.waitForTimeout(500);\n";
-        $authBlock .= "  await page.fill('#login-form input[name=' + " . $afJson . " + ']', 'wrong@nowhere.dev');\n";
-        $authBlock .= "  await page.fill('#login-form input[name=\"password\"]', 'BadPass000');\n";
-        $authBlock .= "  await page.click('#login-form button[type=\"submit\"], #login-form button');\n";
+        $authBlock .= "  await page.fill('#auth-form #auth-identifier', 'wrong@nowhere.dev');\n";
+        $authBlock .= "  await page.fill('#auth-form #auth-password', 'BadPass000');\n";
+        $authBlock .= "  await page.click('#auth-form button[type=\"submit\"]');\n";
         $authBlock .= "  await page.waitForTimeout(2000);\n";
-        $authBlock .= "  const stillLogin = await page.\$('#login-form') !== null;\n";
-        $authBlock .= "  const loginErrTxt = await page.\$eval('#login-error', el => el.textContent.trim()).catch(() => '');\n";
+        $authBlock .= "  const stillLogin = page.url().includes('/login');\n";
+        $authBlock .= "  const loginErrTxt = await page.\$eval('#auth-error', el => el.textContent.trim()).catch(() => '');\n";
         $authBlock .= "  assert('Wrong credentials are rejected',\n";
         $authBlock .= "    stillLogin || loginErrTxt.length > 0, loginErrTxt);\n\n";
 
         $authBlock .= "  log('Story: Unauthenticated access shows login form');\n";
-        $authBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $authBlock .= "  await page.goto(APP_URL + '#/login', { waitUntil: 'networkidle' });\n";
         $authBlock .= "  await page.waitForTimeout(1000);\n";
-        $authBlock .= "  assert('Login form visible to unauthenticated users', await page.\$('#login-form') !== null);\n\n";
+        $authBlock .= "  assert('Login form visible to unauthenticated users', await page.\$('#auth-form') !== null);\n\n";
 
         $authBlock .= "  log('Story: User can sign up');\n";
-        $authBlock .= "  await page.fill('#signup-form input[name=' + " . $afJson . " + ']', TEST_EMAIL);\n";
-        $authBlock .= "  await page.fill('#signup-form input[name=\"password\"]', TEST_PASS);\n";
-        $authBlock .= "  await page.click('#signup-form button[type=\"submit\"], #signup-form button');\n";
+        $authBlock .= "  await page.goto(APP_URL + '#/signup', { waitUntil: 'networkidle' });\n";
+        $authBlock .= "  await page.waitForTimeout(500);\n";
+        $authBlock .= "  await page.fill('#auth-form #auth-identifier', TEST_EMAIL);\n";
+        $authBlock .= "  await page.fill('#auth-form #auth-password', TEST_PASS);\n";
+        $authBlock .= "  await page.click('#auth-form button[type=\"submit\"]');\n";
         $authBlock .= "  let loggedIn = false;\n";
         $authBlock .= "  try {\n";
         $authBlock .= "    await waitLoggedIn(page);\n";
         $authBlock .= "    loggedIn = true;\n";
         $authBlock .= "    [tokenA, userIdA] = await captureToken(page);\n";
         $authBlock .= "  } catch (_) {\n";
-        $authBlock .= "    const errTxt = await page.\$eval('#signup-error', el => el.textContent.trim()).catch(() => '');\n";
+        $authBlock .= "    const errTxt = await page.\$eval('#auth-error', el => el.textContent.trim()).catch(() => '');\n";
         $authBlock .= "    console.log('  signup-error: ' + errTxt);\n";
         $authBlock .= "  }\n";
         $authBlock .= "  assert('Signup succeeds and user is logged in', loggedIn);\n";
@@ -2646,11 +2653,11 @@ JSEOF;
         $isolationBlock .= "  {\n";
         $isolationBlock .= "    const pageB = await browser.newPage();\n";
         $isolationBlock .= "    pageB.setDefaultTimeout(15000);\n";
-        $isolationBlock .= "    await pageB.goto(APP_URL, { waitUntil: 'networkidle' });\n";
+        $isolationBlock .= "    await pageB.goto(APP_URL + '#/signup', { waitUntil: 'networkidle' });\n";
         $isolationBlock .= "    await pageB.waitForTimeout(500);\n";
-        $isolationBlock .= "    await pageB.fill('#signup-form input[name=' + " . $afJson . " + ']', TEST_EMAIL_B);\n";
-        $isolationBlock .= "    await pageB.fill('#signup-form input[name=\"password\"]', TEST_PASS);\n";
-        $isolationBlock .= "    await pageB.click('#signup-form button[type=\"submit\"], #signup-form button');\n";
+        $isolationBlock .= "    await pageB.fill('#auth-form #auth-identifier', TEST_EMAIL_B);\n";
+        $isolationBlock .= "    await pageB.fill('#auth-form #auth-password', TEST_PASS);\n";
+        $isolationBlock .= "    await pageB.click('#auth-form button[type=\"submit\"]');\n";
         $isolationBlock .= "    let bLoggedIn = false;\n";
         $isolationBlock .= "    try {\n";
         $isolationBlock .= "      await waitLoggedIn(pageB);\n";
@@ -2712,11 +2719,13 @@ JSEOF;
         $reloginBlock .= "    if (!isHiddenRL) await logoutForRL.click();\n";
         $reloginBlock .= "    await page.waitForTimeout(1000);\n";
         $reloginBlock .= "  }\n";
-        $reloginBlock .= "  const loginFormRL = await page.\$('#login-form');\n";
+        $reloginBlock .= "  await page.goto(APP_URL + '#/login', { waitUntil: 'networkidle' });\n";
+        $reloginBlock .= "  await page.waitForTimeout(500);\n";
+        $reloginBlock .= "  const loginFormRL = await page.\$('#auth-form');\n";
         $reloginBlock .= "  if (loginFormRL) {\n";
-        $reloginBlock .= "    await page.fill('#login-form input[name=' + " . $afJson . " + ']', TEST_EMAIL);\n";
-        $reloginBlock .= "    await page.fill('#login-form input[name=\"password\"]', TEST_PASS);\n";
-        $reloginBlock .= "    await page.click('#login-form button[type=\"submit\"], #login-form button');\n";
+        $reloginBlock .= "    await page.fill('#auth-form #auth-identifier', TEST_EMAIL);\n";
+        $reloginBlock .= "    await page.fill('#auth-form #auth-password', TEST_PASS);\n";
+        $reloginBlock .= "    await page.click('#auth-form button[type=\"submit\"]');\n";
         $reloginBlock .= "  }\n";
         $reloginBlock .= "  let reLoggedIn = false;\n";
         $reloginBlock .= "  try { await waitLoggedIn(page); reLoggedIn = true; } catch (_) {}\n";
@@ -2732,9 +2741,9 @@ JSEOF;
         $logoutBlock .= "  if (logoutEl) {\n";
         $logoutBlock .= "    await logoutEl.click();\n";
         $logoutBlock .= "    await page.waitForTimeout(1000);\n";
-        $logoutBlock .= "    const loginBack = await page.\$('#login-form') !== null;\n";
+        $logoutBlock .= "    const onLoginRoute = page.url().includes('/login');\n";
         $logoutBlock .= "    const navHidden = await page.\$eval('#nav-logout', el => el.classList.contains('hidden')).catch(() => true);\n";
-        $logoutBlock .= "    assert('After logout, login form is shown', loginBack && navHidden);\n";
+        $logoutBlock .= "    assert('After logout, login form is shown', onLoginRoute && navHidden);\n";
         $logoutBlock .= "  }\n";
     }
 
