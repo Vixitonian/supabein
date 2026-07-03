@@ -6,6 +6,39 @@ use Firebase\JWT\JWT;
 
 require_once SUPABEIN_ROOT . '/app/middleware/auth.php';
 
+// Sends one transactional email via Resend. Best-effort: failures are logged
+// but never thrown — a broken mail provider must not turn into a 500 for the
+// user (the "always return the same shape" enumeration guard already covers
+// the caller-visible response either way).
+function sb_send_email(array $config, string $to, string $subject, string $html): bool
+{
+    $apiKey = $config['RESEND_API_KEY'] ?? '';
+    if (!$apiKey) { sb_log('mail', 'RESEND_API_KEY not configured — email not sent', ['to' => $to]); return false; }
+
+    $from = $config['RESEND_FROM'] ?? 'SupaBein <onboarding@resend.dev>';
+    $payload = json_encode(['from' => $from, 'to' => [$to], 'subject' => $subject, 'html' => $html], JSON_UNESCAPED_UNICODE);
+
+    $ch = curl_init('https://api.resend.com/emails');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Authorization: Bearer ' . $apiKey],
+        CURLOPT_TIMEOUT        => 15,
+        CURLOPT_CONNECTTIMEOUT => 5,
+    ]);
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlErr  = curl_error($ch);
+    curl_close($ch);
+
+    if ($response === false || $httpCode >= 300) {
+        sb_log('mail', 'Resend send failed', ['to' => $to, 'http' => $httpCode, 'error' => $curlErr ?: $response]);
+        return false;
+    }
+    return true;
+}
+
 function register_auth_routes(\SupaBein\Router $router): void
 {
     // POST /v1/auth/signup
@@ -165,9 +198,12 @@ function register_auth_routes(\SupaBein\Router $router): void
         $stmt->execute([$email]);
         $user = $stmt->fetch();
 
-        // Always return the same shape to prevent enumeration
+        // Always return the same shape to prevent enumeration — never reveal
+        // whether the email is registered, and never hand the token back in
+        // the response (it now only ever reaches the user via their inbox).
+        $genericResponse = ['message' => 'If that email is registered, a password reset link has been sent to it.'];
         if (!$user) {
-            json_out(['message' => 'If that email is registered, a reset token has been generated.', 'token' => null, 'expires_in' => 3600]);
+            json_out($genericResponse);
             return;
         }
 
@@ -178,7 +214,16 @@ function register_auth_routes(\SupaBein\Router $router): void
         $pdo->prepare('DELETE FROM user_reset_tokens WHERE user_id = ?')->execute([$user['id']]);
         $pdo->prepare('INSERT INTO user_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)')->execute([$user['id'], $hash, $expires]);
 
-        json_out(['message' => 'Reset token generated.', 'token' => $raw, 'expires_in' => 3600]);
+        $config   = App::get('config');
+        $resetUrl = rtrim($config['API_BASE_URL'] ?? '', '/') . '/#/reset/' . $raw;
+        sb_send_email($config, $email, 'Reset your SupaBein password', <<<HTML
+            <p>Someone requested a password reset for your SupaBein account.</p>
+            <p><a href="{$resetUrl}">Click here to reset your password</a> (expires in 1 hour).</p>
+            <p>If you didn't request this, you can ignore this email.</p>
+            HTML
+        );
+
+        json_out($genericResponse);
     });
 
     // POST /v1/auth/reset — exchange token for new password
