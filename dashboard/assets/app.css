@@ -398,6 +398,28 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .auth-switch { text-align: center; font-size: 13px; color: var(--text-muted); margin-top: 18px; }
 .auth-forgot { display: block; text-align: right; font-size: 12px; margin-top: -8px; margin-bottom: 16px; }
 
+/* Landing page (logged-out root) */
+.landing-wrap {
+  min-height: 100vh; background: var(--bg);
+  padding: 60px 16px 40px;
+  display: flex; flex-direction: column; align-items: center; gap: 56px;
+}
+.landing-hero { max-width: 640px; text-align: center; display: flex; flex-direction: column; align-items: center; }
+.landing-headline { font-size: 34px; font-weight: 800; letter-spacing: -0.5px; margin: 20px 0 12px; color: var(--text); }
+.landing-sub { color: var(--muted); font-size: 15px; line-height: 1.6; margin-bottom: 28px; }
+.landing-ctas { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+.landing-features {
+  width: 100%; max-width: 960px;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+}
+.landing-feature { padding: 20px; }
+.landing-feature-title { font-weight: 700; font-size: 15px; margin-bottom: 8px; color: var(--text); }
+.landing-feature-text { color: var(--muted); font-size: 13px; line-height: 1.6; }
+@media (max-width: 720px) {
+  .landing-features { grid-template-columns: 1fr; }
+  .landing-headline { font-size: 26px; }
+}
+
 /* Tabs */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
 .tab {

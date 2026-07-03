@@ -642,6 +642,39 @@ function renderLayout(projectId, activeTab, content, opts = {}) {
 // ─── Pages ───────────────────────────────────────────────────────────────────
 
 // Login
+function renderLanding() {
+  const wrap = el('div', { class: 'landing-wrap' },
+    el('div', { class: 'landing-hero' },
+      authBrand(),
+      el('h1', { class: 'landing-headline' }, 'Your idea. Now a real app.'),
+      el('p', { class: 'landing-sub' },
+        'SupaBein turns a plain-English description into a working database, API, and live ' +
+        'web app — no developers, no code, no waiting. Built for founders, business owners, ' +
+        'and professionals who need to move from idea to reality today.'
+      ),
+      el('div', { class: 'landing-ctas' },
+        el('a', { class: 'btn btn-primary', href: '#/signup' }, 'Get Started Free'),
+        el('a', { class: 'btn btn-secondary', href: '#/login' }, 'Sign In')
+      )
+    ),
+    el('div', { class: 'landing-features' },
+      el('div', { class: 'landing-feature card' },
+        el('div', { class: 'landing-feature-title' }, 'Describe it, get it built'),
+        el('div', { class: 'landing-feature-text' }, 'Tell it what you need in plain English — a booking system, a store, a directory — and get a real, database-backed app in minutes.')
+      ),
+      el('div', { class: 'landing-feature card' },
+        el('div', { class: 'landing-feature-title' }, 'Own everything'),
+        el('div', { class: 'landing-feature-text' }, 'Self-hosted, on your infrastructure. Your data and your app stay yours — no vendor lock-in, no surprise bills.')
+      ),
+      el('div', { class: 'landing-feature card' },
+        el('div', { class: 'landing-feature-title' }, 'Launch today'),
+        el('div', { class: 'landing-feature-text' }, 'Go from a written idea to a live, working site the same day — then keep shaping it with plain-English edits.')
+      )
+    )
+  );
+  setApp(wrap);
+}
+
 function authBrand() {
   const homeHref = Auth.isLoggedIn() ? '#/projects' : '/';
   return h(`<a class="auth-brand" href="${homeHref}">
@@ -5209,7 +5242,7 @@ async function renderAccount() {
 
 Router.add('', () => {
   if (Auth.isLoggedIn()) Router.navigate('/home');
-  else Router.navigate('/login');
+  else renderLanding();
 });
 
 Router.add('login',  renderLogin);
