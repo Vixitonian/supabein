@@ -14,6 +14,16 @@
   --font: 'Inter', system-ui, sans-serif;
 }
 
+/* Global network-activity indicator — see LoadingBar in app.js */
+#sb-loading-bar {
+  position: fixed; top: 0; left: 0; height: 3px; width: 0%;
+  background: var(--accent); z-index: 9999; opacity: 0;
+  transition: width 0.25s ease, opacity 0.2s ease;
+  pointer-events: none;
+}
+#sb-loading-bar.active { opacity: 1; width: 75%; }
+#sb-loading-bar.done { width: 100%; }
+
 body {
   background: var(--bg);
   color: var(--text);
