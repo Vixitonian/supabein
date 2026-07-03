@@ -1286,11 +1286,36 @@ const AiPanel = (() => {
     return raw;
   }
 
-  function renderIntentCard(rawIntent, onConfirm, onCancel) {
+  function renderIntentCard(rawIntent, initialName, onConfirm, onCancel) {
     // Deep-clone so edits don't mutate caller's copy
     const intent = JSON.parse(JSON.stringify(normalizeIntent(rawIntent)));
     const actors = intent.actors;
     const nfrs   = intent.non_functional_requirements || [];
+
+    // Project name — the first thing shown, before the intent tree, so
+    // naming and intent review happen together as one first step. Click the
+    // pencil (or the name itself) to edit; defaults to a guess from the prompt.
+    let projectName = (initialName || '').trim();
+    const nameRow = el('div', { class: 'ai-intent-name-row' });
+    function rebuildNameRow() {
+      nameRow.innerHTML = '';
+      const span = el('span', { class: 'ai-intent-name-text' }, projectName || 'Untitled project');
+      const icon = el('button', { class: 'ai-intent-name-edit', type: 'button', title: 'Edit project name' }, '✎');
+      const startEdit = () => {
+        const inp = el('input', { class: 'ai-story-inline-input ai-intent-name-input', type: 'text', value: projectName, placeholder: 'Project name', maxlength: '80' });
+        nameRow.innerHTML = '';
+        nameRow.appendChild(inp);
+        inp.focus(); inp.select();
+        const commit = () => { projectName = inp.value.trim(); rebuildNameRow(); };
+        inp.addEventListener('blur', commit);
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+      };
+      icon.addEventListener('click', startEdit);
+      span.addEventListener('click', startEdit);
+      nameRow.appendChild(icon);
+      nameRow.appendChild(span);
+    }
+    rebuildNameRow();
 
     const treeWrap = el('div', { class: 'ai-req-tree' });
 
@@ -1408,13 +1433,22 @@ const AiPanel = (() => {
     buildTree();
 
     return el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' },
+      nameRow,
       el('div', { class: 'ai-intent-header' }, 'Product Requirements — review before building'),
       treeWrap,
       el('div', { class: 'ai-intent-actions' },
         el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
-        el('button', { class: 'btn btn-ai btn-sm', onClick: () => onConfirm({ actors, non_functional_requirements: nfrs }) }, 'Build with this →')
+        el('button', { class: 'btn btn-ai btn-sm', onClick: () => onConfirm({ actors, non_functional_requirements: nfrs }, projectName || 'Untitled project') }, 'Build with this →')
       )
     );
+  }
+
+  // A rough placeholder name so the field isn't empty — just the first few
+  // words of the prompt, title-cased. The user is expected to edit it.
+  function suggestProjectName(prompt) {
+    const words = (prompt || '').trim().split(/\s+/).slice(0, 5);
+    if (!words.length) return '';
+    return words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   }
 
   function showIntentReviewCard(intent, body) {
@@ -1425,9 +1459,10 @@ const AiPanel = (() => {
 
     const card = renderIntentCard(
       intent,
-      async (confirmedIntent) => {
+      suggestProjectName(body.prompt),
+      async (confirmedIntent, projectName) => {
         card.remove();
-        body.intent = confirmedIntent;
+        body.intent = { ...confirmedIntent, project_name: projectName };
         // Fire-and-forget — don't block the build start on DB round-trips
         addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
         if (selectedProjectId) {

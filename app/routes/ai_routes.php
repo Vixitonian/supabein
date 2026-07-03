@@ -2896,16 +2896,25 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
 {
     $aiTrace = [];
 
+    // A name the user typed in at intent-review time (the edit-icon field next
+    // to the intent card) — locked in verbatim rather than left to the AI,
+    // since it's an explicit user choice, not something to (re)generate.
+    $lockedName = trim((string)($approvedIntent['project_name'] ?? ''));
+
     // ── Stage 1: schema ───────────────────────────────────────────────────
     $report(['stage' => 'schema', 'status' => 'start', 'label' => 'Designing database schema…']);
     $schemaUserMsg = $approvedIntent
         ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
         : $prompt;
+    if ($lockedName !== '') {
+        $schemaUserMsg .= "\n\nLocked project name — use EXACTLY this as \"project_name\" in your JSON output: {$lockedName}";
+    }
     $_t0 = microtime(true);
     $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
     $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     $schemaPlan['frontend'] = ['files' => []];
     $schemaPlan = ai_sanitize_plan($schemaPlan);
+    if ($lockedName !== '') $schemaPlan['project_name'] = $lockedName;
 
     $validationError = ai_validate_plan($schemaPlan);
     if ($validationError) {
@@ -2918,6 +2927,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
         $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
         $schemaPlan['frontend'] = ['files' => []];
         $schemaPlan = ai_sanitize_plan($schemaPlan);
+        if ($lockedName !== '') $schemaPlan['project_name'] = $lockedName;
         $validationError = ai_validate_plan($schemaPlan);
         if ($validationError) throw new \RuntimeException('AI returned an invalid schema: ' . $validationError);
     }
