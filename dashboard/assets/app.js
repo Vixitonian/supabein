@@ -741,13 +741,13 @@ function renderForgot() {
       authBrand(),
       el('div', { class: 'auth-sub' }, 'Reset your password'),
       el('p', { style: 'font-size:13px;color:var(--text-muted);margin-bottom:20px;text-align:center' },
-        'Enter your email and we\'ll generate a reset token.'
+        'Enter your email and we\'ll send you a password reset link.'
       ),
       el('div', { class: 'form-group' },
         el('label', {}, 'Email'),
         el('input', { type: 'email', id: 'email', placeholder: 'you@example.com', autocomplete: 'email' })
       ),
-      el('button', { class: 'btn btn-primary w-full', id: 'submit' }, 'Generate Reset Token'),
+      el('button', { class: 'btn btn-primary w-full', id: 'submit' }, 'Send Reset Link'),
       el('div', { class: 'auth-switch' }, el('a', { href: '#/login' }, '← Back to sign in'))
     )
   );
@@ -762,38 +762,26 @@ function renderForgot() {
       box.innerHTML = '';
       box.appendChild(authBrand());
       box.appendChild(h(`<div class="auth-sub">Check your email</div>`));
-      if (res.token) {
-        box.appendChild(h(`<p style="font-size:13px;color:var(--text-muted);margin-bottom:12px;text-align:center">Your reset token (copy and keep it safe):</p>`));
-        const codeBlock = h(`<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-family:monospace;font-size:12px;word-break:break-all;margin-bottom:16px">${res.token}</div>`);
-        box.appendChild(codeBlock);
-        const copyBtn = el('button', { class: 'btn btn-sm w-full', style: 'margin-bottom:16px' }, 'Copy Token');
-        copyBtn.addEventListener('click', () => {
-          navigator.clipboard.writeText(res.token);
-          copyBtn.textContent = 'Copied!';
-          setTimeout(() => { copyBtn.textContent = 'Copy Token'; }, 1500);
-        });
-        box.appendChild(copyBtn);
-      } else {
-        box.appendChild(h(`<p style="font-size:13px;color:var(--text-muted);text-align:center;margin-bottom:16px">${res.message}</p>`));
-      }
-      box.appendChild(el('a', { class: 'btn btn-primary w-full', href: '#/reset' }, 'Enter Reset Token →'));
+      box.appendChild(h(`<p style="font-size:13px;color:var(--text-muted);text-align:center;margin-bottom:16px">${res.message}</p>`));
+      box.appendChild(el('a', { class: 'btn btn-secondary w-full', href: '#/login' }, '← Back to sign in'));
     } catch (e) {
       showAlert(wrap.querySelector('.auth-box'), e.message);
-      btn.disabled = false; btn.textContent = 'Generate Reset Token';
+      btn.disabled = false; btn.textContent = 'Send Reset Link';
     }
   });
 
   setApp(wrap);
 }
 
-function renderReset() {
+function renderReset(params) {
+  const tokenFromLink = (params && params.token) ? decodeURIComponent(params.token) : '';
   const wrap = el('div', { class: 'auth-wrap' },
     el('div', { class: 'auth-box card' },
       authBrand(),
       el('div', { class: 'auth-sub' }, 'Set a new password'),
-      el('div', { class: 'form-group' },
+      el('div', { class: 'form-group', style: tokenFromLink ? 'display:none' : '' },
         el('label', {}, 'Reset Token'),
-        el('input', { type: 'text', id: 'token', placeholder: 'Paste your reset token' })
+        el('input', { type: 'text', id: 'token', placeholder: 'Paste your reset token', value: tokenFromLink })
       ),
       el('div', { class: 'form-group' },
         el('label', {}, 'New Password'),
@@ -805,7 +793,7 @@ function renderReset() {
   );
 
   wrap.querySelector('#submit').addEventListener('click', async () => {
-    const token    = wrap.querySelector('#token').value.trim();
+    const token    = tokenFromLink || wrap.querySelector('#token').value.trim();
     const password = wrap.querySelector('#password').value;
     const btn = wrap.querySelector('#submit');
     btn.disabled = true; btn.textContent = 'Resetting…';
@@ -2053,6 +2041,53 @@ const AiPanel = (() => {
     }
   }
 
+  // Turns a failing test+validation result into an edit-mode prompt asking
+  // the AI to fix exactly those problems — reuses the normal edit pipeline
+  // (schema-aware generation, self-heal retry, validate, deploy) instead of
+  // a bespoke fix path, so a "Resolve" is just as reliable as a manual edit.
+  function buildResolvePrompt(data) {
+    const parts = [];
+    const failedStories = (data.stories || []).filter(s => !s.passed);
+    if (failedStories.length) {
+      parts.push('Fix these failing test stories:\n' + failedStories.map(s =>
+        `- ${s.label}` + (s.detail ? `: ${s.detail}` : '')).join('\n'));
+    }
+    const issues = (data.validation || []).filter(f => f.severity === 'error' || f.severity === 'warning');
+    if (issues.length) {
+      parts.push('Fix these validation issues:\n' + issues.map(f =>
+        `- [${f.severity}] ${f.message}` + (f.explanation ? ` — ${f.explanation}` : '')).join('\n'));
+    }
+    if (!parts.length) return '';
+    return 'Automated testing and validation found problems with this app.\n\n' + parts.join('\n\n')
+      + '\n\nFix all of the above without changing anything else.';
+  }
+
+  async function resolveIssues(data, btn) {
+    const prompt = buildResolvePrompt(data);
+    if (!prompt || !panelEl) return;
+    const textarea = panelEl.querySelector('#ai-textarea');
+    if (!textarea) return;
+    textarea.value = prompt;
+    if (btn) btn.disabled = true;
+    try {
+      await sendMessage();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function downloadJson(filename, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   function renderTestCard(msg) {
     const { stories = [], passed = 0, failed = 0, error, screenshot, validation = [] } = msg.data || {};
     const total = passed + failed;
@@ -2118,8 +2153,23 @@ const AiPanel = (() => {
       el('span', { style: `color:${validationColor};font-size:0.8rem;font-weight:600` }, validationStatus)
     ));
     if (validation.length) {
-      card.appendChild(el('div', { style: 'padding:10px 14px;border-top:1px solid var(--border)' }, renderValidationList(validation)));
+      card.appendChild(el('div', { style: 'padding:10px 14px;border-top:1px solid var(--border)' },
+        renderValidationExplainer(), renderValidationList(validation)));
     }
+
+    const hasIssues = failed > 0 || validation.some(f => f.severity === 'error' || f.severity === 'warning');
+    const cardActions = el('div', { style: 'padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--border)' });
+    const downloadBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '⭳ Download JSON');
+    downloadBtn.addEventListener('click', () => downloadJson(`sb-report-${msg.id || Date.now()}.json`,
+      { stories, passed, failed, error: error || null, validation }));
+    cardActions.appendChild(downloadBtn);
+    if (hasIssues) {
+      const resolveBtn = el('button', { class: 'btn btn-ai btn-sm' }, '🛠 Resolve');
+      resolveBtn.title = 'Ask the AI to fix these failing stories and validation issues';
+      resolveBtn.addEventListener('click', () => resolveIssues(msg.data, resolveBtn));
+      cardActions.appendChild(resolveBtn);
+    }
+    card.appendChild(cardActions);
 
     return card;
   }
@@ -2129,6 +2179,26 @@ const AiPanel = (() => {
     warning: { color: '#f59e0b',       icon: '⚠' },
     info:    { color: 'var(--text-muted)', icon: 'ℹ' },
   };
+
+  // Explains what "Validation" actually checks — shown collapsed so it
+  // doesn't clutter the card, but discoverable for anyone unsure what the
+  // severities mean or why this is separate from the browser test results.
+  function renderValidationExplainer() {
+    return el('details', { style: 'font-size:0.72rem;color:var(--text-muted);margin-bottom:6px' },
+      el('summary', { style: 'cursor:pointer' }, 'What is this?'),
+      el('div', { style: 'margin-top:6px;line-height:1.5' },
+        'This is a deterministic code check — not an AI opinion. It scans the generated ' +
+        'frontend against your database schema for concrete mismatches: routes with no page, ' +
+        'nav links that go nowhere, seed data columns the UI never reads, and similar wiring bugs. ',
+        el('br'), el('br'),
+        el('span', { style: `color:${VALIDATION_SEVERITY_STYLE.error.color};font-weight:700` }, '✗ Error'), ' — almost certainly a real bug, worth fixing. ',
+        el('br'),
+        el('span', { style: `color:${VALIDATION_SEVERITY_STYLE.warning.color};font-weight:700` }, '⚠ Warning'), ' — worth a look, but may be intentional. ',
+        el('br'),
+        el('span', { style: `color:${VALIDATION_SEVERITY_STYLE.info.color};font-weight:700` }, 'ℹ Info'), ' — for awareness only, no action needed.'
+      )
+    );
+  }
 
   // Shared by the standalone validation card (edit mode, after auto-deploy)
   // and the plan card's validation section (build mode, before the user applies).
@@ -2165,7 +2235,7 @@ const AiPanel = (() => {
       )
     );
     if (findings.length) {
-      card.appendChild(el('div', { style: 'padding:10px 14px' }, renderValidationList(findings)));
+      card.appendChild(el('div', { style: 'padding:10px 14px' }, renderValidationExplainer(), renderValidationList(findings)));
     }
     return card;
   }
@@ -2311,6 +2381,7 @@ const AiPanel = (() => {
         const validationDetails = el('details', { class: 'ai-plan-details', open: errCount > 0 },
           el('summary', { class: 'ai-plan-details-summary' },
             `⚑ Validation (${msg.data.validation.length})`),
+          renderValidationExplainer(),
           renderValidationList(msg.data.validation)
         );
         lines.push(validationDetails);
@@ -5145,6 +5216,7 @@ Router.add('login',  renderLogin);
 Router.add('signup', renderSignup);
 Router.add('forgot', renderForgot);
 Router.add('reset',  renderReset);
+Router.add('reset/:token', renderReset);
 
 Router.add('logout', () => {
   Auth.clear();
