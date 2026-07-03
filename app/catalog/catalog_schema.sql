@@ -252,3 +252,18 @@ SET foreign_key_checks = 1;
 -- ─── Migration: ai_jobs test mode (run once on existing installs) ───────────
 -- ALTER TABLE `ai_jobs`
 --   MODIFY COLUMN `mode` ENUM('build','edit','test') NOT NULL;
+
+-- ─── Migration: project_seed_rows (run once on existing installs) ───────────
+-- Tracks which rows in a generated app's tables were inserted by AI seeding
+-- (build's initial seed_data or an on-demand edit-mode "seed N fake rows"
+-- request), so "clear seed data" can remove only those rows and leave real
+-- user-entered data alone.
+-- CREATE TABLE IF NOT EXISTS `project_seed_rows` (
+--     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `project_id` INT UNSIGNED NOT NULL,
+--     `table_name` VARCHAR(64) NOT NULL,
+--     `row_id`     INT UNSIGNED NOT NULL,
+--     `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     KEY `idx_project_table` (`project_id`, `table_name`),
+--     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

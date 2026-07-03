@@ -133,6 +133,46 @@ function register_project_routes(\SupaBein\Router $router): void
         json_out(['service_key' => $newKey]);
     }, ['auth_middleware']);
 
+    // POST /v1/projects/:id/seed/clear — remove only rows that AI seeding inserted
+    // (build's initial seed_data or an on-demand edit-mode seed request), leaving
+    // any real user-entered rows in the same tables untouched.
+    $router->post('/v1/projects/:id/seed/clear', function (array $req) use ($catalog): void {
+        $projectId = (int)$req['params']['id'];
+        $userId    = $req['auth']['user_id'];
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        if (!$project) abort(404);
+
+        $pdo  = \App::get('db');
+        $rows = $pdo->prepare('SELECT table_name, row_id FROM project_seed_rows WHERE project_id = ?');
+        $rows->execute([$projectId]);
+
+        $byTable = [];
+        foreach ($rows->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $byTable[$r['table_name']][] = (int)$r['row_id'];
+        }
+
+        $deleted = [];
+        foreach ($byTable as $tableName => $ids) {
+            $tbl = $catalog->getTable($projectId, $tableName);
+            if (!$tbl) continue;
+
+            $physical     = $tbl['physical_name'];
+            $placeholders = implode(', ', array_fill(0, count($ids), '?'));
+            try {
+                $stmt = $pdo->prepare("DELETE FROM `{$physical}` WHERE id IN ({$placeholders})");
+                $stmt->execute($ids);
+                $deleted[$tableName] = $stmt->rowCount();
+            } catch (\Throwable $e) {
+                sb_log('ai_seed', 'Seed clear failed (non-fatal): ' . $e->getMessage(), ['table' => $tableName]);
+            }
+        }
+
+        $pdo->prepare('DELETE FROM project_seed_rows WHERE project_id = ?')->execute([$projectId]);
+
+        json_out(['deleted' => $deleted]);
+    }, ['auth_middleware']);
+
     // POST /v1/projects/:id/cleanup — remove ghost catalog entries and orphaned physical resources
     $router->post('/v1/projects/:id/cleanup', function (array $req) use ($catalog): void {
         $projectId = (int)$req['params']['id'];

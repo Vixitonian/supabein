@@ -419,6 +419,27 @@ Every index.html <head> MUST include ALL of the following:
 - Favicon MUST use the inline SVG emoji data URL (no external file dependency)
 
 ═══════════════════════════════════════════════════════
+RULE 12 — UI RICHNESS: NO BARE OR SCANTY PAGES
+═══════════════════════════════════════════════════════
+A page that only renders a plain list of rows (or a single column of text) reads as an unfinished
+wireframe, even if it's technically correct and bug-free. Every major page needs real visual weight:
+- List/dashboard pages open with a stats strip above the list (counts, totals, a highlight metric —
+  computed from the real data, not hardcoded), THEN the list/table/grid below it.
+- Render list content as cards or a multi-column table, never a bare <ul> of one-line text rows.
+  Each card/row should show 3+ pieces of information (not just a name), plus a status badge/tag
+  or icon where the data has any kind of state (paid/pending, in-stock/out, active/archived, etc.).
+- Detail/"show one record" pages are a layout, not a field:value dump — group related fields into
+  labeled sections/cards, and surface any related records (e.g. an order's line items, a user's
+  posts) inline rather than making the user hunt for them on another page.
+- Empty states are a small designed moment, not gray placeholder text: an icon/emoji, one line
+  explaining what goes here, and — when the user can create the first item — a button that takes
+  them straight to the create form.
+- Every page needs at least two visually distinct sections (e.g. stats + list, or filters + grid +
+  pagination) — a single homogeneous block top-to-bottom is the "scanty" look to avoid.
+- This is about layout richness, not scope creep: do not invent features, tables, or columns the
+  schema doesn't have. Present what's really there with more visual structure, not more content.
+
+═══════════════════════════════════════════════════════
 PLACEHOLDERS + OWNERSHIP
 ═══════════════════════════════════════════════════════
 - In core/config.js use these EXACT two lines (SB_PID is substituted at deploy time;
@@ -541,6 +562,9 @@ Return ONLY a single valid JSON object — no markdown fences, no explanation, n
   "update_policies": [
     {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
   ],
+  "seed_data": {
+    "<table_name>": [ { "<col>": <value>, ... } ]
+  },
   "frontend": { "files": [ {"path": string, "content": string} ] }
 }
 
@@ -551,6 +575,18 @@ The "frontend" key is OPTIONAL.
   all feature files — even unchanged ones. Returned files are MERGED over the existing deploy,
   but any file you DO return fully replaces its old version, so a half-written file breaks the site.
 - Use the exact column names from the "Exact schema" context — do NOT invent or rename them.
+
+The "seed_data" key is OPTIONAL — only include it when the user's request is EXPLICITLY about
+adding/seeding/generating sample, demo, fake, or test data (e.g. "seed 20 fake orders", "add some
+sample products"). Otherwise omit it entirely.
+- Target only tables that already exist (from "Exact schema") or that you are adding in this same
+  delta via add_tables.
+- Honor any specific count the user asks for exactly (e.g. "seed 20 orders" → 20 rows); default to
+  5-10 realistic rows if they don't give a count. Cap at 50 rows per table per request.
+- Never seed auth/users tables or rows that must belong to a real logged-in user (anything relying
+  on :current_user_id ownership) — only seed "global"/catalogue-style data.
+- Omit "id" and "created_at" — SupaBein inserts them automatically.
+- Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL).
 
 Schema rules:
 - Do NOT include tables/columns that already exist. Do NOT drop or rename — additions and policy
@@ -986,6 +1022,16 @@ function ai_validate_delta(array $delta, array $existingSchema): ?string
         }
     }
 
+    foreach ($delta['seed_data'] ?? [] as $seedTable => $rows) {
+        $tn = strtolower((string)$seedTable);
+        if (!isset($existing[$tn]) && !isset($newTables[$tn])) {
+            return "seed_data targets unknown table \"{$seedTable}\".";
+        }
+        if (!is_array($rows)) {
+            return "seed_data.\"{$seedTable}\" must be an array of row objects.";
+        }
+    }
+
     return null;
 }
 
@@ -1351,6 +1397,57 @@ function ai_smoke_check_dir(string $dir): ?string
 
 // ─── Execution helpers ───────────────────────────────────────────────────────
 
+// Record which rows were inserted by AI seeding (build's initial seed_data or
+// an on-demand edit-mode seed request) so they — and only they — can later be
+// removed by "clear seed data" without touching real user-entered rows.
+function ai_track_seed_rows(\PDO $pdo, int $projectId, string $tableName, array $insertedIds): void
+{
+    if (!$insertedIds) return;
+    $stmt = $pdo->prepare(
+        'INSERT INTO project_seed_rows (project_id, table_name, row_id) VALUES (?, ?, ?)'
+    );
+    foreach ($insertedIds as $id) {
+        try { $stmt->execute([$projectId, $tableName, (int)$id]); }
+        catch (\Throwable $e) { sb_log('ai_seed', 'Seed row tracking failed (non-fatal): ' . $e->getMessage()); }
+    }
+}
+
+// Shared seed_data-block inserter used by both build (initial seed) and edit
+// (on-demand "seed N fake rows" requests) — inserts rows and tracks their ids.
+function ai_insert_seed_data(\PDO $pdo, \SupaBein\Catalog $catalog, int $projectId, array $seedData): array
+{
+    $seeded = [];
+    foreach ($seedData as $seedTable => $rows) {
+        if (!is_array($rows) || empty($rows)) continue;
+        $tbl = $catalog->getTable($projectId, (string)$seedTable);
+        if (!$tbl) continue;
+
+        $physical = $tbl['physical_name'];
+        $insertedIds = [];
+        foreach (array_slice($rows, 0, 50) as $row) {
+            if (!is_array($row) || empty($row)) continue;
+            unset($row['id'], $row['created_at']);
+            if (empty($row)) continue;
+
+            $cols         = array_keys($row);
+            $colList      = implode(', ', array_map(fn($c) => "`{$c}`", $cols));
+            $placeholders = implode(', ', array_fill(0, count($cols), '?'));
+            try {
+                $pdo->prepare("INSERT INTO `{$physical}` ({$colList}) VALUES ({$placeholders})")
+                    ->execute(array_values($row));
+                $insertedIds[] = (int)$pdo->lastInsertId();
+            } catch (\Throwable $e) {
+                sb_log('ai_seed', 'Seed insert failed (non-fatal): ' . $e->getMessage(), ['table' => $seedTable]);
+            }
+        }
+        if ($insertedIds) {
+            ai_track_seed_rows($pdo, $projectId, (string)$seedTable, $insertedIds);
+            $seeded[] = "{$seedTable}: " . count($insertedIds) . ' row' . (count($insertedIds) !== 1 ? 's' : '');
+        }
+    }
+    return $seeded;
+}
+
 function ai_execute_build(array $plan, int $userId): array
 {
     $config  = \App::get('config');
@@ -1431,28 +1528,7 @@ function ai_execute_build(array $plan, int $userId): array
 
     // ── Seed data insertion ───────────────────────────────────────────────────
     if (!empty($plan['seed_data']) && is_array($plan['seed_data'])) {
-        foreach ($plan['seed_data'] as $seedTable => $rows) {
-            if (!is_array($rows) || empty($rows)) continue;
-            $tbl = $catalog->getTable($projectId, (string)$seedTable);
-            if (!$tbl) continue;
-
-            $physical = $tbl['physical_name'];
-            foreach (array_slice($rows, 0, 20) as $row) {
-                if (!is_array($row) || empty($row)) continue;
-                unset($row['id'], $row['created_at']);
-                if (empty($row)) continue;
-
-                $cols         = array_keys($row);
-                $colList      = implode(', ', array_map(fn($c) => "`{$c}`", $cols));
-                $placeholders = implode(', ', array_fill(0, count($cols), '?'));
-                try {
-                    $pdo->prepare("INSERT INTO `{$physical}` ({$colList}) VALUES ({$placeholders})")
-                        ->execute(array_values($row));
-                } catch (\Throwable $e) {
-                    sb_log('ai_build', 'Seed insert failed (non-fatal): ' . $e->getMessage(), ['table' => $seedTable]);
-                }
-            }
-        }
+        ai_insert_seed_data($pdo, $catalog, $projectId, $plan['seed_data']);
     }
 
     $subdomain = $plan['subdomain'];
@@ -1587,12 +1663,18 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
         }
     }
 
+    $seeded = [];
+    if (!empty($delta['seed_data']) && is_array($delta['seed_data'])) {
+        $seeded = ai_insert_seed_data($pdo, $catalog, $projectId, $delta['seed_data']);
+    }
+
     sb_log('ai_edit', 'Complete', ['project_id' => $projectId, 'added_tables' => count($addedTables)]);
 
     return [
         'added_tables'     => $addedTables,
         'added_columns'    => $addedColumns,
         'updated_policies' => $updatedPolicies,
+        'seeded'           => $seeded,
     ];
 }
 
