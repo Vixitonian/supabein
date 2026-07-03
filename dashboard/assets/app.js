@@ -24,6 +24,48 @@ const Auth = (() => {
   return { getToken, setToken, clear, isLoggedIn, getUser };
 })();
 
+// ─── Global loading bar ──────────────────────────────────────────────────────
+// A slim top-of-viewport bar that appears whenever a network request is in
+// flight, so a slow connection reads as "working" instead of "hung" — covers
+// every page navigation, the AI panel opening, and session loads uniformly
+// without needing a bespoke spinner in each render function.
+const LoadingBar = (() => {
+  let count = 0;
+  let el = null;
+  let hideTimer = null;
+
+  function ensure() {
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'sb-loading-bar';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  function start() {
+    count++;
+    if (count === 1) {
+      clearTimeout(hideTimer);
+      const bar = ensure();
+      bar.classList.remove('done');
+      // Force reflow so re-adding 'active' restarts the width transition
+      // even if the bar never fully faded out from a previous request.
+      void bar.offsetWidth;
+      bar.classList.add('active');
+    }
+  }
+
+  function end() {
+    count = Math.max(0, count - 1);
+    if (count === 0 && el) {
+      el.classList.add('done');
+      hideTimer = setTimeout(() => { el.classList.remove('active', 'done'); }, 300);
+    }
+  }
+
+  return { start, end };
+})();
+
 // ─── API ─────────────────────────────────────────────────────────────────────
 
 const Api = (() => {
@@ -48,11 +90,17 @@ const Api = (() => {
       body = JSON.stringify(data);
     }
 
+    // Job-status polling fires every ~2s while a job runs and already has its
+    // own progress card — showing the global bar for it too would just flicker.
+    const showBar = !path.includes('/ai/jobs/');
+    if (showBar) LoadingBar.start();
+
     const signal = abortSignal ?? AbortSignal.timeout(600000);
     let res;
     try {
       res = await fetch(BASE + path, { method, headers, body, signal });
     } catch (e) {
+      if (showBar) LoadingBar.end();
       if (e instanceof DOMException) {
         if (abortSignal?.aborted) throw e;
         if (e.name === 'TimeoutError' || e.name === 'AbortError') {
@@ -61,6 +109,7 @@ const Api = (() => {
       }
       throw e;
     }
+    if (showBar) LoadingBar.end();
 
     if (res.status === 401) {
       Auth.clear();
