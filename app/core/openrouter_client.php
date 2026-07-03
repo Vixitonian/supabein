@@ -68,58 +68,71 @@ class OpenRouterClient
         ];
         $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
-        $ch = curl_init(self::ENDPOINT);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => $payload,
-            CURLOPT_HTTPHEADER     => [
-                'Content-Type: application/json',
-                'Authorization: Bearer ' . $this->apiKey,
-                'HTTP-Referer: ' . ($_SERVER['HTTP_HOST'] ?? 'supabein'),
-            ],
-            CURLOPT_TIMEOUT        => 420,
-            CURLOPT_CONNECTTIMEOUT => 10,
-        ]);
+        // Several free-tier models route through a single backing provider with no
+        // OpenRouter-side failover, so a transient upstream hiccup surfaces as an
+        // outright request failure. Retry rate limits and 5xx before giving up.
+        $lastError = null;
+        for ($attempt = 1; $attempt <= 3; $attempt++) {
+            $ch = curl_init(self::ENDPOINT);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => $payload,
+                CURLOPT_HTTPHEADER     => [
+                    'Content-Type: application/json',
+                    'Authorization: Bearer ' . $this->apiKey,
+                    'HTTP-Referer: ' . ($_SERVER['HTTP_HOST'] ?? 'supabein'),
+                ],
+                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_CONNECTTIMEOUT => 10,
+            ]);
 
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlErr  = curl_error($ch);
-        curl_close($ch);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlErr  = curl_error($ch);
+            curl_close($ch);
 
-        if ($response === false) {
-            throw new \RuntimeException('OpenRouter network error: ' . $curlErr);
+            if ($response === false) {
+                throw new \RuntimeException('OpenRouter network error: ' . $curlErr);
+            }
+
+            if ($httpCode !== 200) {
+                $errBody = json_decode($response, true);
+                $msg = $errBody['error']['message'] ?? ('HTTP ' . $httpCode);
+                $lastError = new \RuntimeException('OpenRouter error: ' . $msg);
+                if (($httpCode === 429 || $httpCode >= 500) && $attempt < 3) {
+                    sleep($attempt * 2);
+                    continue;
+                }
+                throw $lastError;
+            }
+
+            $envelope = json_decode($response, true);
+            $text     = $envelope['choices'][0]['message']['content'] ?? null;
+
+            $raw = $envelope['usage'] ?? [];
+            $this->lastUsage = [
+                'prompt_tokens'     => (int)($raw['prompt_tokens'] ?? 0),
+                'completion_tokens' => (int)($raw['completion_tokens'] ?? 0),
+                'total_tokens'      => (int)($raw['total_tokens'] ?? 0),
+            ];
+
+            if ($text === null) {
+                throw new \RuntimeException('OpenRouter returned no content in response');
+            }
+            $this->lastRawText = $text;
+
+            $plan = json_decode($text, true);
+            if (!is_array($plan)) {
+                $plan = ai_lenient_json($text);
+            }
+            if (!is_array($plan)) {
+                throw new \RuntimeException('OpenRouter response was not valid JSON: ' . substr($text, 0, 200));
+            }
+
+            return $plan;
         }
 
-        if ($httpCode !== 200) {
-            $body = json_decode($response, true);
-            $msg  = $body['error']['message'] ?? ('HTTP ' . $httpCode);
-            throw new \RuntimeException('OpenRouter error: ' . $msg);
-        }
-
-        $envelope = json_decode($response, true);
-        $text     = $envelope['choices'][0]['message']['content'] ?? null;
-
-        $raw = $envelope['usage'] ?? [];
-        $this->lastUsage = [
-            'prompt_tokens'     => (int)($raw['prompt_tokens'] ?? 0),
-            'completion_tokens' => (int)($raw['completion_tokens'] ?? 0),
-            'total_tokens'      => (int)($raw['total_tokens'] ?? 0),
-        ];
-
-        if ($text === null) {
-            throw new \RuntimeException('OpenRouter returned no content in response');
-        }
-        $this->lastRawText = $text;
-
-        $plan = json_decode($text, true);
-        if (!is_array($plan)) {
-            $plan = ai_lenient_json($text);
-        }
-        if (!is_array($plan)) {
-            throw new \RuntimeException('OpenRouter response was not valid JSON: ' . substr($text, 0, 200));
-        }
-
-        return $plan;
+        throw $lastError;
     }
 }
