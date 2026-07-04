@@ -331,6 +331,10 @@ STRUCTURE (define each name once, in its own file)
 ═══════════════════════════════════════════════════════
     index.html                         ← SPA entry + bootstrap ONLY (no module re-declarations)
     core/config.js                     ← SB_URL / SB_KEY / SB_PID globals (declared once, here)
+    core/errors.js                     ← PLATFORM-PROVIDED — do not include this path in your output
+                                       (captures errors automatically; the platform force-inserts its
+                                       <script> tag as the first script in index.html at deploy time,
+                                       so you never need to add or even think about it)
     core/api.js                        ← PLATFORM-PROVIDED — do not include this path in your output
     core/router.js                     ← PLATFORM-PROVIDED — do not include this path in your output
     features/auth/auth.js              ← PLATFORM-PROVIDED — do not include this path in your output
@@ -774,7 +778,11 @@ const api = (() => {
     // A logged-in user being denied means their session is stale — re-login
     // instead of showing a dead-end "not found / no permission".
     if (res.status === 401 || (hadToken && res.status === 403)) { goLogin(); throw new Error('Your session expired — please log in again.'); }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    if (!res.ok) {
+      const errMsg = `${res.status} ${res.statusText}`;
+      if (window.__sbReportApiError) window.__sbReportApiError(errMsg, { url, status: res.status });
+      throw new Error(errMsg);
+    }
     return res.status === 204 ? null : res.json();
   };
   const list   = async (table)         => unwrap(await req(base(table)));
@@ -783,6 +791,69 @@ const api = (() => {
   const update = async (table, id, d)  => req(`${base(table)}/${id}`, { method: 'PUT', body: JSON.stringify(d) });
   const remove = async (table, id)     => req(`${base(table)}/${id}`, { method: 'DELETE' });
   return { list, get, create, update, remove };
+})();
+JS;
+
+// core/errors.js — like router.js/api.js/auth.js, this is pure platform
+// infrastructure with zero app-specific content, so it's injected the same
+// way: unconditionally, regardless of whether the AI wrote anything for this
+// path, and index.html's <script> tag for it is force-inserted at deploy
+// time too (see ai_ensure_error_script_tag) rather than relying on the AI to
+// remember it — this is what makes error capture retroactive: any existing
+// deployed app gets it on its very next deploy, no edit request required.
+// Captures uncaught JS errors, unhandled promise rejections, api.js's own
+// failed-request signal (see the req() hook above), and console.error()
+// calls, then reports them to the platform's ingestion endpoint. Fire-and-
+// forget via sendBeacon (falls back to keepalive fetch) so a report never
+// blocks the page; a per-page-load cap plus in-memory de-dup on
+// type+message+stack-prefix keeps a tight error loop from spamming.
+const AI_CANONICAL_ERRORS_JS = <<<'JS'
+(() => {
+  const SB_PID = '__SB_PID__';
+  const ENDPOINT = window.location.origin + '/api/v1/errors/' + SB_PID;
+  const MAX_REPORTS_PER_LOAD = 20;
+  let sent = 0;
+  const seen = new Set();
+
+  const send = (type, message, stack, meta) => {
+    if (sent >= MAX_REPORTS_PER_LOAD) return;
+    const key = type + '|' + message + '|' + String(stack || '').slice(0, 200);
+    if (seen.has(key)) return;
+    seen.add(key);
+    sent++;
+    const payload = JSON.stringify({
+      type,
+      message: String(message == null ? 'Unknown error' : message).slice(0, 2000),
+      stack: stack ? String(stack).slice(0, 4000) : null,
+      url: window.location.href,
+      meta: meta || null,
+    });
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(ENDPOINT, new Blob([payload], { type: 'application/json' }));
+      } else {
+        fetch(ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload, keepalive: true }).catch(() => {});
+      }
+    } catch {}
+  };
+
+  window.addEventListener('error', (e) => {
+    send('js_error', e.message || 'Unknown error', e.error && e.error.stack, { line: e.lineno, col: e.colno, file: e.filename });
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const reason = e.reason;
+    send('promise_rejection', (reason && reason.message) || String(reason), reason && reason.stack);
+  });
+  const origConsoleError = console.error.bind(console);
+  console.error = (...args) => {
+    origConsoleError(...args);
+    send('console_error', args.map(a => (a && a.message) || String(a)).join(' '));
+  };
+
+  // api.js calls this on any non-2xx response (see req() above) — defined
+  // here, on window, so there's no load-order dependency between the two
+  // platform files beyond core/errors.js needing to load first.
+  window.__sbReportApiError = (message, meta) => send('api_error', message, null, meta);
 })();
 JS;
 
@@ -922,6 +993,7 @@ function ai_inject_canonical_frontend_files(array $frontendFiles, ?array $authIn
     }
     $byPath['core/router.js'] = ['path' => 'core/router.js', 'content' => AI_CANONICAL_ROUTER_JS];
     $byPath['core/api.js']    = ['path' => 'core/api.js',    'content' => AI_CANONICAL_API_JS];
+    $byPath['core/errors.js'] = ['path' => 'core/errors.js', 'content' => AI_CANONICAL_ERRORS_JS];
     if (!empty($authInfo['table'])) {
         $authJs = str_replace(
             ['__AUTH_TABLE__', '__AUTH_FIELD__'],
@@ -931,6 +1003,28 @@ function ai_inject_canonical_frontend_files(array $frontendFiles, ?array $authIn
         $byPath['features/auth/auth.js'] = ['path' => 'features/auth/auth.js', 'content' => $authJs];
     }
     return array_values($byPath);
+}
+
+// Forces every deployed index.html to load core/errors.js before any other
+// script, regardless of whether the AI's markup included the tag. This is
+// what makes error capture a deploy-time guarantee instead of a prompt-
+// compliance hope: an app generated before this feature existed gets the
+// tag added automatically on its very next deploy (build or edit), with no
+// edit request needed to "pick up" the fix. Idempotent — a re-deploy that
+// already has the tag (e.g. the AI added it anyway, or a second deploy of
+// the same index.html) is left alone rather than duplicating it.
+function ai_ensure_error_script_tag(string $html): string
+{
+    if (str_contains($html, 'core/errors.js')) return $html;
+    $tag = '<script src="./core/errors.js"></script>' . "\n    ";
+    if (preg_match('/<script\b/i', $html, $m, PREG_OFFSET_CAPTURE)) {
+        $pos = $m[0][1];
+        return substr($html, 0, $pos) . $tag . substr($html, $pos);
+    }
+    if (stripos($html, '</head>') !== false) {
+        return str_ireplace('</head>', "    {$tag}</head>", $html);
+    }
+    return $tag . $html;
 }
 
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
@@ -1002,10 +1096,14 @@ function ai_deploy_files(
             mkdir($parentDir, 0755, true);
         }
 
+        $rawContent = (string)($fileDef['content'] ?? '');
+        if ($relPath === 'index.html') {
+            $rawContent = ai_ensure_error_script_tag($rawContent);
+        }
         $content = str_replace(
             array_keys($replacements),
             array_values($replacements),
-            (string)($fileDef['content'] ?? '')
+            $rawContent
         );
 
         if (file_put_contents($fullPath, $content) === false) {
@@ -3274,7 +3372,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
 // working code (note creation/editing) in the file that surfaced this rule.
 function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config): array
 {
-    static $platformPaths = ['core/router.js', 'core/api.js', 'features/auth/auth.js'];
+    static $platformPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
 
     // Reuses the exact normalize-then-prefix-check ai_deploy_files() already
     // uses against real deploy directories, just against a virtual prefix —
@@ -3678,6 +3776,80 @@ function ai_get_test_accounts_status(\PDO $pdo, \SupaBein\Catalog $catalog, int 
         }
     }
     return $accounts;
+}
+
+// ─── End-user error logs (core/errors.js ingestion + dashboard viewing) ────
+// Fingerprint groups repeat occurrences of "the same" error together so a
+// tight error loop in one visitor's browser adds one row with a growing
+// `occurrences` count instead of one row per occurrence. Deliberately coarse
+// (type + message + first stack line only) — differing line numbers deeper
+// in the stack, or differing URLs, still count as the same underlying bug.
+function ai_error_log_fingerprint(string $type, string $message, ?string $stack): string
+{
+    $stackTop = '';
+    if ($stack) {
+        $lines = explode("\n", trim($stack));
+        $stackTop = trim($lines[0] ?? '');
+    }
+    return md5($type . '|' . $message . '|' . $stackTop);
+}
+
+// Called from the public POST /v1/errors/:project_id route. Rate-limiting is
+// the caller's responsibility (RateLimit::checkProjectErrors) so it happens
+// before any DB work, same convention as the data routes.
+function ai_report_error_log(\PDO $pdo, int $projectId, array $body): void
+{
+    static $validTypes = ['js_error', 'promise_rejection', 'api_error', 'console_error'];
+
+    $type = (string)($body['type'] ?? '');
+    if (!in_array($type, $validTypes, true)) abort(422, 'Invalid error type');
+
+    $message = trim((string)($body['message'] ?? ''));
+    if ($message === '') abort(422, 'message is required');
+    $message = mb_substr($message, 0, 2000);
+
+    $stack = isset($body['stack']) && $body['stack'] !== null ? mb_substr((string)$body['stack'], 0, 4000) : null;
+    $url   = isset($body['url']) ? mb_substr((string)$body['url'], 0, 1024) : null;
+    $meta  = isset($body['meta']) && $body['meta'] !== null ? json_encode($body['meta']) : null;
+    $ua    = mb_substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 512);
+
+    $fingerprint = ai_error_log_fingerprint($type, $message, $stack);
+
+    $pdo->prepare(
+        'INSERT INTO ai_error_logs
+            (project_id, type, message, stack, url, user_agent, meta, fingerprint, occurrences, first_seen_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())
+         ON DUPLICATE KEY UPDATE occurrences = occurrences + 1, last_seen_at = NOW(), url = VALUES(url)'
+    )->execute([$projectId, $type, $message, $stack, $url, $ua, $meta, $fingerprint]);
+
+    // Hard cap: keep only the most-recently-seen N distinct errors per
+    // project so a project that generates many distinct (non-deduping)
+    // errors still can't grow this table without bound.
+    static $maxRowsPerProject = 500;
+    $countStmt = $pdo->prepare('SELECT COUNT(*) FROM ai_error_logs WHERE project_id = ?');
+    $countStmt->execute([$projectId]);
+    if ((int)$countStmt->fetchColumn() > $maxRowsPerProject) {
+        $pdo->prepare(
+            'DELETE FROM ai_error_logs WHERE project_id = ? ORDER BY last_seen_at ASC LIMIT 1'
+        )->execute([$projectId]);
+    }
+}
+
+function ai_list_error_logs(\PDO $pdo, int $projectId, int $limit = 200): array
+{
+    $stmt = $pdo->prepare(
+        'SELECT id, type, message, stack, url, user_agent, meta, occurrences, first_seen_at, last_seen_at
+         FROM ai_error_logs WHERE project_id = ? ORDER BY last_seen_at DESC LIMIT ?'
+    );
+    $stmt->bindValue(1, $projectId, \PDO::PARAM_INT);
+    $stmt->bindValue(2, $limit, \PDO::PARAM_INT);
+    $stmt->execute();
+    return array_map(function (array $row): array {
+        $row['id']          = (int)$row['id'];
+        $row['occurrences'] = (int)$row['occurrences'];
+        $row['meta']        = $row['meta'] !== null ? json_decode($row['meta'], true) : null;
+        return $row;
+    }, $stmt->fetchAll());
 }
 
 // On-demand seeding for the "Seed App" button — same seed_data shape and
@@ -4997,6 +5169,44 @@ PROMPT;
         $schema = ai_schema_from_db($projectId, $catalog);
         $pdo    = \App::get('db');
         json_out(['accounts' => ai_get_test_accounts_status($pdo, $catalog, $projectId, $schema)]);
+    }, ['auth_middleware']);
+
+    // ── End-user error logs — reported by the platform-injected core/errors.js
+    //    running in the deployed app's visitors' browsers (see the public
+    //    POST /v1/errors/:project_id route in data_routes.php). Most-recent
+    //    first, deduped server-side by fingerprint.
+    $router->get('/v1/projects/:id/errors', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        $pdo = \App::get('db');
+        json_out(['errors' => ai_list_error_logs($pdo, $projectId)]);
+    }, ['auth_middleware']);
+
+    // ── Same data as above, as a downloadable JSON file (Content-Disposition)
+    //    rather than an inline API response — for offline triage / sharing.
+    $router->get('/v1/projects/:id/errors/download', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        $pdo  = \App::get('db');
+        $rows = ai_list_error_logs($pdo, $projectId, 5000);
+        header('Content-Type: application/json');
+        header('Content-Disposition: attachment; filename="project-' . $projectId . '-errors-' . date('Ymd_His') . '.json"');
+        echo json_encode(['project_id' => $projectId, 'exported_at' => date('c'), 'errors' => $rows], JSON_PRETTY_PRINT);
+        exit;
+    }, ['auth_middleware']);
+
+    // ── Clear all logged errors for a project (housekeeping once triaged).
+    $router->delete('/v1/projects/:id/errors', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        \App::get('db')->prepare('DELETE FROM ai_error_logs WHERE project_id = ?')->execute([$projectId]);
+        json_out(['ok' => true]);
     }, ['auth_middleware']);
 
     // ── Run Playwright user-story tests as a background job — same pattern as

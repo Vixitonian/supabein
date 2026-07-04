@@ -3806,14 +3806,16 @@ async function renderProject({ id }) {
     const tabTables   = el('div', { class: 'tab' }, 'Tables');
     const tabApi      = el('div', { class: 'tab' }, 'API');
     const tabDeploy   = el('div', { class: 'tab' }, 'Deploy');
+    const tabErrors   = el('div', { class: 'tab' }, 'Errors');
 
     const paneOverviewEl = el('div', { id: 'pane-proj-overview' });
     const paneTablesEl   = el('div', { id: 'pane-proj-tables', class: 'hidden' });
     const paneApiEl      = el('div', { id: 'pane-proj-api',    class: 'hidden' });
     const paneDeployEl   = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
+    const paneErrorsEl   = el('div', { id: 'pane-proj-errors', class: 'hidden' });
 
-    const allTabs  = [tabOverview, tabTables, tabApi, tabDeploy];
-    const allPanes = [paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl];
+    const allTabs  = [tabOverview, tabTables, tabApi, tabDeploy, tabErrors];
+    const allPanes = [paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneErrorsEl];
 
     function switchProjectTab(idx) {
       allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
@@ -3848,6 +3850,13 @@ async function renderProject({ id }) {
         loadDeployPane(id, paneDeployEl);
       }
     });
+    tabErrors.addEventListener('click', () => {
+      switchProjectTab(4);
+      if (!paneErrorsEl.dataset.loaded) {
+        paneErrorsEl.dataset.loaded = '1';
+        loadErrorsPane(id, paneErrorsEl);
+      }
+    });
 
     const content = [
       el('div', { class: 'page-header' },
@@ -3858,8 +3867,8 @@ async function renderProject({ id }) {
       ),
 
 
-      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabOverview, tabTables, tabApi, tabDeploy),
-      paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl,
+      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabOverview, tabTables, tabApi, tabDeploy, tabErrors),
+      paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneErrorsEl,
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
@@ -4221,6 +4230,86 @@ async function renderApi({ id }, container) {
   } catch (e) {
     (container || document.getElementById('app')).innerHTML =
       `<div class="alert alert-danger">${e.message}</div>`;
+  }
+}
+
+const ERROR_TYPE_LABELS = {
+  js_error: 'JS Error',
+  promise_rejection: 'Unhandled Rejection',
+  api_error: 'API Error',
+  console_error: 'console.error',
+};
+
+// Renders as JSON blobs into a Blob URL so the download works from a fetch
+// response (Bearer-token authenticated) rather than relying on a plain
+// <a href> navigation, which can't carry the Authorization header.
+function downloadJsonBlob(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = el('a', { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function loadErrorsPane(projectId, container) {
+  container.innerHTML = '';
+  container.appendChild(el('div', { class: 'text-muted' }, 'Loading…'));
+  try {
+    const { errors } = await Api.get(`/v1/projects/${projectId}/errors`);
+    container.innerHTML = '';
+
+    const downloadBtn = el('button', { class: 'btn btn-secondary' }, '⬇ Download JSON');
+    downloadBtn.addEventListener('click', () => {
+      downloadJsonBlob(`project-${projectId}-errors-${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+        { project_id: parseInt(projectId), exported_at: new Date().toISOString(), errors });
+    });
+    const clearBtn = el('button', { class: 'btn btn-secondary' }, 'Clear All');
+    clearBtn.addEventListener('click', async () => {
+      if (!confirm('Delete all logged errors for this project? This cannot be undone.')) return;
+      await Api.delete(`/v1/projects/${projectId}/errors`);
+      loadErrorsPane(projectId, container);
+    });
+
+    const header = el('div', { class: 'error-log-header' },
+      el('h3', {}, 'Error logs'),
+      el('div', { class: 'error-log-actions' }, downloadBtn, clearBtn)
+    );
+
+    if (!errors.length) {
+      container.appendChild(header);
+      container.appendChild(el('p', { class: 'text-muted' },
+        'No errors reported yet. Errors from your deployed app’s visitors (uncaught JS errors, failed API calls, etc.) will show up here automatically.'));
+      return;
+    }
+
+    const list = el('div', { class: 'error-log-list' });
+    errors.forEach(err => {
+      const detail = el('div', { class: 'error-log-detail hidden' },
+        err.stack ? el('pre', { class: 'error-log-stack' }, err.stack) : null,
+        el('div', { class: 'error-log-detail-row' }, el('strong', {}, 'URL: '), err.url || '—'),
+        el('div', { class: 'error-log-detail-row' }, el('strong', {}, 'First seen: '), fmtDate(err.first_seen_at)),
+        el('div', { class: 'error-log-detail-row' }, el('strong', {}, 'User agent: '), err.user_agent || '—'),
+        err.meta ? el('pre', { class: 'error-log-stack' }, JSON.stringify(err.meta, null, 2)) : null,
+      );
+      const row = el('div', { class: 'error-log-row' },
+        el('div', { class: 'error-log-summary' },
+          el('span', { class: `error-log-badge error-log-badge-${err.type}` }, ERROR_TYPE_LABELS[err.type] || err.type),
+          el('span', { class: 'error-log-message' }, err.message),
+          err.occurrences > 1 ? el('span', { class: 'error-log-count' }, `×${err.occurrences}`) : null,
+          el('span', { class: 'error-log-time' }, fmtDate(err.last_seen_at)),
+        ),
+        detail,
+      );
+      row.querySelector('.error-log-summary').addEventListener('click', () => detail.classList.toggle('hidden'));
+      list.appendChild(row);
+    });
+
+    container.appendChild(header);
+    container.appendChild(list);
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
   }
 }
 

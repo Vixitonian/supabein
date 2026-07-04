@@ -120,4 +120,22 @@ function register_data_routes(\SupaBein\Router $router): void
         [\SupaBein\Crud::class, 'handleDelete'],
         ['optional_auth_middleware']
     );
+
+    // POST /v1/errors/:project_id — public, unauthenticated ingestion endpoint
+    // for the platform-injected core/errors.js script running in a deployed
+    // app's visitors' browsers. No auth is possible here by construction (a
+    // logged-out visitor's own JS errors are exactly what this needs to
+    // capture), so abuse protection is rate limiting + dedup + a hard row cap
+    // instead — see RateLimit::checkProjectErrors() and ai_report_error_log().
+    $router->post('/v1/errors/:project_id', function (array $req): void {
+        $projectId = (int)$req['params']['project_id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectByIdInternal($projectId)) abort(404, 'Project not found');
+
+        \SupaBein\RateLimit::checkProjectErrors($projectId);
+
+        $pdo = \App::get('db');
+        ai_report_error_log($pdo, $projectId, is_array($req['body']) ? $req['body'] : []);
+        json_out(['ok' => true]);
+    });
 }

@@ -163,6 +163,31 @@ CREATE TABLE IF NOT EXISTS `project_requirements` (
     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS `ai_error_logs` (
+    `id`            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`    INT UNSIGNED NOT NULL,
+    `type`          ENUM('js_error','promise_rejection','api_error','console_error') NOT NULL,
+    `message`       TEXT NOT NULL,
+    `stack`         TEXT DEFAULT NULL,
+    `url`           VARCHAR(1024) DEFAULT NULL,
+    `user_agent`    VARCHAR(512) DEFAULT NULL,
+    `meta`          TEXT DEFAULT NULL,
+    `fingerprint`   CHAR(32) NOT NULL,
+    `occurrences`   INT UNSIGNED NOT NULL DEFAULT 1,
+    `first_seen_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `last_seen_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_fingerprint` (`project_id`, `fingerprint`),
+    KEY `idx_project_last_seen` (`project_id`, `last_seen_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `ai_error_log_limits` (
+    `project_id`   INT UNSIGNED NOT NULL,
+    `window_start` INT UNSIGNED NOT NULL,
+    `count`        INT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (`project_id`, `window_start`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
 
 -- ─── Migration: project_requirements (run once on existing installs) ─────────
@@ -275,3 +300,36 @@ SET foreign_key_checks = 1;
 -- ─── Migration: ai_jobs build_schema/build_frontend modes (run once on existing installs) ───
 -- ALTER TABLE `ai_jobs`
 --   MODIFY COLUMN `mode` ENUM('build','edit','test','seed','build_schema','build_frontend') NOT NULL;
+
+-- ─── Migration: ai_error_logs + ai_error_log_limits (run once on existing installs) ───
+-- Stores end-user-browser errors reported by the platform-injected core/errors.js
+-- script. Deduped server-side by (project_id, fingerprint) — repeat occurrences of
+-- the same error increment `occurrences` and bump `last_seen_at` instead of adding
+-- rows, so a tight error loop can't grow the table unbounded. `ai_error_log_limits`
+-- is a per-project sliding-window request counter (same shape as `rate_limits`,
+-- kept separate so a flood of error reports can't also exhaust the project's
+-- normal data-API quota, or vice versa).
+-- CREATE TABLE IF NOT EXISTS `ai_error_logs` (
+--     `id`            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+--     `project_id`    INT UNSIGNED NOT NULL,
+--     `type`          ENUM('js_error','promise_rejection','api_error','console_error') NOT NULL,
+--     `message`       TEXT NOT NULL,
+--     `stack`         TEXT DEFAULT NULL,
+--     `url`           VARCHAR(1024) DEFAULT NULL,
+--     `user_agent`    VARCHAR(512) DEFAULT NULL,
+--     `meta`          TEXT DEFAULT NULL,
+--     `fingerprint`   CHAR(32) NOT NULL,
+--     `occurrences`   INT UNSIGNED NOT NULL DEFAULT 1,
+--     `first_seen_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     `last_seen_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+--     UNIQUE KEY `uq_project_fingerprint` (`project_id`, `fingerprint`),
+--     KEY `idx_project_last_seen` (`project_id`, `last_seen_at`)
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+--
+-- CREATE TABLE IF NOT EXISTS `ai_error_log_limits` (
+--     `project_id`   INT UNSIGNED NOT NULL,
+--     `window_start` INT UNSIGNED NOT NULL,
+--     `count`        INT UNSIGNED NOT NULL DEFAULT 0,
+--     PRIMARY KEY (`project_id`, `window_start`)
+-- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
