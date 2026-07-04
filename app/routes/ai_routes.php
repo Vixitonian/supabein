@@ -1748,7 +1748,11 @@ function ai_execute_build(array $plan, int $userId): array
         }
     }
 
+    $staging = null;
     if ($site !== null && !empty($plan['frontend']['files'])) {
+        // Builds deploy to STAGING (preview), same as edits — the user
+        // publishes to live explicitly via the Publish button, after
+        // reviewing/testing the staged result.
         $deployResult = ai_deploy_files(
             $config,
             $catalog,
@@ -1756,13 +1760,21 @@ function ai_execute_build(array $plan, int $userId): array
             $project,
             $plan['frontend']['files'],
             false,
-            true,
+            false,
             ai_detect_auth($plan)
         );
         if ($deployResult['error']) {
             sb_log('ai_build', 'Deploy failed (non-fatal): ' . $deployResult['error']);
         } else {
             $deploy = $deployResult['deploy'];
+            $apiBase = rtrim($config['API_BASE_URL'] ?? '', '/');
+            $appBase = preg_replace('#/(api|v\d+)(/.*)?$#i', '', $apiBase);
+            $staging = [
+                'project_id'  => $projectId,
+                'site_id'     => (int)$site['id'],
+                'deploy_id'   => (int)$deploy['id'],
+                'staging_url' => $appBase . '/sites/s' . $site['id'] . '/staging/',
+            ];
         }
     }
 
@@ -1777,6 +1789,7 @@ function ai_execute_build(array $plan, int $userId): array
         'tables'  => $partial['tables'],
         'site'    => $site,
         'deploy'  => $deploy,
+        'staging' => $staging,
     ];
 }
 
@@ -2892,13 +2905,34 @@ function ai_playwright_test_run(string $script, array $config): array
 // stream's $emit() was; failures throw instead of emitting an 'error' event
 // and returning, since callers now run inside a job, not a live HTTP response.
 
+// Full build pipeline in one call — used by the "watch only" (Review off)
+// flow, which runs schema/design/frontend/validate straight through as a
+// single job. The "confirm each stage" (Review on) flow instead calls
+// ai_run_build_schema_design() and ai_run_build_frontend() as two separate
+// jobs, with a user confirmation in between.
 function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate = true): array
+{
+    $schemaResult   = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
+    $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $report, $validate);
+
+    return [
+        'plan'       => $frontendResult['plan'],
+        'summary'    => $frontendResult['summary'],
+        'usage'      => $frontendResult['usage'],
+        'aiTrace'    => array_merge($schemaResult['aiTrace'], $frontendResult['aiTrace']),
+        'validation' => $frontendResult['validation'],
+    ];
+}
+
+// Stage 1+2 of a build: schema (with one self-correcting retry) and a
+// best-effort visual design brief. Split out from frontend generation so the
+// "Review" build flow can pause here and let the user confirm the schema and
+// design before any frontend code gets written — the "watch only" (Review
+// off) flow just calls this immediately followed by ai_run_build_frontend().
+function ai_run_build_schema_design(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report): array
 {
     $aiTrace = [];
 
-    // A name the user typed in at intent-review time (the edit-icon field next
-    // to the intent card) — locked in verbatim rather than left to the AI,
-    // since it's an explicit user choice, not something to (re)generate.
     $lockedName = trim((string)($approvedIntent['project_name'] ?? ''));
 
     // ── Stage 1: schema ───────────────────────────────────────────────────
@@ -2941,8 +2975,19 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     if (!empty($brief)) {
         $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     }
-    $briefCtx = ai_brief_to_context($brief);
     $report(['stage' => 'design', 'status' => 'done', 'label' => 'Visual design chosen', 'detail' => trim(($brief['personality'] ?? '') . (isset($brief['accent_color']) ? ' · ' . $brief['accent_color'] : '')) ?: 'default theme']);
+
+    return ['schema' => $schemaPlan, 'design_brief' => $brief, 'aiTrace' => $aiTrace, 'usage' => $client->getLastUsage()];
+}
+
+// Stage 3+4 of a build: frontend code generation against an already-confirmed
+// schema and design brief, then deterministic validation. Split out so the
+// "Review" build flow can run this as its own job, after the user has
+// confirmed the schema/design in the previous stage.
+function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, callable $report, bool $validate = true): array
+{
+    $aiTrace  = [];
+    $briefCtx = ai_brief_to_context($designBrief);
 
     // ── Stage 3: frontend ──────────────────────────────────────────────────
     $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
@@ -3988,6 +4033,73 @@ PROMPT;
             'validate' => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build', $payload);
+        ai_spawn_job_worker($config, (int)$job['id']);
+        json_out(['job_id' => (int)$job['id']], 202);
+    }, ['auth_middleware']);
+
+    // ── AI Build, Review-on stage 1 (job): schema + design brief only. The
+    //    frontend shows a confirm card after this and only fires the stage-2
+    //    job below once the user explicitly confirms.
+    $router->post('/v1/ai/build-schema/job', function (array $req): void {
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+
+        $prompt = trim($req['body']['prompt'] ?? '');
+        if ($prompt === '' || strlen($prompt) > 2000) {
+            abort(422, 'prompt is required and must be under 2000 characters');
+        }
+
+        $history = [];
+        foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
+            if (!is_array($turn)) continue;
+            $role = $turn['role'] ?? '';
+            $text = trim($turn['text'] ?? '');
+            if (!in_array($role, ['user', 'model'], true) || $text === '') continue;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+
+        $intent    = (isset($req['body']['intent']) && is_array($req['body']['intent'])) ? $req['body']['intent'] : null;
+        $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
+
+        $payload = [
+            'prompt'   => $prompt,
+            'history'  => $history,
+            'intent'   => $intent,
+            'provider' => $req['body']['provider'] ?? null,
+            'model'    => $req['body']['model'] ?? null,
+        ];
+        $job = $catalog->createJob($userId, $sessionId, 'build_schema', $payload);
+        ai_spawn_job_worker($config, (int)$job['id']);
+        json_out(['job_id' => (int)$job['id']], 202);
+    }, ['auth_middleware']);
+
+    // ── AI Build, Review-on stage 2 (job): frontend + validate, against the
+    //    schema/design brief the user already confirmed in stage 1.
+    $router->post('/v1/ai/build-frontend/job', function (array $req): void {
+        $config  = \App::get('config');
+        $catalog = \SupaBein\Catalog::getInstance();
+        $userId  = (int)$req['auth']['user_id'];
+
+        $prompt = trim($req['body']['prompt'] ?? '');
+        if ($prompt === '' || strlen($prompt) > 2000) {
+            abort(422, 'prompt is required and must be under 2000 characters');
+        }
+        $schema = $req['body']['schema'] ?? null;
+        if (!is_array($schema) || empty($schema['tables'])) abort(422, 'schema is required');
+        $designBrief = (isset($req['body']['design_brief']) && is_array($req['body']['design_brief'])) ? $req['body']['design_brief'] : [];
+
+        $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
+
+        $payload = [
+            'prompt'       => $prompt,
+            'schema'       => $schema,
+            'design_brief' => $designBrief,
+            'provider'     => $req['body']['provider'] ?? null,
+            'model'        => $req['body']['model'] ?? null,
+            'validate'     => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+        ];
+        $job = $catalog->createJob($userId, $sessionId, 'build_frontend', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
         json_out(['job_id' => (int)$job['id']], 202);
     }, ['auth_middleware']);
