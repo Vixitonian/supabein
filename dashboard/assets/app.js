@@ -1211,8 +1211,15 @@ const AiPanel = (() => {
     const stageMode = body.project_id ? 'edit' : 'build';
 
     // Build flow (new app, not chat, not edit) streams its progress live.
+    // Review ON: confirm each stage — schema+design pauses for confirmation
+    // before frontend generation even starts (see runBuildSchemaDesignStage).
+    // Review OFF: watch only — the whole pipeline runs straight through.
     if (!body.chatMode && !body.project_id) {
-      return proceedWithPlanStreaming(body, sess);
+      // A retry after a failed frontend-stage job carries the already-confirmed
+      // schema/design in its retryBody (see runBuildFrontendStage) — resume
+      // there instead of redoing schema/design generation from scratch.
+      if (body.schema) return runBuildFrontendStage(body.schema, body.design_brief, { prompt: body.prompt });
+      return reviewEnabled ? runBuildSchemaDesignStage(body, sess) : proceedWithPlanStreaming(body, sess);
     }
 
     const thinkingId = 'thinking_' + Date.now();
@@ -1283,6 +1290,61 @@ const AiPanel = (() => {
     });
   }
 
+  // ── Review-on build pipeline: schema+design, then a confirm card, then
+  // frontend, reusing the existing plan/apply card as the next confirm gate. ──
+
+  function runBuildSchemaDesignStage(body, sess) {
+    return streamGenerate(body, sess, {
+      jobEndpoint: '/v1/ai/build-schema/job',
+      stages: BUILD_SCHEMA_STAGES,
+      mode: 'build_schema',
+      title: 'Designing your app',
+      onComplete: (ev) => showSchemaDesignReviewCard(ev.schema, ev.design_brief, body),
+    });
+  }
+
+  function renderSchemaDesignCard(schema, designBrief, onConfirm, onCancel) {
+    const tables = schema?.tables || [];
+    const designLine = [designBrief?.personality, designBrief?.accent_color].filter(Boolean).join(' · ') || 'default theme';
+
+    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' },
+      el('div', { class: 'ai-intent-header' }, 'Schema & Design — review before generating frontend'),
+      el('div', { class: 'ai-plan-section' }, el('strong', {}, schema?.project_name || 'Untitled project')),
+      el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, `Tables (${tables.length})`),
+      ...tables.map(t => el('div', { class: 'ai-plan-item' }, `${t.name} (${(t.columns || []).length} col${(t.columns || []).length !== 1 ? 's' : ''})`)),
+      el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, 'Design: ' + designLine),
+      el('div', { class: 'ai-intent-actions', style: 'margin-top:14px' },
+        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
+        el('button', { class: 'btn btn-ai btn-sm', onClick: onConfirm }, 'Confirm → Generate Frontend')
+      )
+    );
+  }
+
+  function showSchemaDesignReviewCard(schema, designBrief, body) {
+    const container = panelEl?.querySelector('.ai-messages');
+    if (!container) return;
+    const card = renderSchemaDesignCard(
+      schema, designBrief,
+      async () => { card.remove(); await runBuildFrontendStage(schema, designBrief, body); },
+      () => { card.remove(); renderMessages(); }
+    );
+    container.appendChild(card);
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function runBuildFrontendStage(schema, designBrief, body) {
+    let sess = currentSession();
+    if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
+    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief };
+    return streamGenerate(jobBody, sess, {
+      jobEndpoint: '/v1/ai/build-frontend/job',
+      stages: BUILD_FRONTEND_STAGES,
+      mode: 'build_frontend',
+      title: 'Generating frontend code',
+      onComplete: (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation }),
+    });
+  }
+
   // Poll a job's progress until it resolves, replaying new stage events onto
   // the live progress card exactly like the old NDJSON stream did. Runs as a
   // server-side job (see ai_worker.php) independent of this page's lifetime —
@@ -1341,6 +1403,11 @@ const AiPanel = (() => {
   // opts.onComplete.
   async function streamGenerate(body, sess, opts) {
     const progressMsg = makeProgressMsg(opts.stages, opts.title, opts.mode);
+    // Stashed so a reload mid-job can reconstruct enough of the original
+    // request to resume correctly (see resumeActiveJobIfAny) — only the
+    // build_schema stage actually needs this today, to hand the prompt back
+    // to the schema/design confirm card once that job finishes.
+    progressMsg.data.resumePrompt = body.prompt;
     sess.messages.push(progressMsg);
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
@@ -1429,14 +1496,18 @@ const AiPanel = (() => {
 
     const pollState = { cancelled: false };
     activeJobPoll = pollState;
-    const onComplete = operationMode === 'build'
-      ? (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation })
+    const onComplete = operationMode === 'build' || operationMode === 'build_frontend'
+      ? (ev) => handlePlanResponse({ mode: ev.mode === 'build_frontend' ? 'build' : (ev.mode || 'build'), plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation })
+      : operationMode === 'build_schema'
+      ? (ev) => showSchemaDesignReviewCard(ev.schema, ev.design_brief, { prompt: progressMsg.data.resumePrompt })
       : operationMode === 'test'
       ? (ev) => { sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
           error: ev.error || null, screenshot: ev.screenshot || null,
         }}); }
-      : (ev) => applyPlan(ev.plan, 'edit', null, ev.validation);
+      : operationMode === 'edit'
+      ? (ev) => applyPlan(ev.plan, 'edit', null, ev.validation)
+      : (ev) => {}; // 'seed' has no follow-up UI beyond the progress card itself
 
     if (!liveTraceMsg) {
       liveTraceMsg = sess.messages.find(m => m.type === 'trace' && m.live) || { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
@@ -1462,8 +1533,10 @@ const AiPanel = (() => {
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
 
     // Both new builds and edits run as a job-backed generation with a live
-    // progress card. Edits auto-apply to staging on completion; builds show a
-    // 'plan' card requiring a manual Apply (see handlePlanResponse).
+    // progress card. This is only ever reached with Review off (see
+    // sendMessage), so both auto-apply straight through to staging on
+    // completion, with no manual gate until Publish to Live (see
+    // handlePlanResponse and applyPlan's willAutoTest).
     return body.project_id
       ? proceedWithEditStreaming(body, sess)
       : proceedWithPlanStreaming(body, sess);
@@ -1478,6 +1551,10 @@ const AiPanel = (() => {
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: response.message, usage: response.usage });
     } else if (response.mode === 'diagnose') {
       await addMessage(currentSessionId, { role: 'ai', type: 'diagnosis', content: '', data: response });
+    } else if (response.mode === 'build' && !reviewEnabled) {
+      // Review off = watch only: deploy to staging straight away, no manual
+      // Apply click — the only gate anyone gets is the final Publish to Live.
+      await applyPlan(response.plan, 'build', null, response.validation);
     } else if (response.mode === 'build' || response.mode === 'edit') {
       await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
     } else {
@@ -2282,7 +2359,7 @@ const AiPanel = (() => {
         actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Applying…'));
         card.classList.add('ai-plan-settled');
         await applyPlan(plan, mode, msg);
-      }}, '✓ Apply');
+      }}, mode === 'build' ? '✓ Deploy to Staging' : '✓ Apply');
 
       if (msg.applyError) {
         actionsDiv.appendChild(el('div', { class: 'ai-plan-error-notice' }, '✕ ' + msg.applyError));
@@ -2310,8 +2387,8 @@ const AiPanel = (() => {
     if (data.tables && data.tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables: ' + data.tables.map(t => t.name || t).join(', ')));
     if (data.added_tables && data.added_tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables added: ' + data.added_tables.join(', ')));
     if (data.added_columns && data.added_columns.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Columns: ' + data.added_columns.join(', ')));
-    if (data.site) lines.push(el('div', { class: 'ai-result-row' }, '✓ Frontend deployed'));
-    if (data.staging) lines.push(el('div', { class: 'ai-result-row' }, '✓ Changes deployed to staging (preview)'));
+    if (data.site && !data.staging) lines.push(el('div', { class: 'ai-result-row' }, '✓ Frontend deployed'));
+    if (data.staging) lines.push(el('div', { class: 'ai-result-row' }, '✓ Deployed to staging (preview)'));
 
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
 
@@ -2324,8 +2401,10 @@ const AiPanel = (() => {
       }, 'Open Project →'));
     }
 
-    // View Site button — shown when the build deployed a live site
-    if (data.site && data.site.id) {
+    // View Site button — shown only when the build deployed straight to a
+    // live site (no staging block); builds now always stage first, so this
+    // only applies to any future/legacy live-direct path.
+    if (data.site && data.site.id && !data.staging) {
       const siteUrl = `/sites/s${data.site.id}/current/`;
       actions.appendChild(el('a', {
         class: 'btn btn-secondary btn-sm',
@@ -2481,6 +2560,17 @@ const AiPanel = (() => {
     { key: 'schema',   label: 'Designing database schema' },
     { key: 'design',   label: 'Choosing a visual design' },
     { key: 'frontend', label: 'Generating frontend code' },
+  ];
+
+  // Review-on build splits the above into two confirmable stages: schema+design
+  // first (paused for user confirmation), then frontend on its own.
+  const BUILD_SCHEMA_STAGES = [
+    { key: 'schema', label: 'Designing database schema' },
+    { key: 'design', label: 'Choosing a visual design' },
+  ];
+  const BUILD_FRONTEND_STAGES = [
+    { key: 'frontend', label: 'Generating frontend code' },
+    { key: 'validate', label: 'Checking for mismatches' },
   ];
 
   const EDIT_PROGRESS_STAGES = [
@@ -2778,8 +2868,8 @@ const AiPanel = (() => {
         const names = result.tables.map(t => `${t.name} (${t.columns} col${t.columns !== 1 ? 's' : ''})`).join(', ');
         lines.push(`Created ${result.tables.length} table${result.tables.length !== 1 ? 's' : ''}: ${names}.`);
       }
-      if (result.site && result.deploy) lines.push('Frontend deployed and live.');
-      else if (result.site)             lines.push('Site created — no frontend files were generated.');
+      if (result.staging)   lines.push('Deployed to staging — preview, then publish to live.');
+      else if (result.site) lines.push('Site created — no frontend files were generated.');
     }
     if (mode === 'edit') {
       if (result.added_tables?.length)     lines.push(`Added ${result.added_tables.length} new table${result.added_tables.length !== 1 ? 's' : ''}: ${result.added_tables.join(', ')}.`);
@@ -2821,13 +2911,17 @@ const AiPanel = (() => {
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
 
+      // Edits always auto-test. Builds only auto-test when Review is off
+      // ("watch only" — everything runs straight through); with Review on,
+      // testing is its own confirmable stage — the user clicks Run Tests
+      // manually on the result card instead of it firing on its own.
+      const hasDeployed = !!(result.deploy || result.staging || result.site);
+      const willAutoTest = mode === 'edit' ? hasDeployed : (hasDeployed && !reviewEnabled);
       // Edits auto-apply (no separate review step), so validation shows here,
       // after the deploy — build mode already showed it in the plan card
       // before the user chose to apply at all. Skip this when auto-test is
-      // about to fire anyway (always, once a frontend actually deployed) —
-      // its combined test+validate card will show the same findings fresh
-      // moments later, and showing both would be redundant.
-      const willAutoTest = !!(result.deploy || result.staging || result.site);
+      // about to fire anyway — its combined test+validate card will show the
+      // same findings fresh moments later, and showing both would be redundant.
       if (mode === 'edit' && validation && !willAutoTest) {
         await addMessage(currentSessionId, { role: 'ai', type: 'validation', content: '', data: { findings: validation } });
       }

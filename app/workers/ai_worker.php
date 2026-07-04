@@ -68,6 +68,26 @@ try {
         $result = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $report, $validate);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'build'], $result));
 
+    } elseif ($mode === 'build_schema') {
+        // Review-on build, stage 1: schema + design brief only — the
+        // frontend pauses here for the user to confirm before any frontend
+        // code is generated.
+        $prompt         = $payload['prompt']  ?? '';
+        $history        = $payload['history'] ?? [];
+        $approvedIntent = $payload['intent']  ?? null;
+        $result = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
+        $catalog->markJobDone($jobId, array_merge(['mode' => 'build_schema'], $result));
+
+    } elseif ($mode === 'build_frontend') {
+        // Review-on build, stage 2: frontend + validate, against the schema
+        // and design brief the user already confirmed in stage 1.
+        $prompt      = $payload['prompt']       ?? '';
+        $schemaPlan  = $payload['schema']       ?? [];
+        $designBrief = $payload['design_brief'] ?? [];
+        $validate    = $payload['validate'] ?? true;
+        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $report, $validate);
+        $catalog->markJobDone($jobId, array_merge(['mode' => 'build_frontend'], $result));
+
     } elseif ($mode === 'edit') {
         $projectId = (int)($payload['project_id'] ?? 0);
         $prompt    = $payload['prompt']  ?? '';

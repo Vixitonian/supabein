@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS `ai_jobs` (
     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `user_id`    INT UNSIGNED NOT NULL,
     `session_id` INT UNSIGNED DEFAULT NULL,
-    `mode`       ENUM('build','edit','test','seed') NOT NULL,
+    `mode`       ENUM('build','edit','test','seed','build_schema','build_frontend') NOT NULL,
     `payload`    LONGTEXT NOT NULL,
     `progress`   LONGTEXT DEFAULT NULL,
     `status`     ENUM('queued','running','done','failed','cancelled') NOT NULL DEFAULT 'queued',
@@ -271,3 +271,7 @@ SET foreign_key_checks = 1;
 -- ─── Migration: ai_jobs seed mode (run once on existing installs) ───────────
 -- ALTER TABLE `ai_jobs`
 --   MODIFY COLUMN `mode` ENUM('build','edit','test','seed') NOT NULL;
+
+-- ─── Migration: ai_jobs build_schema/build_frontend modes (run once on existing installs) ───
+-- ALTER TABLE `ai_jobs`
+--   MODIFY COLUMN `mode` ENUM('build','edit','test','seed','build_schema','build_frontend') NOT NULL;
