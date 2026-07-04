@@ -1117,6 +1117,23 @@ function ai_deploy_files(
         return ['error' => implode('; ', $errors), 'deploy' => null];
     }
 
+    // Ensure the error-capture script tag on whatever index.html actually
+    // ended up in the deploy dir — not just one freshly written this round.
+    // An edit job that doesn't touch index.html merges the file forward
+    // unchanged from the previous deploy (see $mergeFromCurrent above), so
+    // checking only $frontendFiles here would miss every such deploy. Reading
+    // back off disk after both the merge and the write loop is what makes
+    // this actually unconditional on every deploy, matching the doc comment
+    // on ai_ensure_error_script_tag().
+    $indexPath = $deployDir . '/index.html';
+    if (is_file($indexPath)) {
+        $indexHtml = file_get_contents($indexPath);
+        $patched   = ai_ensure_error_script_tag((string)$indexHtml);
+        if ($patched !== $indexHtml) {
+            file_put_contents($indexPath, $patched);
+        }
+    }
+
     // Hardening .htaccess (force-written, cannot be skipped).
     $htaccess = \SupaBein\Deploy::buildHardeningHtaccess(true);
     file_put_contents($deployDir . '/.htaccess', $htaccess);
