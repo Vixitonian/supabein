@@ -37,6 +37,13 @@ class MaxTokensProbe
     {
         if (preg_match('/max_tokens:\s*\d+\s*>\s*(\d+)/i', $errorMessage, $m)) {
             $limit = (int)$m[1];
+        } elseif (preg_match('/can only afford (\d+)/i', $errorMessage, $m)) {
+            // OpenRouter's credit-balance phrasing: "You requested up to N
+            // tokens, but can only afford M" — not a model capability limit
+            // at all, but the same fix applies: shrink to what's actually
+            // affordable and retry, which is exactly "use the max you can"
+            // when the ceiling is the account's balance rather than the model.
+            $limit = (int)$m[1];
         } elseif (preg_match('/(?:max(?:imum)?|at most|supports up to)[^\d]{0,40}?(\d{3,7})\s*(?:completion|output)\s*tokens?/i', $errorMessage, $m)) {
             // The qualifier ("completion"/"output") is required, not optional —
             // a bare "maximum context length is N tokens" is a totally different

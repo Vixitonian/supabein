@@ -113,7 +113,12 @@ class OpenRouterClient
                 // always) states the real ceiling for this model/provider, so
                 // shrink to it and retry — same mechanism as AnthropicClient,
                 // and what replaced the old hand-maintained override table.
-                if ($attempt < 4 && $httpCode === 400 && stripos($msg, 'token') !== false) {
+                // Not gated on a specific HTTP status: OpenRouter's own
+                // credit-balance variant of this error ("can only afford N")
+                // has been observed on codes other than a plain 400, and
+                // extractLimit() itself is already the real safety gate —
+                // it only ever returns a value strictly below what was sent.
+                if ($attempt < 4 && stripos($msg, 'token') !== false) {
                     $corrected = MaxTokensProbe::extractLimit($msg, $maxTokens);
                     if ($corrected !== null) {
                         $maxTokens = $corrected;
