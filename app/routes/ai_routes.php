@@ -2947,6 +2947,52 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     ];
 }
 
+// Full watch-only (Review off) pipeline: generation, deploy, and test as ONE
+// job — not three separately-orchestrated frontend steps. That matters for
+// more than tidiness: a job's progress/result survive a page reload because
+// the client reconnects by jobId and replays persisted progress events; three
+// separate client-driven steps chained by JS awaits do NOT survive a reload
+// (a backgrounded mobile tab reloading mid-build lost the in-memory chain
+// entirely, leaving "Deploying to staging"/"Running tests" stuck pending
+// forever while a completely different, older code path took over instead).
+// Doing deploy+test inside the same job gives them the same resumability
+// as generation for free.
+function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId): array
+{
+    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $report, $validate);
+
+    $report(['stage' => 'deploy', 'status' => 'start', 'label' => 'Deploying to staging…']);
+    $applyResult = ai_execute_build($genResult['plan'], $userId);
+    $report(['stage' => 'deploy', 'status' => 'done', 'label' => 'Deployed',
+             'detail' => $applyResult['staging'] ? 'Deployed to staging' : ($applyResult['site'] ? 'Site created — no frontend deployed' : 'No site created')]);
+
+    $hasDeployed = !empty($applyResult['deploy']) || !empty($applyResult['staging']) || !empty($applyResult['site']);
+    $testResult  = null;
+    if ($hasDeployed && !empty($applyResult['project']['id'])) {
+        $report(['stage' => 'test', 'status' => 'start', 'label' => 'Running tests…']);
+        // The test job's own sub-stages (script/stories/run/validate) would
+        // otherwise collide with this pipeline's own 'validate' stage key —
+        // remap them all onto this single outer 'test' stage's detail text
+        // instead, so its one row narrates "Preparing test script…" through
+        // to a final pass/fail count as it goes.
+        $testReport = function (array $ev) use ($report) {
+            $report(['stage' => 'test', 'status' => 'active', 'label' => 'Running tests…',
+                     'detail' => $ev['label'] . (!empty($ev['detail']) ? ' — ' . $ev['detail'] : '')]);
+        };
+        try {
+            $testResult = ai_run_project_tests((int)$applyResult['project']['id'], $userId, $catalog, $config, $testReport, $client);
+            $passed = $testResult['passed'] ?? 0; $failed = $testResult['failed'] ?? 0;
+            $report(['stage' => 'test', 'status' => 'done', 'label' => 'Tests finished', 'detail' => "{$passed} passed, {$failed} failed"]);
+        } catch (\Throwable $e) {
+            $report(['stage' => 'test', 'status' => 'error', 'label' => 'Testing failed', 'detail' => $e->getMessage()]);
+        }
+    } else {
+        $report(['stage' => 'test', 'status' => 'done', 'label' => 'Nothing to test', 'detail' => 'No frontend was deployed']);
+    }
+
+    return array_merge($genResult, ['apply' => $applyResult, 'test' => $testResult]);
+}
+
 // Stage 1+2 of a build: schema (with one self-correcting retry) and a
 // best-effort visual design brief. Split out from frontend generation so the
 // "Review" build flow can pause here and let the user confirm the schema and

@@ -1295,59 +1295,54 @@ const AiPanel = (() => {
   // Review-off ("watch only") build: one continuous progress card spanning
   // requirements → schema → design → frontend → validate → deploy → test,
   // with zero manual gates — the only interaction anywhere is the Publish to
-  // Live button on the result card once everything's done.
+  // Live button on the result card once everything's done. Deploy and test
+  // now happen SERVER-SIDE as part of the same job (see ai_run_build_and_deploy
+  // in ai_routes.php) instead of two more client-driven HTTP calls chained by
+  // JS awaits — those didn't survive a reload (a backgrounded mobile tab could
+  // resume mid-build and lose the whole chain), a job polled by id does.
   async function runBuildWatchOnly(body, sess) {
     return streamGenerate(body, sess, {
       jobEndpoint: '/v1/ai/build/job',
       stages: BUILD_WATCH_ONLY_STAGES,
       mode: 'build',
       title: 'Building your app',
-      onComplete: async (ev, progressMsg) => {
-        const applyResult = await deployBuildResult(ev.plan, progressMsg, sess);
-        if (!applyResult) return; // deploy failed — error already surfaced, stage marked
-        await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: applyResult });
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(applyResult, 'build') });
-        reattachBuildProject(applyResult, sess);
-
-        const hasDeployed = !!(applyResult.deploy || applyResult.staging || applyResult.site);
-        if (!hasDeployed) {
-          progressSetStage(progressMsg, 'test', 'done', 'Nothing to test — no frontend was deployed');
-          return;
-        }
-        const testProjectId = applyResult.project?.id || applyResult.staging?.project_id;
-        progressSetStage(progressMsg, 'deploy', 'done', applyResult.staging ? 'Deployed to staging' : 'Deployed');
-        progressSetStage(progressMsg, 'test', 'active');
-        renderMessages();
-        await runTestsForBuildPipeline(testProjectId, progressMsg, sess);
-      },
+      onComplete: (ev, progressMsg) => finishBuildWatchOnly(ev, sess, progressMsg),
     });
   }
 
-  // Deploys a freshly-generated build plan to staging, updating the SAME
-  // progress card's 'deploy' stage instead of a separate thinking/trace
-  // sequence — used only by the watch-only pipeline above (Review-on builds
-  // deploy via the existing manual Apply button / applyPlan() instead).
-  async function deployBuildResult(plan, progressMsg, sess) {
-    progressSetStage(progressMsg, 'deploy', 'active');
-    renderMessages();
-    try {
-      const { provider, model } = getSelectedModel();
-      const t0 = Date.now();
-      const result = await Api.post('/v1/ai/apply', { mode: 'build', plan, provider, model });
-      if (liveTraceMsg) liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode: 'build', provider, model }, status: 200, outputs: result, ms: Date.now() - t0 });
-      return result;
-    } catch (e) {
-      console.error('[AiPanel] deploy to staging failed', e);
-      progressSetStage(progressMsg, 'deploy', 'error', e.message);
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'Deploy failed: ' + e.message, retryBody: { plan, mode: 'build' }, retryType: 'apply' });
-      renderMessages();
-      return null;
+  // Renders the single result/action card (project, tables, deploy status,
+  // Publish/View Staging/Seed buttons) and folds the test+validation results
+  // into the 'test' stage's own expandable detail instead of a third card —
+  // shared by the live completion path above and the reload-resume path
+  // below so both end up in exactly the same two-card state.
+  async function finishBuildWatchOnly(ev, sess, progressMsg) {
+    const applyResult = ev.apply || {};
+    reattachBuildProject(applyResult, sess);
+    await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: applyResult });
+
+    if (!progressMsg) return;
+    progressSetStage(progressMsg, 'deploy', 'done');
+    const deployStage = progressMsg.data.stages.find(s => s.key === 'deploy');
+    if (deployStage) deployStage.rawData = applyResult;
+    const testStage = progressMsg.data.stages.find(s => s.key === 'test');
+    if (testStage) {
+      const t = ev.test;
+      progressSetStage(progressMsg, 'test', 'done', t ? `${t.passed || 0} passed, ${t.failed || 0} failed` : 'Nothing to test');
+      if (t) {
+        testStage.testData = {
+          stories: t.stories || [], passed: t.passed || 0, failed: t.failed || 0,
+          error: t.error || null, screenshot: t.screenshot || null,
+          validation: t.validation || ev.validation || [],
+        };
+      }
     }
+    renderMessages();
   }
 
   // Same project/session reattachment applyPlan() does for a fresh build —
-  // duplicated in miniature here since the watch-only pipeline deploys via
-  // deployBuildResult() directly instead of going through applyPlan().
+  // duplicated in miniature here since the watch-only pipeline gets its
+  // deploy result directly from the completed job instead of going through
+  // applyPlan()/`/v1/ai/apply` itself.
   function reattachBuildProject(result, sess) {
     if (!(result.project?.id && !selectedProjectId)) return;
     const oldKey = aiSidKey();
@@ -1358,43 +1353,6 @@ const AiPanel = (() => {
     localStorage.setItem(aiSidKey(), currentSessionId);
     Api.patch('/v1/ai/sessions/' + currentSessionId, { project_id: selectedProjectId }).catch(() => {});
     renderProjectPicker();
-  }
-
-  // Runs the test job against the SAME outer progress card's 'test' stage
-  // instead of creating its own — used only by the watch-only build pipeline.
-  // The test job's own sub-stages (script/stories/run/validate) don't match
-  // any key in the outer stage list, so pollJob silently ignores them; the
-  // 'test' row just shows active until this resolves, then gets a summary.
-  async function runTestsForBuildPipeline(projectId, progressMsg, sess) {
-    if (!projectId) { progressSetStage(progressMsg, 'test', 'done', 'No project to test'); return; }
-    try {
-      const { provider, model } = getSelectedModel();
-      const jobBody = { project_id: projectId, provider, model };
-      if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
-      const created = await Api.post('/v1/ai/test/job', jobBody);
-      const pollState = { cancelled: false };
-      activeJobPoll = pollState;
-      const finalEv = await pollJob(created.job_id, progressMsg, pollState, sess);
-      if (activeJobPoll === pollState) activeJobPoll = null;
-
-      if (finalEv) {
-        const passed = finalEv.passed || 0, failed = finalEv.failed || 0, total = passed + failed;
-        progressSetStage(progressMsg, 'test', 'done',
-          total === 0 ? 'No stories generated' : failed === 0 ? `All ${passed} passed` : `${passed}/${total} passed`);
-        sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
-          stories: finalEv.stories || [], passed, failed,
-          error: finalEv.error || null, screenshot: finalEv.screenshot || null,
-          validation: finalEv.validation || [],
-        }});
-      } else if (!pollState.cancelled) {
-        console.error('[AiPanel] auto-test after build failed', { projectId, error: progressMsg.data.error });
-        progressSetStage(progressMsg, 'test', 'error', progressMsg.data.error || 'Testing failed');
-      }
-    } catch (err) {
-      console.error('[AiPanel] auto-test after build threw', err);
-      progressSetStage(progressMsg, 'test', 'error', err.message);
-    }
-    renderMessages();
   }
 
   function proceedWithEditStreaming(body, sess) {
@@ -1625,14 +1583,16 @@ const AiPanel = (() => {
 
     const pollState = { cancelled: false };
     activeJobPoll = pollState;
-    const onComplete = operationMode === 'build' || operationMode === 'build_frontend'
-      ? (ev) => handlePlanResponse({ mode: ev.mode === 'build_frontend' ? 'build' : (ev.mode || 'build'), plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation })
+    const onComplete = operationMode === 'build'
+      ? (ev) => finishBuildWatchOnly(ev, sess, progressMsg)
+      : operationMode === 'build_frontend'
+      ? (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation })
       : operationMode === 'build_schema'
       ? (ev) => showSchemaDesignReviewCard(ev.schema, ev.design_brief, { prompt: progressMsg.data.resumePrompt })
       : operationMode === 'test'
       ? (ev) => { sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
-          error: ev.error || null, screenshot: ev.screenshot || null,
+          error: ev.error || null, screenshot: ev.screenshot || null, validation: ev.validation || [],
         }}); }
       : operationMode === 'edit'
       ? (ev) => applyPlan(ev.plan, 'edit', null, ev.validation)
@@ -2584,13 +2544,12 @@ const AiPanel = (() => {
       }
     }
 
-    // Run Tests — exercise the app's user stories right after building/editing.
+    // Seed App — testing already ran automatically as part of the build/edit
+    // itself (see the stages card's 'test' row), so there's no separate
+    // "Run Tests" button here; re-testing on demand lives in the input bar's
+    // "Run Full Test" button instead, scoped to an existing project's session.
     const testProjectId = data.project?.id || data.staging?.project_id || selectedProjectId;
     if (testProjectId && (data.site || data.project || data.staging)) {
-      const runBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '▶ Run Tests');
-      runBtn.addEventListener('click', () => runProjectTests(testProjectId, runBtn));
-      actions.appendChild(runBtn);
-
       const seedBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '🌱 Seed App');
       seedBtn.addEventListener('click', () => runProjectSeed(testProjectId, seedBtn));
       actions.appendChild(seedBtn);
@@ -2798,18 +2757,35 @@ const AiPanel = (() => {
       const icon = s.status === 'active'
         ? el('span', { class: 'ai-progress-spin' })
         : el('span', { class: 'ai-progress-icon ai-progress-icon--' + s.status }, ICON[s.status] || '○');
-      // Once a stage has something to show (detail text, or full AI-call
-      // trace once the job finishes), its row becomes a click-to-expand
-      // disclosure instead of a static line — "click the stage, see the
-      // details" instead of a wall of always-on text.
-      if (s.detail || (s.traceEntries && s.traceEntries.length)) {
+      // Once a stage has something to show (detail text, the matching raw AI
+      // call trace, or — for the 'test' stage — the full test+validation
+      // breakdown), its row becomes a click-to-expand disclosure instead of a
+      // static line. Expand state is stored on the stage object itself (not
+      // just left as DOM state) so it survives the frequent re-renders that
+      // happen while later stages are still progressing — otherwise every
+      // renderMessages() call would rebuild fresh <details> elements and
+      // silently re-collapse whatever the user had opened.
+      const hasExpandable = s.detail || (s.traceEntries && s.traceEntries.length) || s.testData || s.rawData;
+      if (hasExpandable) {
         const summary = el('summary', { class: 'ai-progress-summary' }, icon, el('span', { class: 'ai-progress-label ai-progress-label--clickable' }, s.label));
         const body = el('div', { class: 'ai-progress-detail-body' });
         if (s.detail) body.appendChild(el('div', { class: 'ai-progress-detail' }, s.detail));
         if (s.traceEntries && s.traceEntries.length) {
           body.appendChild(el('div', { class: 'ai-progress-trace' }, ...s.traceEntries.map(renderAiCallEntry)));
         }
-        return el('details', { class: 'ai-progress-row ai-progress-row--' + s.status }, summary, body);
+        if (s.testData) {
+          body.appendChild(renderTestCard({ id: (msg.id || 'progress') + '_test', data: s.testData }));
+        }
+        if (s.rawData) {
+          body.appendChild(el('details', { class: 'ai-trace-sub' },
+            el('summary', {}, 'Raw deploy result'),
+            el('pre', { class: 'ai-trace-json' }, JSON.stringify(s.rawData, null, 2))
+          ));
+        }
+        const details = el('details', { class: 'ai-progress-row ai-progress-row--' + s.status }, summary, body);
+        details.open = !!s.expanded;
+        details.addEventListener('toggle', () => { s.expanded = details.open; });
+        return details;
       }
       const textWrap = el('div', { class: 'ai-progress-text' },
         el('div', { class: 'ai-progress-label' }, s.label)
@@ -3083,12 +3059,18 @@ const AiPanel = (() => {
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
 
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
-      await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+      // Builds keep it to the result card alone (project/tables/deploy status
+      // + action buttons) — a separate "Done! **X** is ready..." narration on
+      // top of that read as redundant, overly technical noise. Edits still
+      // get the summary since their result card alone doesn't say what changed.
+      if (mode === 'edit') {
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+      }
 
       // Edits always auto-test. Builds only auto-test when Review is off
       // ("watch only" — everything runs straight through); with Review on,
-      // testing is its own confirmable stage — the user clicks Run Tests
-      // manually on the result card instead of it firing on its own.
+      // testing is its own confirmable stage — the user clicks "Run Full Test"
+      // in the input bar manually instead of it firing on its own.
       const hasDeployed = !!(result.deploy || result.staging || result.site);
       const willAutoTest = mode === 'edit' ? hasDeployed : (hasDeployed && !reviewEnabled);
       // Edits auto-apply (no separate review step), so validation shows here,
@@ -3182,11 +3164,15 @@ const AiPanel = (() => {
     // switched mid-conversation, so history stays per-project.
     const projectLabel = el('span', { class: 'ai-project-label' }, '');
 
+    // Manual re-test on demand — only useful once there's an existing project
+    // to test (a fresh build already auto-tests as part of its own pipeline),
+    // so this only shows inside an existing project's AI session.
     const runTestsBtn = el('button', {
       class: 'btn btn-secondary btn-sm ai-run-tests-btn',
       style: selectedProjectId ? '' : 'display:none',
+      title: 'Re-run the full browser test suite against this project',
       onClick: () => runProjectTests(selectedProjectId, runTestsBtn)
-    }, '▶ Run Tests');
+    }, '▶ Run Full Test');
 
     const textarea = el('textarea', {
       id: 'ai-textarea',
