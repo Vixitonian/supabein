@@ -2943,7 +2943,7 @@ const AiPanel = (() => {
         retryBtn.addEventListener('click', async () => {
           retryBtn.disabled = true;
           retryBtn.textContent = 'Retrying…';
-          try { await data.retry(); }
+          try { await data.retry(msg); }
           catch (e) { console.error('[AiPanel] retry failed', e); retryBtn.disabled = false; retryBtn.textContent = '↻ Retry'; }
         });
         card.appendChild(retryBtn);
