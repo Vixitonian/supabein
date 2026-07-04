@@ -1318,7 +1318,17 @@ const AiPanel = (() => {
   async function finishBuildWatchOnly(ev, sess, progressMsg) {
     const applyResult = ev.apply || {};
     reattachBuildProject(applyResult, sess);
-    await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: applyResult });
+    // Carry the schema/frontend plan and test results onto the result card's
+    // own data (not just the progress card's stage details) so its Download
+    // JSON button can export the whole build in one file — the job result
+    // (ev) already has all of this, it just isn't otherwise attached to the
+    // message the result card renders from.
+    await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: {
+      ...applyResult,
+      plan: ev.plan || null,
+      test: ev.test || null,
+      validation: ev.validation || [],
+    } });
 
     if (!progressMsg) return;
     progressSetStage(progressMsg, 'deploy', 'done');
@@ -2553,6 +2563,25 @@ const AiPanel = (() => {
       const seedBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '🌱 Seed App');
       seedBtn.addEventListener('click', () => runProjectSeed(testProjectId, seedBtn));
       actions.appendChild(seedBtn);
+    }
+
+    // Download JSON — schema + generated frontend files + test/validation
+    // results all in one file, the Review-off equivalent of the old plan
+    // card's "Download plan JSON" button (which only ever had the plan,
+    // since that flow paused before testing ever ran).
+    if (data.plan) {
+      const dlBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '⭳ Download JSON');
+      dlBtn.addEventListener('click', () => {
+        const name = (data.plan.project_name || data.project?.name || 'build').replace(/\s+/g, '-').toLowerCase();
+        downloadJson(`${name}.json`, {
+          project_name: data.plan.project_name,
+          tables: data.plan.tables || [],
+          frontend_files: data.plan.frontend?.files || [],
+          test_results: data.test || null,
+          validation: data.validation || [],
+        });
+      });
+      actions.appendChild(dlBtn);
     }
 
     if (actions.children.length) card.appendChild(actions);
