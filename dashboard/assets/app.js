@@ -1409,8 +1409,10 @@ const AiPanel = (() => {
       mode: 'edit',
       title: 'Updating your app',
       // Auto-apply the edit straight to staging (no extra Deploy click), then the
-      // result card offers View Staging + Publish to Live.
-      onComplete: (ev) => applyPlan(ev.plan, 'edit', null, ev.validation),
+      // result card offers View Staging + Publish to Live. Pass the progress
+      // card through so the post-deploy auto-test folds into its 'test'
+      // stage instead of spawning a separate card.
+      onComplete: (ev, pMsg) => applyPlan(ev.plan, 'edit', null, ev.validation, pMsg),
     }, existingProgressMsg, (msg) => proceedWithEditStreaming(body, sess, msg));
   }
 
@@ -1520,7 +1522,14 @@ const AiPanel = (() => {
       }
 
       const hadNewEvents = job.events && job.events.length > 0;
-      (job.events || []).forEach(ev => applyProgressEvent(progressMsg, ev));
+      try {
+        (job.events || []).forEach(ev => applyProgressEvent(progressMsg, ev));
+      } catch (e) {
+        // A single malformed progress event must never kill the whole poll
+        // loop — that would leave the card spinning forever even though the
+        // job keeps running (and eventually resolving) server-side.
+        console.error('[AiPanel] applyProgressEvent failed', e);
+      }
       since = job.event_count;
       renderMessages();
       // Keep the persisted snapshot current so leaving mid-job and coming back
@@ -1629,43 +1638,57 @@ const AiPanel = (() => {
     renderMessages();
     await persistSession(sess);
 
-    const finalEv = await pollJob(jobId, progressMsg, pollState, sess);
-    if (activeJobPoll === pollState) activeJobPoll = null;
+    try {
+      const finalEv = await pollJob(jobId, progressMsg, pollState, sess);
+      if (activeJobPoll === pollState) activeJobPoll = null;
 
-    if (!finalEv) {
-      if (pollState.cancelled) {
-        // user-initiated stop — clean up silently, same as the old abort path
-        sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
+      if (!finalEv) {
+        if (pollState.cancelled) {
+          // user-initiated stop — clean up silently, same as the old abort path
+          sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
+        } else {
+          const emsg = progressMsg.data.error || 'The job failed — please try again.';
+          progressMsg.data.error = emsg;
+          console.error('[AiPanel] job failed', { jobEndpoint: opts.jobEndpoint, jobId, error: emsg });
+          liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 0, outputs: { error: emsg }, ms: Date.now() - t0 });
+        }
       } else {
-        const emsg = progressMsg.data.error || 'The job failed — please try again.';
-        progressMsg.data.error = emsg;
-        console.error('[AiPanel] job failed', { jobEndpoint: opts.jobEndpoint, jobId, error: emsg });
-        liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 0, outputs: { error: emsg }, ms: Date.now() - t0 });
+        liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
+        renderMessages();
+        try {
+          await opts.onComplete(finalEv, progressMsg);
+        } catch (e) {
+          console.error('[AiPanel] onComplete handler failed', { jobEndpoint: opts.jobEndpoint, jobId, error: e });
+          progressSetStage(progressMsg, progressMsg.data.stages.find(s => s.status === 'active')?.key, 'error', e.message);
+          progressMsg.data.error = e.message || 'Something went wrong after generation finished.';
+          // No retry button here on purpose: the job itself already succeeded
+          // server-side (this failure is in applying/displaying the result), so
+          // "retry" re-running the whole generation would just redo already-
+          // successful work rather than fix anything.
+          progressMsg.data.retry = null;
+        }
       }
-    } else {
-      liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
+    } catch (e) {
+      // Belt-and-suspenders: pollJob itself is expected to swallow its own
+      // errors and resolve to null, but if anything upstream ever throws
+      // instead, this is what stands between that and a card stuck spinning
+      // forever with no visible error — the exact "stuck loading" failure
+      // mode this whole try/finally exists to eliminate.
+      console.error('[AiPanel] streamGenerate poll/complete failed unexpectedly', { jobEndpoint: opts.jobEndpoint, jobId, error: e });
+      const active = progressMsg.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
+      progressMsg.data.jobDone = true;
+      progressMsg.data.error = progressMsg.data.error || e.message || 'Something went wrong.';
+    } finally {
+      if (activeJobPoll === pollState) activeJobPoll = null;
+      if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+      operationInProgress = false;
+      operationMode = null;
+      updateSendBtn();
+      try { await persistSession(sess); } catch (_) {}
+      renderSidebar();
       renderMessages();
-      try {
-        await opts.onComplete(finalEv, progressMsg);
-      } catch (e) {
-        console.error('[AiPanel] onComplete handler failed', { jobEndpoint: opts.jobEndpoint, jobId, error: e });
-        progressSetStage(progressMsg, progressMsg.data.stages.find(s => s.status === 'active')?.key, 'error', e.message);
-        progressMsg.data.error = e.message || 'Something went wrong after generation finished.';
-        // No retry button here on purpose: the job itself already succeeded
-        // server-side (this failure is in applying/displaying the result), so
-        // "retry" re-running the whole generation would just redo already-
-        // successful work rather than fix anything.
-        progressMsg.data.retry = null;
-      }
     }
-
-    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-    operationInProgress = false;
-    operationMode = null;
-    updateSendBtn();
-    await persistSession(sess);
-    renderSidebar();
-    renderMessages();
   }
 
   // Called when the panel opens or a session is switched to: if the loaded
@@ -1695,7 +1718,21 @@ const AiPanel = (() => {
           error: ev.error || null, screenshot: ev.screenshot || null, validation: ev.validation || [],
         }}); }
       : operationMode === 'edit'
-      ? (ev) => applyPlan(ev.plan, 'edit', null, ev.validation)
+      ? (ev) => applyPlan(ev.plan, 'edit', null, ev.validation, progressMsg)
+      : operationMode === 'edit_test'
+      // Resuming mid-auto-test (the edit itself already applied before the
+      // reload) — just finish the test stage in place, same as
+      // runEditAutoTest()'s own success path, instead of re-running the edit.
+      ? (ev) => {
+          progressSetStage(progressMsg, 'test', 'done', `${ev.passed || 0} passed, ${ev.failed || 0} failed`);
+          const testStage = progressMsg.data.stages.find(s => s.key === 'test');
+          if (testStage) {
+            testStage.testData = {
+              stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
+              error: ev.error || null, screenshot: ev.screenshot || null, validation: ev.validation || [],
+            };
+          }
+        }
       : (ev) => {}; // 'seed' has no follow-up UI beyond the progress card itself
 
     if (!liveTraceMsg) {
@@ -1704,16 +1741,26 @@ const AiPanel = (() => {
     }
 
     (async () => {
-      const finalEv = await pollJob(progressMsg.data.jobId, progressMsg, pollState, sess);
-      if (activeJobPoll === pollState) activeJobPoll = null;
-      if (finalEv) await onComplete(finalEv);
-      if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-      operationInProgress = false;
-      operationMode = null;
-      updateSendBtn();
-      await persistSession(sess);
-      renderSidebar();
-      renderMessages();
+      try {
+        const finalEv = await pollJob(progressMsg.data.jobId, progressMsg, pollState, sess);
+        if (activeJobPoll === pollState) activeJobPoll = null;
+        if (finalEv) await onComplete(finalEv);
+      } catch (e) {
+        console.error('[AiPanel] resumeActiveJobIfAny failed unexpectedly', e);
+        const active = progressMsg.data.stages.find(s => s.status === 'active');
+        if (active) active.status = 'error';
+        progressMsg.data.jobDone = true;
+        progressMsg.data.error = progressMsg.data.error || e.message || 'Something went wrong.';
+      } finally {
+        if (activeJobPoll === pollState) activeJobPoll = null;
+        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+        operationInProgress = false;
+        operationMode = null;
+        updateSendBtn();
+        try { await persistSession(sess); } catch (_) {}
+        renderSidebar();
+        renderMessages();
+      }
     })();
   }
 
@@ -2813,6 +2860,7 @@ const AiPanel = (() => {
   const EDIT_PROGRESS_STAGES = [
     { key: 'read',    label: 'Reading current schema & files' },
     { key: 'changes', label: 'Generating changes' },
+    { key: 'test',    label: 'Running tests' },
   ];
 
   const TEST_PROGRESS_STAGES = [
@@ -3183,10 +3231,11 @@ const AiPanel = (() => {
     return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
   }
 
-  async function applyPlan(plan, mode, planMsg, validation) {
+  async function applyPlan(plan, mode, planMsg, validation, progressMsg) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
     let autoTestProjectId = null;
+    let aborted = false;
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
 
     if (!liveTraceMsg) {
@@ -3204,9 +3253,9 @@ const AiPanel = (() => {
       const t0 = Date.now();
       const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel }, currentAbortController.signal);
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
-      renderMessages();
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      renderMessages();
 
       await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
       // Builds keep it to the result card alone (project/tables/deploy status
@@ -3257,39 +3306,106 @@ const AiPanel = (() => {
       }
     } catch(e) {
       if (e instanceof DOMException && e.name === 'AbortError') {
-        if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-        operationInProgress = false; operationMode = null; currentAbortController = null;
-        updateSendBtn(); renderMessages();
-        return;
+        aborted = true;
+      } else {
+        console.error('[AiPanel] /v1/ai/apply failed', { mode, status: e.status, error: e });
+        liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
+
+        if (planMsg) {
+          planMsg.settled = false;
+          planMsg.applyError = e.message;
+          saveSessions();
+        } else {
+          await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: { plan, mode }, retryType: 'apply' });
+        }
       }
-      console.error('[AiPanel] /v1/ai/apply failed', { mode, status: e.status, error: e });
-      liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
-      renderMessages();
+    } finally {
+      // Guaranteed to run no matter what happened above — a successful apply,
+      // a caught API error, an abort, or an unexpected exception thrown while
+      // rendering/persisting the result (e.g. a bad addMessage call). Without
+      // this being unconditional, any such exception left the thinking bubble
+      // and the busy/spinner state stuck on screen forever even though the
+      // job itself had already resolved server-side — the exact "stuck
+      // loading" failure reported live.
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-
-      if (planMsg) {
-        planMsg.settled = false;
-        planMsg.applyError = e.message;
-        saveSessions();
-      } else {
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: `Something went wrong: ${e.message}`, retryBody: { plan, mode }, retryType: 'apply' });
-      }
+      if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
+      operationInProgress = false;
+      operationMode = null;
+      currentAbortController = null;
+      updateSendBtn();
+      if (sess) { try { await persistSession(sess); } catch (_) {} }
+      renderMessages();
     }
 
-    if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
-    operationInProgress = false;
-    operationMode = null;
-    currentAbortController = null;
-    updateSendBtn();
-    if (sess) await persistSession(sess);
-
-    renderMessages();
-
     // Kick off the automatic post-deploy test run after the apply operation
-    // has fully wound down (it manages its own progress card and job state).
-    if (autoTestProjectId) runProjectTests(autoTestProjectId, null, true);
+    // has fully wound down. When the caller handed us the still-live progress
+    // card (the job-backed edit flow) and it has its own 'test' stage, fold
+    // results into that same card instead of spawning a separate one.
+    if (!aborted && autoTestProjectId) {
+      const testStage = progressMsg?.data?.stages?.find(s => s.key === 'test');
+      if (testStage) {
+        runEditAutoTest(autoTestProjectId, progressMsg, sess);
+      } else {
+        runProjectTests(autoTestProjectId, null, true);
+      }
+    }
+  }
+
+  // Runs the post-edit auto-test job and folds its result into the given
+  // progress card's own 'test' stage (mirroring finishBuildWatchOnly), instead
+  // of runProjectTests()'s separate "Auto-testing your app" card — so an edit
+  // shows one continuous card from "Reading current schema" through "Running
+  // tests", same as a watch-only build. The standalone /v1/ai/test/job still
+  // reports its own finer-grained stage keys ('script'/'stories'/'run'/
+  // 'validate'); progressSetStage no-ops for keys this card doesn't have, so
+  // they're silently ignored mid-poll and the 'test' stage is only set
+  // explicitly once the job resolves.
+  async function runEditAutoTest(projectId, progressMsg, sess) {
+    if (!projectId || !progressMsg || !sess) return;
+    const testStage = progressMsg.data.stages.find(s => s.key === 'test');
+    if (!testStage) return;
+    try {
+      const { provider, model } = getSelectedModel();
+      const jobBody = { project_id: projectId, provider, model };
+      if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
+      const created = await Api.post('/v1/ai/test/job', jobBody);
+      // Point the card's own jobId at this sub-job and clear jobDone so a
+      // reload mid-test still finds an unresolved job to resume, instead of
+      // resumeActiveJobIfAny() skipping it because the earlier edit job
+      // already flipped jobDone to true when it finished. Retag mode too —
+      // resumeActiveJobIfAny() dispatches on it, and a resumed 'edit' would
+      // wrongly re-run applyPlan() (re-POSTing to /v1/ai/apply) instead of
+      // just finishing off the test that's actually still in flight.
+      progressMsg.data.jobId = created.job_id;
+      progressMsg.data.jobDone = false;
+      progressMsg.data.mode = 'edit_test';
+      const pollState = { cancelled: false };
+      activeJobPoll = pollState;
+      await persistSession(sess);
+
+      const finalEv = await pollJob(created.job_id, progressMsg, pollState, sess);
+      if (activeJobPoll === pollState) activeJobPoll = null;
+
+      if (finalEv) {
+        progressSetStage(progressMsg, 'test', 'done', `${finalEv.passed || 0} passed, ${finalEv.failed || 0} failed`);
+        testStage.testData = {
+          stories: finalEv.stories || [], passed: finalEv.passed || 0, failed: finalEv.failed || 0,
+          error: finalEv.error || null, screenshot: finalEv.screenshot || null,
+          validation: finalEv.validation || [],
+        };
+      } else if (!pollState.cancelled) {
+        testStage.status = 'error';
+        testStage.detail = progressMsg.data.error || 'Test run failed';
+      }
+    } catch (e) {
+      console.error('[AiPanel] edit auto-test failed', e);
+      testStage.status = 'error';
+      testStage.detail = e.message || 'Test run failed';
+    } finally {
+      try { await persistSession(sess); } catch (_) {}
+      renderMessages();
+    }
   }
 
   function buildPanel() {
