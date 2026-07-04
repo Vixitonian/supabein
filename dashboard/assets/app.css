@@ -246,6 +246,7 @@ a:hover { text-decoration: underline; }
 .home-proj-link {
   font-size: 12px; font-weight: 600; color: var(--muted);
   padding: 4px 10px; border: 1px solid var(--border); border-radius: 7px; transition: border-color 0.15s, color 0.15s;
+  white-space: nowrap; flex-shrink: 0;
 }
 .home-proj-link:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
 
@@ -274,15 +275,16 @@ a:hover { text-decoration: underline; }
 .error-log-list { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .error-log-row { border-bottom: 1px solid var(--border); }
 .error-log-row:last-child { border-bottom: none; }
-.error-log-summary { display: flex; align-items: center; gap: 10px; padding: 11px 14px; cursor: pointer; flex-wrap: wrap; }
+.error-log-summary { display: flex; flex-direction: column; gap: 6px; padding: 11px 14px; cursor: pointer; }
 .error-log-summary:hover { background: rgba(255,255,255,0.03); }
+.error-log-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .error-log-badge { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; padding: 3px 8px; border-radius: 5px; flex-shrink: 0; background: var(--bg); border: 1px solid var(--border); color: var(--muted); }
 .error-log-badge-js_error, .error-log-badge-promise_rejection { color: #f87171; border-color: rgba(248,113,113,0.4); }
 .error-log-badge-api_error { color: #fbbf24; border-color: rgba(251,191,36,0.4); }
 .error-log-badge-console_error { color: #a78bfa; border-color: rgba(167,139,250,0.4); }
-.error-log-message { flex: 1; min-width: 160px; font-size: 13px; color: var(--text); word-break: break-word; }
+.error-log-message { font-size: 13px; color: var(--text); word-break: break-word; }
 .error-log-count { font-size: 11px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; flex-shrink: 0; }
-.error-log-time { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+.error-log-time { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; margin-left: auto; }
 .error-log-detail { padding: 0 14px 14px; }
 .error-log-detail-row { font-size: 12px; color: var(--muted); margin-top: 4px; word-break: break-word; }
 .error-log-detail-row strong { color: var(--text); }
@@ -694,7 +696,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 }
 .proj-menu-btn:hover { background: var(--border); color: var(--text); }
 .proj-menu-drop { position: absolute; top: calc(100% + 4px); right: 0; z-index: 60; }
-.proj-card-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+.proj-card-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
 .proj-card-date { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .proj-grid-sentinel { grid-column: 1 / -1; text-align: center; padding: 10px 0 4px; font-size: 12px; color: var(--muted); min-height: 1px; }
 
@@ -1915,10 +1917,6 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
   .ai-trace-json { white-space: pre-wrap; word-break: break-word; max-height: 220px; }
   .ai-trace-summary, .ai-trace-ai-summary { flex-wrap: wrap; }
   .ai-trace-call, .ai-trace-ai-stage { word-break: break-word; }
-  /* Error log rows: the message's 160px min-width (fine on desktop) leaves no
-     room next to the badge/count/time on a narrow phone, forcing the row to
-     overflow instead of wrapping. Drop the floor and let it wrap properly. */
-  .error-log-message { min-width: 0; }
   .error-log-header { gap: 8px; }
   .error-log-actions { width: 100%; }
   .error-log-actions .btn { flex: 1; }
