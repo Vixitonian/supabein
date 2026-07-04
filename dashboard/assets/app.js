@@ -4421,10 +4421,12 @@ async function loadErrorsPane(projectId, container) {
       );
       const row = el('div', { class: 'error-log-row' },
         el('div', { class: 'error-log-summary' },
-          el('span', { class: `error-log-badge error-log-badge-${err.type}` }, ERROR_TYPE_LABELS[err.type] || err.type),
-          el('span', { class: 'error-log-message' }, err.message),
-          err.occurrences > 1 ? el('span', { class: 'error-log-count' }, `×${err.occurrences}`) : null,
-          el('span', { class: 'error-log-time' }, fmtDate(err.last_seen_at)),
+          el('div', { class: 'error-log-meta' },
+            el('span', { class: `error-log-badge error-log-badge-${err.type}` }, ERROR_TYPE_LABELS[err.type] || err.type),
+            err.occurrences > 1 ? el('span', { class: 'error-log-count' }, `×${err.occurrences}`) : null,
+            el('span', { class: 'error-log-time' }, fmtDate(err.last_seen_at)),
+          ),
+          el('div', { class: 'error-log-message' }, err.message),
         ),
         detail,
       );
