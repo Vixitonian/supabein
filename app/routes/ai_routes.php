@@ -1610,11 +1610,16 @@ function ai_track_seed_rows(\PDO $pdo, int $projectId, string $tableName, array 
 
 // Shared seed_data-block inserter used by both build (initial seed) and edit
 // (on-demand "seed N fake rows" requests) — inserts rows and tracks their ids.
-function ai_insert_seed_data(\PDO $pdo, \SupaBein\Catalog $catalog, int $projectId, array $seedData): array
+// $excludeTables skips tables handled separately (e.g. the auth table, which
+// the on-demand "Seed App" flow seeds itself via ai_seed_test_accounts() so
+// passwords get properly hashed instead of inserted as unusable plaintext).
+function ai_insert_seed_data(\PDO $pdo, \SupaBein\Catalog $catalog, int $projectId, array $seedData, array $excludeTables = []): array
 {
+    $excludeTables = array_map('strtolower', $excludeTables);
     $seeded = [];
     foreach ($seedData as $seedTable => $rows) {
         if (!is_array($rows) || empty($rows)) continue;
+        if (in_array(strtolower((string)$seedTable), $excludeTables, true)) continue;
         $tbl = $catalog->getTable($projectId, (string)$seedTable);
         if (!$tbl) continue;
 
@@ -3147,6 +3152,86 @@ Rules:
 - If no table is eligible for seeding, return "seed_data": {}.
 PROMPT;
 
+// Variant used once test login accounts already exist (see ai_seed_test_accounts) —
+// unlocks seeding user-owned tables by tying rows to those specific test users,
+// instead of refusing to touch anything current-user-scoped at all.
+const AI_SEED_PROMPT_WITH_ACCOUNTS = <<<'PROMPT'
+You generate realistic sample/demo data for an existing app's database, given its exact schema.
+Return ONLY a single valid JSON object — no markdown fences, no explanation, no extra text:
+
+{ "seed_data": { "<table_name>": [ { "<col>": <value>, ... } ] } }
+
+Rules:
+- Target only tables that already exist in the given schema.
+- Never seed the auth/users table itself — working test login accounts for it already exist and
+  are listed below; do not touch that table.
+- For any OTHER table whose rows belong to a specific user (a column enforced by a
+  ":current_user_id" ownership policy in the schema), set that column to one of the given test
+  user IDs so the seeded rows are actually visible when logged in as that test user. Distribute
+  rows across the given test user IDs rather than putting them all under one.
+- Generate 5-10 realistic rows per eligible table. Cap at 50 rows per table.
+- Omit "id" and "created_at" — they are inserted automatically.
+- Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL).
+- If no table is eligible for seeding, return "seed_data": {}.
+PROMPT;
+
+// Fixed, well-known password for AI-seeded test login accounts — these exist
+// purely so seeded data in user-owned tables is actually reachable by logging
+// in as somebody; the value only matters in that it's properly bcrypt-hashed
+// before it ever reaches the database (never inserted as plaintext).
+const AI_TEST_ACCOUNT_PASSWORD = 'Test1234!';
+const AI_TEST_ACCOUNT_COUNT = 2;
+
+// Seeds a small number of test login accounts when the app has auth, with a
+// fixed password properly bcrypt-hashed server-side — never left to the AI,
+// which would otherwise have no way to produce a working, verifiable hash.
+// Idempotent: re-running "Seed App" reuses the same test1@/test2@ accounts
+// instead of erroring on the duplicate email or minting new ones each time.
+function ai_seed_test_accounts(\PDO $pdo, \SupaBein\Catalog $catalog, int $projectId, array $schema): array
+{
+    $auth = ai_detect_auth($schema);
+    if (!$auth['table']) return [];
+
+    $tbl = $catalog->getTable($projectId, $auth['table']);
+    if (!$tbl) return [];
+
+    $pwCol = null;
+    foreach ($schema['tables'] as $t) {
+        if ($t['name'] !== $auth['table']) continue;
+        foreach ($t['columns'] as $c) {
+            if (strtoupper(trim((string)($c['type'] ?? ''))) === 'PASSWORD') { $pwCol = $c['name']; break 2; }
+        }
+    }
+    if (!$pwCol) return [];
+
+    $idField      = $auth['field'] ?? 'email';
+    $isEmailField = str_contains(strtolower($idField), 'email');
+    $hash         = password_hash(AI_TEST_ACCOUNT_PASSWORD, PASSWORD_BCRYPT);
+    $physical     = $tbl['physical_name'];
+    $accounts     = [];
+
+    for ($i = 1; $i <= AI_TEST_ACCOUNT_COUNT; $i++) {
+        $identifier = $isEmailField ? "test{$i}@example.com" : "test{$i}";
+        try {
+            $existing = $pdo->prepare("SELECT id FROM `{$physical}` WHERE `{$idField}` = ? LIMIT 1");
+            $existing->execute([$identifier]);
+            $existingId = $existing->fetchColumn();
+            if ($existingId) {
+                $accounts[] = ['id' => (int)$existingId, 'identifier' => $identifier, 'password' => AI_TEST_ACCOUNT_PASSWORD];
+                continue;
+            }
+            $pdo->prepare("INSERT INTO `{$physical}` (`{$idField}`, `{$pwCol}`) VALUES (?, ?)")
+                ->execute([$identifier, $hash]);
+            $rowId = (int)$pdo->lastInsertId();
+            ai_track_seed_rows($pdo, $projectId, $auth['table'], [$rowId]);
+            $accounts[] = ['id' => $rowId, 'identifier' => $identifier, 'password' => AI_TEST_ACCOUNT_PASSWORD];
+        } catch (\Throwable $e) {
+            sb_log('ai_seed', 'Test account insert failed (non-fatal): ' . $e->getMessage());
+        }
+    }
+    return $accounts;
+}
+
 // On-demand seeding for the "Seed App" button — same seed_data shape and
 // insertion path as build's initial seed and edit mode's "seed N rows"
 // requests (ai_insert_seed_data), just triggered directly instead of via a
@@ -3157,16 +3242,32 @@ function ai_run_project_seed(int $projectId, \SupaBein\Catalog $catalog, \PDO $p
     $schema = ai_schema_from_db($projectId, $catalog);
     $report(['stage' => 'schema', 'status' => 'done', 'label' => 'Schema loaded']);
 
+    $report(['stage' => 'accounts', 'status' => 'start', 'label' => 'Setting up test login accounts…']);
+    $testAccounts = ai_seed_test_accounts($pdo, $catalog, $projectId, $schema);
+    $report(['stage' => 'accounts', 'status' => 'done',
+             'label'  => $testAccounts ? 'Test accounts ready' : 'No auth table found',
+             'detail' => $testAccounts ? implode(', ', array_column($testAccounts, 'identifier')) . ' (password: ' . AI_TEST_ACCOUNT_PASSWORD . ')' : '']);
+
     $report(['stage' => 'generate', 'status' => 'start', 'label' => 'Generating sample data…']);
-    $result = $client->generateJson(AI_SEED_PROMPT, "Exact schema:\n" . ai_schema_to_context($schema));
+    $prompt  = $testAccounts ? AI_SEED_PROMPT_WITH_ACCOUNTS : AI_SEED_PROMPT;
+    $userMsg = "Exact schema:\n" . ai_schema_to_context($schema);
+    if ($testAccounts) {
+        $userMsg .= "\n\nTest user IDs available to own seeded rows: " . implode(', ', array_column($testAccounts, 'id'));
+    }
+    $result = $client->generateJson($prompt, $userMsg);
     $seedData = is_array($result['seed_data'] ?? null) ? $result['seed_data'] : [];
     $report(['stage' => 'generate', 'status' => 'done', 'label' => 'Sample data generated', 'detail' => count($seedData) . ' table(s)']);
 
     $report(['stage' => 'insert', 'status' => 'start', 'label' => 'Inserting rows…']);
-    $seeded = ai_insert_seed_data($pdo, $catalog, $projectId, $seedData);
+    $auth   = ai_detect_auth($schema);
+    $seeded = ai_insert_seed_data($pdo, $catalog, $projectId, $seedData, $auth['table'] ? [$auth['table']] : []);
     $report(['stage' => 'insert', 'status' => 'done', 'label' => 'Done', 'detail' => $seeded ? implode(', ', $seeded) : 'No eligible tables found']);
 
-    return ['seeded' => $seeded, 'usage' => $client->getLastUsage()];
+    return [
+        'seeded'        => $seeded,
+        'usage'         => $client->getLastUsage(),
+        'test_accounts' => array_map(fn($a) => ['identifier' => $a['identifier'], 'password' => $a['password']], $testAccounts),
+    ];
 }
 
 // Runs the Playwright user-story tests for a project against its most recent
