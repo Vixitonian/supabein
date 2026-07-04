@@ -120,7 +120,13 @@ const Api = (() => {
     const showBar = !path.includes('/ai/jobs/');
     if (showBar) LoadingBar.start();
 
-    const signal = abortSignal ?? AbortSignal.timeout(600000);
+    // Job-status polls are lightweight and frequent — bound each attempt to a
+    // short timeout so a single hung request can't stall failure-detection
+    // for minutes at a time (MAX_CONSECUTIVE_FAILURES in the poll loops
+    // assumes each failed attempt fails fast). Generation requests (build/
+    // edit/seed) keep the generous 10-minute ceiling since those are real,
+    // long-running single calls.
+    const signal = abortSignal ?? AbortSignal.timeout(path.includes('/ai/jobs/') ? 15000 : 600000);
     let res;
     try {
       res = await fetch(BASE + path, { method, headers, body, signal });
@@ -129,7 +135,13 @@ const Api = (() => {
       if (e instanceof DOMException) {
         if (abortSignal?.aborted) throw e;
         if (e.name === 'TimeoutError' || e.name === 'AbortError') {
-          throw new ApiError('Request timed out after 10 minutes — the server took too long. Try a simpler prompt or check server health.', 408, {});
+          const isPoll = path.includes('/ai/jobs/');
+          throw new ApiError(
+            isPoll
+              ? 'Timed out checking job status — retrying…'
+              : 'Request timed out after 10 minutes — the server took too long. Try a simpler prompt or check server health.',
+            408, {}
+          );
         }
       }
       throw e;
@@ -215,6 +227,31 @@ function showAlert(container, msg, type = 'error') {
   if (a) a.remove();
   const div = el('div', { class: `alert alert-${type}` }, msg);
   container.insertBefore(div, container.firstChild);
+}
+
+// Lets any in-flight poll's wait be interrupted the instant the tab/PWA
+// becomes visible again, instead of sitting out the rest of the interval.
+// Mobile browsers throttle (or fully suspend) background timers — often much
+// more aggressively for an installed/standalone PWA than a normal tab — so a
+// job that finished (or failed) while backgrounded could otherwise sit stale
+// on screen well after the user comes back to look at it, showing a spinner
+// for a job the server already resolved. Shared by every job-polling loop.
+let _visibilityWakers = [];
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  const wakers = _visibilityWakers;
+  _visibilityWakers = [];
+  wakers.forEach(fn => fn());
+});
+function sleepOrWakeOnVisible(ms) {
+  return new Promise(resolve => {
+    const waker = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      _visibilityWakers = _visibilityWakers.filter(fn => fn !== waker);
+      resolve();
+    }, ms);
+    _visibilityWakers.push(waker);
+  });
 }
 
 // Backend timestamps are plain "YYYY-MM-DD HH:MM:SS" with no timezone marker,
@@ -1441,9 +1478,18 @@ const AiPanel = (() => {
     let since = 0;
     let consecutiveFailures = 0;
     const MAX_CONSECUTIVE_FAILURES = 15; // ~30s of nothing-but-errors — give up rather than spin forever
+    const startedAt = Date.now();
+    const SLOW_JOB_WARNING_MS = 20 * 60 * 1000; // 20 min — a heads-up, not a kill; real jobs can legitimately run long
+    let warnedSlow = false;
     while (!pollState.cancelled) {
-      await new Promise(r => setTimeout(r, 2000));
+      await sleepOrWakeOnVisible(2000);
       if (pollState.cancelled) return null;
+
+      if (!warnedSlow && Date.now() - startedAt > SLOW_JOB_WARNING_MS) {
+        warnedSlow = true;
+        progressMsg.data.slowWarning = 'This is taking much longer than usual. It may still finish — you can leave this open, or close the panel and check back later.';
+        renderMessages();
+      }
 
       let job;
       try {
@@ -2843,6 +2889,9 @@ const AiPanel = (() => {
       el('div', { class: 'ai-progress-title' }, data.title || 'Building your app'),
       ...rows
     );
+    if (data.slowWarning && !data.jobDone) {
+      card.appendChild(el('div', { class: 'ai-progress-warning' }, '⏳ ' + data.slowWarning));
+    }
     if (data.error) {
       card.appendChild(el('div', { class: 'ai-progress-error' }, '✕ ' + data.error));
     }
@@ -3882,12 +3931,29 @@ async function renderProject({ id }) {
 
 // Minimal job poller for one-off actions triggered outside the AI panel
 // (e.g. the Overview page's "Seed App" button) — no progress card, just
-// waits for the job to resolve and hands back its final result.
+// waits for the job to resolve and hands back its final result. Tolerates
+// transient network hiccups (a single failed fetch used to throw straight
+// out of this loop and abort tracking, even though the job itself was still
+// running fine server-side) and gives up cleanly after a stretch of nothing
+// but errors, instead of retrying forever.
 async function pollJobUntilDone(jobId) {
   let since = 0;
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 15; // ~30s of nothing-but-errors
   while (true) {
-    await new Promise(r => setTimeout(r, 2000));
-    const job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
+    await sleepOrWakeOnVisible(2000);
+    let job;
+    try {
+      job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
+      consecutiveFailures = 0;
+    } catch (e) {
+      if (e.status === 401 || e.status === 404) return { ok: false, error: e.message };
+      consecutiveFailures++;
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        return { ok: false, error: 'Lost connection to the server — please try again.' };
+      }
+      continue;
+    }
     since = job.event_count;
     if (job.status === 'done') return { ok: true, result: job.result };
     if (job.status === 'failed' || job.status === 'cancelled') return { ok: false, error: job.error };
