@@ -3362,10 +3362,29 @@ function ai_run_edit_generation_agentic(
     $loopHistory = $history;
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
-        $_t0    = microtime(true);
-        $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg);
-        $ms     = (int)((microtime(true) - $_t0) * 1000);
-        $usage  = $client->getLastUsage();
+        $_t0 = microtime(true);
+        try {
+            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg);
+        } catch (\Throwable $e) {
+            // A raw parse/HTTP failure from the client (e.g. a truncated
+            // write_file response that cuts off mid-JSON) would otherwise
+            // throw straight out of this loop and fail the whole job,
+            // discarding every turn already staged. Treat it as one more
+            // recoverable turn instead — same budget, no special-casing
+            // needed downstream.
+            $ms = (int)((microtime(true) - $_t0) * 1000);
+            $aiTrace[] = ['stage' => 'edit_agent', 'system' => $editAgentPrompt, 'history' => [],
+                'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+                'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
+            $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
+                'detail' => 'Response was invalid, retrying…']);
+            $turnMsg .= "\n\n(Your previous response to this could not be parsed as valid JSON — it may have "
+                     . "been cut off: {$e->getMessage()}. Respond again with a single valid JSON action; if "
+                     . 'you were writing a large file, keep the content more concise.)';
+            continue;
+        }
+        $ms    = (int)((microtime(true) - $_t0) * 1000);
+        $usage = $client->getLastUsage();
         foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
 
         $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
