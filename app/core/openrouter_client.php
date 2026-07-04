@@ -10,8 +10,11 @@ class OpenRouterClient
 
     // Some models are routed through providers that pre-authorize spend against
     // max_tokens regardless of actual usage; cap these to what the account can afford.
+    // Keep this generous enough for a real frontend-generation response (a multi-table
+    // app easily needs 15-20k+ output tokens) — 12000 was hit constantly and produced
+    // truncated, unparseable JSON that surfaced as a confusing "not valid JSON" error.
     private const MAX_TOKENS_OVERRIDES = [
-        'moonshotai/kimi-k2' => 12000,
+        'moonshotai/kimi-k2' => 32000,
     ];
 
     private array $lastUsage = [];
@@ -107,8 +110,9 @@ class OpenRouterClient
                 throw $lastError;
             }
 
-            $envelope = json_decode($response, true);
-            $text     = $envelope['choices'][0]['message']['content'] ?? null;
+            $envelope     = json_decode($response, true);
+            $text         = $envelope['choices'][0]['message']['content'] ?? null;
+            $finishReason = $envelope['choices'][0]['finish_reason'] ?? null;
 
             $raw = $envelope['usage'] ?? [];
             $this->lastUsage = [
@@ -127,6 +131,16 @@ class OpenRouterClient
                 $plan = ai_lenient_json($text);
             }
             if (!is_array($plan)) {
+                // finish_reason "length" means the model got cut off mid-response —
+                // report that plainly instead of a generic parse error, since the
+                // fix (shorter request / different model) is completely different
+                // from an actually-malformed response.
+                if ($finishReason === 'length') {
+                    throw new \RuntimeException(
+                        "OpenRouter response was cut off before finishing (hit the {$body['max_tokens']}-token limit for {$this->model}) — "
+                        . 'try a simpler request, or switch to a different model.'
+                    );
+                }
                 throw new \RuntimeException('OpenRouter response was not valid JSON: ' . substr($text, 0, 200));
             }
 

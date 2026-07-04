@@ -3381,6 +3381,25 @@ function ai_spawn_job_worker(array $config, int $jobId): void
     exec($phpBin . ' ' . escapeshellarg($worker) . ' ' . $jobId . ' > /dev/null 2>&1 &');
 }
 
+// A worker's shutdown handler marks its own job failed on a caught error, but
+// nothing catches a SIGKILL from the host's process/resource limits (cPanel
+// LVE, OOM, etc.) — that leaves the row stuck at status='running' forever,
+// with the panel polling a job that will never resolve. Detect that: it's
+// been quiet for a while AND the OS process it was claimed under is gone.
+function ai_job_is_orphaned(array $job): bool
+{
+    if (($job['status'] ?? null) !== 'running' || empty($job['pid'])) return false;
+
+    $updatedAt = strtotime((string)$job['updated_at'] . ' UTC');
+    if ($updatedAt === false || (time() - $updatedAt) < 300) return false; // give slow stages room to breathe
+
+    $pid = (int)$job['pid'];
+    if (function_exists('posix_kill')) {
+        return !@posix_kill($pid, 0); // signal 0: existence check only, sends nothing
+    }
+    return !is_dir('/proc/' . $pid);
+}
+
 // ─── Route registration ──────────────────────────────────────────────────────
 
 function register_ai_routes(\SupaBein\Router $router): void
@@ -4164,8 +4183,19 @@ PROMPT;
     $router->get('/v1/ai/jobs/:id', function (array $req): void {
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
-        $job = $catalog->getJobById((int)$req['params']['id'], $userId);
+        $jobId   = (int)$req['params']['id'];
+        $job = $catalog->getJobById($jobId, $userId);
         if (!$job) abort(404, 'Job not found');
+
+        // A worker can die without ever reaching the try/catch that would mark
+        // it failed (killed by the host's process/resource limits, OOM, etc.) —
+        // that used to leave the job (and the panel polling it) "running"
+        // forever with no error and no way out. If it's been quiet for 5+
+        // minutes AND its recorded OS process no longer exists, it's dead.
+        if (ai_job_is_orphaned($job)) {
+            $catalog->markJobFailed($jobId, 'Worker process stopped unexpectedly — please retry.');
+            $job = $catalog->getJobById($jobId, $userId);
+        }
 
         $since  = max(0, (int)($req['query']['since'] ?? 0));
         $events = array_slice($job['progress'], $since);
