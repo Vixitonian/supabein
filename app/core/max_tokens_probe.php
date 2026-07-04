@@ -37,7 +37,13 @@ class MaxTokensProbe
     {
         if (preg_match('/max_tokens:\s*\d+\s*>\s*(\d+)/i', $errorMessage, $m)) {
             $limit = (int)$m[1];
-        } elseif (preg_match('/(?:maximum|max)(?:imum)?[^\d]{0,40}?(\d{3,7})\s*(?:completion|output)?\s*tokens?/i', $errorMessage, $m)) {
+        } elseif (preg_match('/(?:max(?:imum)?|at most|supports up to)[^\d]{0,40}?(\d{3,7})\s*(?:completion|output)\s*tokens?/i', $errorMessage, $m)) {
+            // The qualifier ("completion"/"output") is required, not optional —
+            // a bare "maximum context length is N tokens" is a totally different
+            // limit (the context window, not the output cap) and must NOT match
+            // here, or a large-context request would get its max_tokens wrongly
+            // clamped down to the context-length number instead of the real
+            // (and likely much larger) output ceiling.
             $limit = (int)$m[1];
         } else {
             return null;
