@@ -573,6 +573,67 @@ PROMPT;
 
 const AI_EDIT_SYSTEM_PROMPT = AI_EDIT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
 
+// ── Edit: agentic tool-use loop ──────────────────────────────────────────────
+// A prompted ReAct-style loop instead of native per-provider tool-calling —
+// every provider client here (anthropic/gemini/openrouter/nvidia) is a thin
+// generateJson(WithHistory) wrapper with no function-calling support, and
+// several OpenRouter models are free-tier with unreliable tool-calling even
+// where it exists. Returning one JSON action per turn works identically
+// across all of them with zero client changes.
+const AI_EDIT_AGENT_SYSTEM_HEADER = <<<'PROMPT'
+You are a full-stack developer for SupaBein, a self-hosted BaaS platform, working as an autonomous
+coding agent. The user wants to MODIFY an existing project. You do NOT get the full codebase up
+front — you have tools to explore and change it, and you decide what to look at.
+
+Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
+exactly as one action:
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+
+Available tools:
+  list_files   args: {}
+    Returns the current file listing (paths only).
+  search_code  args: {"query": string}
+    Case-insensitive substring search across every file's content. Returns matching
+    {path, line, text} entries (capped). Use this to find where something is defined/used
+    before deciding which file(s) to read.
+  read_file    args: {"path": string}
+    Returns the full current content of one file.
+  write_file   args: {"path": string, "content": string}
+    Stages a full replacement of one file's content (same MERGE semantics as a normal edit delta:
+    any path you don't write_file keeps its current content). The result tells you immediately
+    whether the write passed a syntax check — fix it and write_file again if not.
+  syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
+    Re-runs the syntax check on demand.
+  finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
+    Ends the session. Every key is optional (omit or use [] / {} for "no schema change of this
+    kind") — use the SAME shapes as a normal edit delta, documented below. Do NOT repeat frontend
+    file content here — anything you already write_file'd is included automatically.
+
+Work iteratively: search/read what you need, write_file your changes, syntax_check if unsure, then
+finish. You have a limited number of turns, so don't re-read a file you already have, and don't
+write a file you don't need to change. If a write_file's syntax check fails, that error is the
+truth — fix the actual problem it names, don't just retry the same content.
+
+Schema delta shapes for "finish" (identical to a normal edit delta — see full rules below for
+column types, identifier rules, and when seed_data applies):
+{
+  "add_tables": [ {"name": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ], "policies": [ {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean} ] } ],
+  "add_columns": [ { "table": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ] } ],
+  "update_policies": [ {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean} ],
+  "seed_data": { "<table_name>": [ { "<col>": <value>, ... } ] }
+}
+- Do NOT include tables/columns that already exist. Do NOT drop or rename — additions and policy
+  changes only. NEVER include "id" or "created_at" as columns.
+- seed_data: only for an EXPLICIT seed/sample-data request; never seed auth/users tables or rows
+  owned by :current_user_id; omit "id"/"created_at"; 5-10 rows by default, cap 50/table.
+
+The FRONTEND RULES below apply to every write_file call:
+PROMPT;
+
+const AI_EDIT_AGENT_SYSTEM_PROMPT = AI_EDIT_AGENT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
+
+const AI_EDIT_AGENT_MAX_TURNS = 12;
+
 // ─── Platform-provided boilerplate (never AI-authored) ──────────────────────
 // core/router.js and core/api.js are the two files every "route not found" /
 // "module not found" style bug traced back to — either the AI silently
@@ -3144,40 +3205,212 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     return ['plan' => $plan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
+// ── Edit agent: single tool-call execution ───────────────────────────────────
+// $byPath is the read-only starting file set; $changedFiles is the in-progress
+// staged-writes map, passed by reference so write_file's effects are visible
+// to later read_file/search_code/syntax_check calls in the same loop.
+function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array $config): array
+{
+    static $platformPaths = ['core/router.js', 'core/api.js', 'features/auth/auth.js'];
+
+    // Reuses the exact normalize-then-prefix-check ai_deploy_files() already
+    // uses against real deploy directories, just against a virtual prefix —
+    // same traversal protection, no filesystem involved.
+    $normalizePath = function (string $path): ?string {
+        $rel = ltrim($path, '/');
+        if ($rel === '') return null;
+        $norm = \SupaBein\Deploy::normalizePath('/virtual/' . $rel);
+        if (!str_starts_with($norm, '/virtual/')) return null;
+        $out = substr($norm, strlen('/virtual/'));
+        return $out === '' ? null : $out;
+    };
+
+    switch ($tool) {
+        case 'list_files':
+            return ['tool' => 'list_files', 'result' => [
+                'files' => array_values(array_unique(array_merge(array_keys($byPath), array_keys($changedFiles)))),
+            ]];
+
+        case 'search_code':
+            $query = trim((string)($args['query'] ?? ''));
+            if ($query === '') return ['tool' => 'search_code', 'error' => 'args.query is required'];
+            $matches = [];
+            foreach (array_unique(array_merge(array_keys($byPath), array_keys($changedFiles))) as $path) {
+                $content = $changedFiles[$path] ?? $byPath[$path] ?? '';
+                foreach (explode("\n", $content) as $i => $line) {
+                    if (stripos($line, $query) !== false) {
+                        $matches[] = ['path' => $path, 'line' => $i + 1, 'text' => trim($line)];
+                        if (count($matches) >= 20) break 2;
+                    }
+                }
+            }
+            return ['tool' => 'search_code', 'result' => ['matches' => $matches, 'truncated' => count($matches) >= 20]];
+
+        case 'read_file':
+            $path = $normalizePath((string)($args['path'] ?? ''));
+            if ($path === null) return ['tool' => 'read_file', 'error' => 'args.path is missing or unsafe'];
+            if (in_array($path, $platformPaths, true)) {
+                return ['tool' => 'read_file', 'result' => ['path' => $path, 'content' => null,
+                    'note' => 'This file is platform-provided and always overwritten at deploy time — reading or writing it has no effect.']];
+            }
+            $content = $changedFiles[$path] ?? $byPath[$path] ?? null;
+            if ($content === null) return ['tool' => 'read_file', 'error' => "no such file: {$path}"];
+            return ['tool' => 'read_file', 'result' => ['path' => $path, 'content' => $content]];
+
+        case 'write_file':
+            $path = $normalizePath((string)($args['path'] ?? ''));
+            if ($path === null) return ['tool' => 'write_file', 'error' => 'args.path is missing or unsafe'];
+            if (in_array($path, $platformPaths, true)) {
+                return ['tool' => 'write_file', 'error' => 'platform-provided file — writes to this path are always discarded at deploy time, do not write it'];
+            }
+            $content = (string)($args['content'] ?? '');
+            $changedFiles[$path] = $content;
+            $check = ai_check_js_syntax($path, $content, $config);
+            return ['tool' => 'write_file', 'result' => [
+                'path' => $path, 'bytes' => strlen($content), 'syntax_ok' => $check['ok'], 'syntax_error' => $check['error'],
+            ]];
+
+        case 'syntax_check':
+            if (isset($args['path'])) {
+                $path = $normalizePath((string)$args['path']);
+                if ($path === null) return ['tool' => 'syntax_check', 'error' => 'args.path is unsafe'];
+                $content = $changedFiles[$path] ?? $byPath[$path] ?? null;
+                if ($content === null) return ['tool' => 'syntax_check', 'error' => "no such file: {$path}"];
+                $check = ai_check_js_syntax($path, $content, $config);
+                return ['tool' => 'syntax_check', 'result' => ['path' => $path, 'ok' => $check['ok'], 'error' => $check['error']]];
+            }
+            $results = [];
+            foreach ($changedFiles as $p => $content) {
+                $check = ai_check_js_syntax($p, $content, $config);
+                $results[] = ['path' => $p, 'ok' => $check['ok'], 'error' => $check['error']];
+            }
+            return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
+
+        default:
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, finish"];
+    }
+}
+
+function ai_edit_agent_step_label(string $tool, array $args): string
+{
+    return match ($tool) {
+        'list_files'   => 'Listing files…',
+        'search_code'  => 'Searching for "' . ($args['query'] ?? '') . '"…',
+        'read_file'    => 'Reading ' . ($args['path'] ?? '?') . '…',
+        'write_file'   => 'Writing ' . ($args['path'] ?? '?') . '…',
+        'syntax_check' => 'Checking syntax' . (isset($args['path']) ? ' of ' . $args['path'] : '') . '…',
+        'finish'       => 'Finishing up…',
+        default        => 'Working…',
+    };
+}
+
+// ── Edit agent: the loop itself ──────────────────────────────────────────────
+// Drives AI_EDIT_AGENT_SYSTEM_PROMPT's ReAct-style loop to completion and
+// returns the same delta shape ai_run_edit_generation()'s old single-shot call
+// produced: ['add_tables','add_columns','update_policies','seed_data',
+// 'frontend'=>['files'=>[...]], 'aiTrace'=>[...]] — so the caller's downstream
+// validate/deploy logic needs no changes at all.
+function ai_run_edit_generation_agentic(
+    string $prompt, array $history, array $existingSchema, array $currentFiles,
+    object $client, array $config, callable $report
+): array {
+    $editAgentPrompt = ai_bind_auth_placeholders(AI_EDIT_AGENT_SYSTEM_PROMPT, $existingSchema);
+    $schemaCtx       = ai_schema_to_context($existingSchema);
+
+    $byPath = [];
+    foreach ($currentFiles as $f) {
+        if (isset($f['path'])) $byPath[$f['path']] = (string)($f['content'] ?? '');
+    }
+    $changedFiles = [];
+    $aiTrace      = [];
+    $finishArgs   = null;
+    // Aggregated across every turn — a loop of up to AI_EDIT_AGENT_MAX_TURNS
+    // calls makes $client->getLastUsage() alone (the old single-shot behavior)
+    // wildly undercount the real cost of the edit.
+    $totalUsage = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
+
+    $turnMsg = "Exact schema:\n{$schemaCtx}\n\nFile listing (" . count($byPath) . " files): "
+             . implode(', ', array_keys($byPath)) . "\n\nRequest: {$prompt}\n\n"
+             . 'Respond with your first tool action.';
+    $loopHistory = $history;
+
+    for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
+        $_t0    = microtime(true);
+        $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg);
+        $ms     = (int)((microtime(true) - $_t0) * 1000);
+        $usage  = $client->getLastUsage();
+        foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
+
+        $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
+        $args = is_array($action) && is_array($action['args'] ?? null) ? $action['args'] : [];
+
+        $aiTrace[] = ['stage' => 'edit_agent', 'system' => $editAgentPrompt, 'history' => [],
+            'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+            'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
+
+        $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
+            'detail' => ai_edit_agent_step_label($tool, $args)]);
+
+        $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
+        $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+
+        if ($tool === 'finish') {
+            $candidateDelta = [
+                'add_tables'      => $args['add_tables'] ?? [],
+                'add_columns'     => $args['add_columns'] ?? [],
+                'update_policies' => $args['update_policies'] ?? [],
+                'seed_data'       => $args['seed_data'] ?? [],
+            ];
+            $deltaError = ai_validate_delta($candidateDelta, $existingSchema);
+            if ($deltaError === null) {
+                $finishArgs = $candidateDelta;
+                break;
+            }
+            $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                "Your finish() was rejected: {$deltaError}. Continue working and call finish() again once it's fixed."]);
+            continue;
+        }
+
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $config));
+    }
+
+    if ($finishArgs === null) {
+        // Turn budget exhausted without a validated finish — force-finish with
+        // whatever's staged rather than hang or hard-fail the whole job; empty
+        // schema-change arrays always pass validation.
+        $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
+            'detail' => 'Turn limit reached — finishing with what was staged']);
+        $finishArgs = ['add_tables' => [], 'add_columns' => [], 'update_policies' => [], 'seed_data' => []];
+    }
+
+    $delta = $finishArgs;
+    $delta['frontend'] = ['files' => array_map(
+        fn($p) => ['path' => $p, 'content' => $changedFiles[$p]],
+        array_keys($changedFiles)
+    )];
+    $delta['aiTrace'] = $aiTrace;
+    $delta['usage']   = $totalUsage;
+    return $delta;
+}
+
 function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true): array
 {
     $aiTrace = [];
 
     $report(['stage' => 'read', 'status' => 'start', 'label' => 'Reading current schema & files…']);
     $existingSchema = ai_schema_from_db($projectId, $catalog);
-    $schemaCtx      = ai_schema_to_context($existingSchema);
-    $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
+    // Full file set (not the old pre-filtered text blob) — the agent loop
+    // below decides for itself what it needs to read via search_code/read_file
+    // instead of being handed either everything or a bare listing up front.
+    $currentFiles = ai_read_full_frontend_files($config, $catalog, $projectId);
     $report(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
 
     $report(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
-    $userMessage      = "Exact schema:\n{$schemaCtx}\n\nCurrent frontend:\n{$currentFiles}\n\nRequest: {$prompt}";
-    $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
-    $_t0 = microtime(true);
-    $delta = $client->generateJsonWithHistory($editSystemPrompt, $history, $userMessage);
-    $aiTrace[] = ['stage' => 'edit_pass', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($userMessage) > 5000 ? mb_substr($userMessage, 0, 5000) : $userMessage, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report);
+    $aiTrace   = array_merge($aiTrace, $delta['aiTrace']);
+    $editUsage = $delta['usage'];
+    unset($delta['aiTrace'], $delta['usage']);
 
-    $deltaError = ai_validate_delta($delta, $existingSchema);
-    if ($deltaError) {
-        $report(['stage' => 'changes', 'status' => 'retry', 'label' => 'Refining changes…', 'detail' => $deltaError]);
-        $retryMsg = $userMessage . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
-        $_t0 = microtime(true);
-        $delta = $client->generateJsonWithHistory($editSystemPrompt, $history, $retryMsg);
-        $aiTrace[] = ['stage' => 'edit_retry', 'system' => $editSystemPrompt, 'history' => $history, 'user_msg' => mb_strlen($retryMsg) > 5000 ? mb_substr($retryMsg, 0, 5000) : $retryMsg, 'response' => array_merge(array_intersect_key($delta, array_flip(['add_tables', 'add_columns', 'update_policies'])), ['frontend_files' => count($delta['frontend']['files'] ?? [])]), 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $deltaError];
-        $deltaError = ai_validate_delta($delta, $existingSchema);
-        if ($deltaError) throw new \RuntimeException('AI returned an invalid edit: ' . $deltaError);
-    }
-
-    if (!empty($delta['frontend']['files'])) {
-        foreach ($delta['frontend']['files'] as &$file) {
-            $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
-        }
-        unset($file);
-    }
     $report(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready', 'detail' => (count($delta['add_tables'] ?? []) + count($delta['add_columns'] ?? []) + count($delta['update_policies'] ?? [])) . ' schema change(s), ' . count($delta['frontend']['files'] ?? []) . ' file(s)']);
 
     // ── Validate (deterministic; AI only explains, never detects) ─────────
@@ -3222,7 +3455,7 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
 
     $editPlan = array_merge($delta, ['project_id' => $projectId]);
 
-    return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace, 'validation' => $validation];
+    return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $editUsage, 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
 const AI_SEED_PROMPT = <<<'PROMPT'
@@ -3400,6 +3633,42 @@ function ai_js_block_syntax_ok(string $block, array $config): bool
     exec(escapeshellarg($nodeBin) . ' --check ' . escapeshellarg($tmp) . ' 2>&1', $out, $code);
     @unlink($tmp);
     return $code === 0;
+}
+
+// Deterministic syntax check for a single agent-written file — used by the
+// edit agent loop's write_file/syntax_check tools. A .js file is checked
+// directly; an .html file has each inline (non-src) <script> block extracted
+// and checked individually, since `node --check` only understands plain JS.
+// Returns ['ok' => bool, 'error' => ?string] — never throws.
+function ai_check_js_syntax(string $path, string $content, array $config): array
+{
+    $nodeBin = $config['NODE_BIN'] ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
+    $ext     = strtolower((string)pathinfo($path, PATHINFO_EXTENSION));
+
+    $blocks = [];
+    if ($ext === 'js') {
+        $blocks[] = $content;
+    } elseif ($ext === 'html') {
+        if (preg_match_all('#<script(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script>#is', $content, $m)) {
+            foreach ($m[1] as $inline) {
+                if (trim($inline) !== '') $blocks[] = $inline;
+            }
+        }
+    } else {
+        return ['ok' => true, 'error' => null]; // nothing to check (e.g. .json, .css)
+    }
+
+    foreach ($blocks as $i => $block) {
+        $tmp = sys_get_temp_dir() . '/sb_agentcheck_' . getmypid() . '_' . time() . '_' . $i . '.mjs';
+        file_put_contents($tmp, $block);
+        exec(escapeshellarg($nodeBin) . ' --check ' . escapeshellarg($tmp) . ' 2>&1', $out, $code);
+        @unlink($tmp);
+        if ($code !== 0) {
+            return ['ok' => false, 'error' => trim(implode("\n", $out))];
+        }
+        $out = [];
+    }
+    return ['ok' => true, 'error' => null];
 }
 
 // Pull the flat list of user-story labels out of a saved project_requirements

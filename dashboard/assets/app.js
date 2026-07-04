@@ -2602,6 +2602,21 @@ const AiPanel = (() => {
     return el('div', { class: 'ai-msg ai-msg-ai ai-diagnosis-card' }, ...lines);
   }
 
+  // For an 'edit_agent' loop step, ai.response is the raw {"tool", "args"}
+  // action the model returned — surface it as "read_file: features/notes/notes.js"
+  // instead of a generic label, so scanning the trace shows what the agent did
+  // on each turn without opening every entry.
+  function agentStepSummary(response) {
+    if (!response || typeof response !== 'object') return null;
+    const tool = response.tool;
+    if (!tool) return null;
+    const args = response.args || {};
+    const arg = tool === 'search_code' ? args.query
+      : tool === 'read_file' || tool === 'write_file' || tool === 'syntax_check' ? args.path
+      : null;
+    return arg ? `${tool}: ${arg}` : tool;
+  }
+
   function renderAiCallEntry(ai) {
     const STAGE_LABELS = {
       chat:            'Chat Response',
@@ -2610,9 +2625,11 @@ const AiPanel = (() => {
       frontend_pass_2: 'Frontend Pass 2',
       edit_pass:       'Edit Pass',
       edit_retry:      '↩ Edit Retry (self-healing)',
+      edit_agent:      'Agent Step',
       diagnose:        'Diagnose',
     };
-    const label    = STAGE_LABELS[ai.stage] || ai.stage;
+    const agentSummary = ai.stage === 'edit_agent' ? agentStepSummary(ai.response) : null;
+    const label    = agentSummary || STAGE_LABELS[ai.stage] || ai.stage;
     const msStr    = ai.ms ? `${(ai.ms / 1000).toFixed(1)}s` : '';
     const tok      = ai.tokens || {};
     const tokStr   = tok.total_tokens ? `${tok.total_tokens.toLocaleString()} tok` : '';
@@ -2750,7 +2767,7 @@ const AiPanel = (() => {
     schema:       ['schema_pass_1', 'schema_retry'],
     design:       ['design_brief'],
     frontend:     ['frontend_pass_2'],
-    changes:      ['edit_pass', 'edit_retry'],
+    changes:      ['edit_pass', 'edit_retry', 'edit_agent'],
   };
   function attachTraceToStages(progressMsg, aiTrace) {
     if (!aiTrace || !aiTrace.length) return;
