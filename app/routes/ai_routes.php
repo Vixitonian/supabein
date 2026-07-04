@@ -978,13 +978,44 @@ const auth = (() => {
 })();
 JS;
 
+// Injected instead of AI_CANONICAL_AUTH_JS when the schema has no PASSWORD
+// column. The AI is told to only reference "auth" when auth exists, but a
+// weaker model can still write a <script src="./features/auth/auth.js">
+// tag and/or inline bootstrap code like `auth.ready.then(...)` out of habit
+// — live-caught: stripping the dangling script tag alone (see the deploy
+// pipeline) left that inline code calling a global that was never defined
+// at all, throwing a ReferenceError that crashed the whole bootstrap script
+// before routing ever ran — a fully blank page, no error visible to the
+// user beyond the console. Matching the real interface with inert no-ops
+// (an already-resolved `ready`, a null current user, login/signup that
+// reject clearly) means any such reference degrades gracefully instead of
+// crashing, regardless of what the AI wrote.
+const AI_CANONICAL_AUTH_STUB_JS = <<<'JS'
+const auth = (() => {
+  const ready = Promise.resolve(null);
+  const getCurrentUser = () => null;
+  const notAvailable = async () => { throw new Error('This app has no login system.'); };
+  const renderNotAvailable = () => {
+    const appDiv = document.getElementById('app');
+    if (appDiv) appDiv.innerHTML = '<p class="text-gray-400 text-center p-8">This app has no login system.</p>';
+  };
+  return {
+    ready, getCurrentUser,
+    login: notAvailable, signup: notAvailable, logout: () => {},
+    renderLogin: renderNotAvailable, renderSignup: renderNotAvailable,
+  };
+})();
+JS;
+
 // Force these platform-provided paths to their canonical content, adding them
 // if the AI omitted them (all are required whenever frontend files are being
 // deployed) and overwriting them if the AI wrote something else (its content
-// for these paths is always discarded either way). $authInfo (from
-// ai_detect_auth) is null/no-table when the app has no PASSWORD column — auth.js
-// is only injected when auth actually exists, matching the AI's own instruction
-// to omit auth.js entirely for auth-less apps.
+// for these paths is always discarded either way). features/auth/auth.js is
+// injected unconditionally, like the other platform files — real
+// implementation when $authInfo (from ai_detect_auth) has a table, the inert
+// stub above otherwise — rather than being omitted for auth-less apps, so a
+// stray reference to `auth` never throws regardless of whether the AI's
+// markup or bootstrap code assumed auth exists.
 function ai_inject_canonical_frontend_files(array $frontendFiles, ?array $authInfo = null): array
 {
     $byPath = [];
@@ -1002,6 +1033,8 @@ function ai_inject_canonical_frontend_files(array $frontendFiles, ?array $authIn
             AI_CANONICAL_AUTH_JS
         );
         $byPath['features/auth/auth.js'] = ['path' => 'features/auth/auth.js', 'content' => $authJs];
+    } else {
+        $byPath['features/auth/auth.js'] = ['path' => 'features/auth/auth.js', 'content' => AI_CANONICAL_AUTH_STUB_JS];
     }
     return array_values($byPath);
 }
@@ -1026,28 +1059,6 @@ function ai_ensure_error_script_tag(string $html): string
         return str_ireplace('</head>', "    {$tag}</head>", $html);
     }
     return $tag . $html;
-}
-
-// Strips a dangling features/auth/auth.js <script> tag from index.html when
-// the schema has no auth table. The prompt already tells the AI to only
-// include this tag when the schema has a PASSWORD column (see RULE 3), but
-// a weaker model can still include it unconditionally as boilerplate habit
-// even for an app with no auth at all. Left unfixed, that tag is deploy-time
-// fatal in a way that's invisible from the result: ai_inject_canonical_frontend_files()
-// correctly never creates features/auth/auth.js when there's no auth table,
-// so ai_smoke_check_dir()'s "every referenced script must exist" check
-// rejects the WHOLE deploy over one dangling tag — which is exactly what
-// silently produced "Site created — no frontend deployed" for a plain
-// to-do app with zero auth. Making this a deploy-time guarantee instead of
-// a prompt-compliance hope matches ai_ensure_error_script_tag()'s approach.
-function ai_strip_dangling_auth_script_tag(string $html, ?array $authInfo): string
-{
-    if (!empty($authInfo['table'])) return $html; // auth.js will actually exist — tag is valid
-    return preg_replace(
-        '#\s*<script\b[^>]*\ssrc\s*=\s*["\'][^"\']*features/auth/auth\.js["\'][^>]*>\s*</script>#i',
-        '',
-        $html
-    );
 }
 
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
@@ -1152,7 +1163,6 @@ function ai_deploy_files(
     if (is_file($indexPath)) {
         $indexHtml = file_get_contents($indexPath);
         $patched   = ai_ensure_error_script_tag((string)$indexHtml);
-        $patched   = ai_strip_dangling_auth_script_tag($patched, $authInfo);
         if ($patched !== $indexHtml) {
             file_put_contents($indexPath, $patched);
         }
