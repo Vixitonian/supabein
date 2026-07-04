@@ -599,9 +599,14 @@ Available tools:
   read_file    args: {"path": string}
     Returns the full current content of one file.
   write_file   args: {"path": string, "content": string}
-    Stages a full replacement of one file's content (same MERGE semantics as a normal edit delta:
-    any path you don't write_file keeps its current content). The result tells you immediately
-    whether the write passed a syntax check — fix it and write_file again if not.
+    Works for BOTH editing an existing file and creating a brand-new one — write_file a path that
+    doesn't exist yet (read_file on it will say "no such file", which just means it needs creating)
+    to create it. Same MERGE semantics as a normal edit delta: any path you don't write_file keeps
+    its current content, so a brand-new feature needing its own file is exactly one more write_file
+    call, not a reason to rewrite anything else. When you add a new feature file, also write_file
+    index.html to add its <script src="./features/<name>/<name>.js"> tag (after its dependencies,
+    before the inline bootstrap script) and register any new route(s) it needs. The result tells you
+    immediately whether the write passed a syntax check — fix it and write_file again if not.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
   finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
