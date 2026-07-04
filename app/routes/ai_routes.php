@@ -2912,6 +2912,24 @@ function ai_playwright_test_run(string $script, array $config): array
 // jobs, with a user confirmation in between.
 function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate = true): array
 {
+    $aiTrace = [];
+
+    // Review-off ("watch only") never runs the separate intent-review step,
+    // but the actors/stories/journeys it produces are still valuable context
+    // for the schema pass — generate it here instead of skipping it outright.
+    // Review-on always passes an already-confirmed $approvedIntent, so this
+    // never re-runs (and never re-generates) an intent the user already saw.
+    if ($approvedIntent === null) {
+        $report(['stage' => 'requirements', 'status' => 'start', 'label' => 'Understanding your requirements…']);
+        $_t0 = microtime(true);
+        $approvedIntent = ai_generate_intent($client, $prompt, $history);
+        $aiTrace[] = ['stage' => 'intent', 'system' => AI_INTENT_PROMPT, 'history' => $history, 'user_msg' => $prompt, 'response' => $approvedIntent, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+        $actorNames = array_filter(array_map(fn($a) => is_array($a) ? ($a['name'] ?? '') : (string)$a, $approvedIntent['actors'] ?? []));
+        $storyCount = array_sum(array_map(fn($a) => is_array($a) ? count($a['stories'] ?? []) : 0, $approvedIntent['actors'] ?? []));
+        $report(['stage' => 'requirements', 'status' => 'done', 'label' => 'Requirements understood',
+                 'detail' => count($actorNames) . ' actor(s): ' . implode(', ', $actorNames) . ' — ' . $storyCount . ' user stor' . ($storyCount === 1 ? 'y' : 'ies')]);
+    }
+
     $schemaResult   = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
     $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $report, $validate);
 
@@ -2919,7 +2937,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
         'plan'       => $frontendResult['plan'],
         'summary'    => $frontendResult['summary'],
         'usage'      => $frontendResult['usage'],
-        'aiTrace'    => array_merge($schemaResult['aiTrace'], $frontendResult['aiTrace']),
+        'aiTrace'    => array_merge($aiTrace, $schemaResult['aiTrace'], $frontendResult['aiTrace']),
         'validation' => $frontendResult['validation'],
     ];
 }

@@ -1099,6 +1099,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-progress-row--pending .ai-progress-label { color: var(--muted); }
 .ai-progress-detail { font-size: 11px; color: var(--muted); word-break: break-word; }
 .ai-progress-error { margin-top: 8px; font-size: 12px; color: var(--danger); }
+/* Click-to-expand stage rows (once a stage has detail/trace to show) */
+.ai-progress-row summary { list-style: none; cursor: pointer; }
+.ai-progress-row summary::-webkit-details-marker { display: none; }
+.ai-progress-summary { display: flex; align-items: flex-start; gap: 10px; }
+.ai-progress-label--clickable { text-decoration: underline dotted; text-underline-offset: 2px; }
+.ai-progress-detail-body { margin: 4px 0 6px 28px; }
+.ai-progress-detail-body .ai-progress-detail { margin-bottom: 4px; }
+.ai-progress-trace { margin-top: 4px; }
 
 /* ─── Plan card ──────────────────────────────────────────────────────────── */
 .ai-plan-card { border: 1px solid var(--border); }

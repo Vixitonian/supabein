@@ -1,5 +1,15 @@
 'use strict';
 
+// Seeding deliberately never touches auth tables or anything owned by a
+// specific user (via user_id / :current_user_id policies) — only "global"
+// catalogue-style data is safe to fill with generic sample rows. An app
+// where every table is user-scoped (e.g. a personal budget tracker) will
+// always report nothing eligible — that's expected, not a failure. Shared
+// by the AI panel's seed flow and the Overview page's Seed App button.
+const NO_SEED_ELIGIBLE_MSG = 'No eligible tables to seed — every table in this app is either the auth table or ' +
+  "scoped to individual users (via a user_id/current_user_id policy), so there's no \"global\" data safe to fill " +
+  'with generic samples. This is expected for apps where all data belongs to a specific user.';
+
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 const Auth = (() => {
@@ -1219,7 +1229,7 @@ const AiPanel = (() => {
       // schema/design in its retryBody (see runBuildFrontendStage) — resume
       // there instead of redoing schema/design generation from scratch.
       if (body.schema) return runBuildFrontendStage(body.schema, body.design_brief, { prompt: body.prompt });
-      return reviewEnabled ? runBuildSchemaDesignStage(body, sess) : proceedWithPlanStreaming(body, sess);
+      return reviewEnabled ? runBuildSchemaDesignStage(body, sess) : runBuildWatchOnly(body, sess);
     }
 
     const thinkingId = 'thinking_' + Date.now();
@@ -1250,6 +1260,7 @@ const AiPanel = (() => {
         return;
       }
       if (e.status === 401) { if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; } operationInProgress = false; currentAbortController = null; updateSendBtn(); return; }
+      console.error('[AiPanel] /v1/ai/plan failed', { status: e.status, stage: e.data?.stage, code: e.data?.code, error: e });
       liveTraceMsg.data.push({ call: 'POST /v1/ai/plan', inputs: body, status: e.status || 0, outputs: { error: e.message, stage: e.data?.stage, code: e.data?.code, raw: e.data?.raw }, ms: Date.now() - t0 });
       renderMessages();
       stopThinkingStages?.();
@@ -1266,16 +1277,109 @@ const AiPanel = (() => {
     renderMessages();
   }
 
-  // Runs the build (schema → design → frontend) as a server-side job and
-  // shows each step live via polling.
-  function proceedWithPlanStreaming(body, sess) {
+  // Review-off ("watch only") build: one continuous progress card spanning
+  // requirements → schema → design → frontend → validate → deploy → test,
+  // with zero manual gates — the only interaction anywhere is the Publish to
+  // Live button on the result card once everything's done.
+  async function runBuildWatchOnly(body, sess) {
     return streamGenerate(body, sess, {
       jobEndpoint: '/v1/ai/build/job',
-      stages: BUILD_PROGRESS_STAGES,
+      stages: BUILD_WATCH_ONLY_STAGES,
       mode: 'build',
       title: 'Building your app',
-      onComplete: (ev) => handlePlanResponse({ mode: ev.mode || 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation }),
+      onComplete: async (ev, progressMsg) => {
+        const applyResult = await deployBuildResult(ev.plan, progressMsg, sess);
+        if (!applyResult) return; // deploy failed — error already surfaced, stage marked
+        await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: applyResult });
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(applyResult, 'build') });
+        reattachBuildProject(applyResult, sess);
+
+        const hasDeployed = !!(applyResult.deploy || applyResult.staging || applyResult.site);
+        if (!hasDeployed) {
+          progressSetStage(progressMsg, 'test', 'done', 'Nothing to test — no frontend was deployed');
+          return;
+        }
+        const testProjectId = applyResult.project?.id || applyResult.staging?.project_id;
+        progressSetStage(progressMsg, 'deploy', 'done', applyResult.staging ? 'Deployed to staging' : 'Deployed');
+        progressSetStage(progressMsg, 'test', 'active');
+        renderMessages();
+        await runTestsForBuildPipeline(testProjectId, progressMsg, sess);
+      },
     });
+  }
+
+  // Deploys a freshly-generated build plan to staging, updating the SAME
+  // progress card's 'deploy' stage instead of a separate thinking/trace
+  // sequence — used only by the watch-only pipeline above (Review-on builds
+  // deploy via the existing manual Apply button / applyPlan() instead).
+  async function deployBuildResult(plan, progressMsg, sess) {
+    progressSetStage(progressMsg, 'deploy', 'active');
+    renderMessages();
+    try {
+      const { provider, model } = getSelectedModel();
+      const t0 = Date.now();
+      const result = await Api.post('/v1/ai/apply', { mode: 'build', plan, provider, model });
+      if (liveTraceMsg) liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode: 'build', provider, model }, status: 200, outputs: result, ms: Date.now() - t0 });
+      return result;
+    } catch (e) {
+      console.error('[AiPanel] deploy to staging failed', e);
+      progressSetStage(progressMsg, 'deploy', 'error', e.message);
+      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: 'Deploy failed: ' + e.message, retryBody: { plan, mode: 'build' }, retryType: 'apply' });
+      renderMessages();
+      return null;
+    }
+  }
+
+  // Same project/session reattachment applyPlan() does for a fresh build —
+  // duplicated in miniature here since the watch-only pipeline deploys via
+  // deployBuildResult() directly instead of going through applyPlan().
+  function reattachBuildProject(result, sess) {
+    if (!(result.project?.id && !selectedProjectId)) return;
+    const oldKey = aiSidKey();
+    selectedProjectId = result.project.id;
+    if (sess) sess.projectId = selectedProjectId;
+    if (!projects.some(p => String(p.id) === String(selectedProjectId))) projects.push(result.project);
+    localStorage.removeItem(oldKey);
+    localStorage.setItem(aiSidKey(), currentSessionId);
+    Api.patch('/v1/ai/sessions/' + currentSessionId, { project_id: selectedProjectId }).catch(() => {});
+    renderProjectPicker();
+  }
+
+  // Runs the test job against the SAME outer progress card's 'test' stage
+  // instead of creating its own — used only by the watch-only build pipeline.
+  // The test job's own sub-stages (script/stories/run/validate) don't match
+  // any key in the outer stage list, so pollJob silently ignores them; the
+  // 'test' row just shows active until this resolves, then gets a summary.
+  async function runTestsForBuildPipeline(projectId, progressMsg, sess) {
+    if (!projectId) { progressSetStage(progressMsg, 'test', 'done', 'No project to test'); return; }
+    try {
+      const { provider, model } = getSelectedModel();
+      const jobBody = { project_id: projectId, provider, model };
+      if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
+      const created = await Api.post('/v1/ai/test/job', jobBody);
+      const pollState = { cancelled: false };
+      activeJobPoll = pollState;
+      const finalEv = await pollJob(created.job_id, progressMsg, pollState, sess);
+      if (activeJobPoll === pollState) activeJobPoll = null;
+
+      if (finalEv) {
+        const passed = finalEv.passed || 0, failed = finalEv.failed || 0, total = passed + failed;
+        progressSetStage(progressMsg, 'test', 'done',
+          total === 0 ? 'No stories generated' : failed === 0 ? `All ${passed} passed` : `${passed}/${total} passed`);
+        sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
+          stories: finalEv.stories || [], passed, failed,
+          error: finalEv.error || null, screenshot: finalEv.screenshot || null,
+          validation: finalEv.validation || [],
+        }});
+      } else if (!pollState.cancelled) {
+        console.error('[AiPanel] auto-test after build failed', { projectId, error: progressMsg.data.error });
+        progressSetStage(progressMsg, 'test', 'error', progressMsg.data.error || 'Testing failed');
+      }
+    } catch (err) {
+      console.error('[AiPanel] auto-test after build threw', err);
+      progressSetStage(progressMsg, 'test', 'error', err.message);
+    }
+    renderMessages();
   }
 
   function proceedWithEditStreaming(body, sess) {
@@ -1385,6 +1489,7 @@ const AiPanel = (() => {
 
       if (job.status === 'done') {
         progressMsg.data.jobDone = true;
+        attachTraceToStages(progressMsg, job.result?.aiTrace);
         return { stage: 'complete', ...job.result };
       }
       if (job.status === 'failed' || job.status === 'cancelled') {
@@ -1392,6 +1497,7 @@ const AiPanel = (() => {
         const active = progressMsg.data.stages.find(s => s.status === 'active');
         if (active) active.status = 'error';
         progressMsg.data.error = job.error || (job.status === 'cancelled' ? 'Stopped' : 'The job failed — please try again.');
+        console.error('[AiPanel] job resolved as ' + job.status, { jobId, error: progressMsg.data.error });
         return null;
       }
     }
@@ -1433,6 +1539,7 @@ const AiPanel = (() => {
       const created = await Api.post(opts.jobEndpoint, jobBody);
       jobId = created.job_id;
     } catch (e) {
+      console.error('[AiPanel] job creation failed', { jobEndpoint: opts.jobEndpoint, error: e });
       const active = progressMsg.data.stages.find(s => s.status === 'active');
       if (active) active.status = 'error';
       liveTraceMsg.data.push({ call: 'POST ' + opts.jobEndpoint, inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
@@ -1463,13 +1570,20 @@ const AiPanel = (() => {
         sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
       } else {
         const emsg = progressMsg.data.error || 'The job failed — please try again.';
+        console.error('[AiPanel] job failed', { jobEndpoint: opts.jobEndpoint, jobId, error: emsg });
         liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 0, outputs: { error: emsg }, ms: Date.now() - t0 });
         await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
       }
     } else {
       liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
       renderMessages();
-      await opts.onComplete(finalEv);
+      try {
+        await opts.onComplete(finalEv, progressMsg);
+      } catch (e) {
+        console.error('[AiPanel] onComplete handler failed', { jobEndpoint: opts.jobEndpoint, jobId, error: e });
+        progressSetStage(progressMsg, progressMsg.data.stages.find(s => s.status === 'active')?.key, 'error', e.message);
+        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message || 'Something went wrong after generation finished.', retryBody: body, retryType: 'plan' });
+      }
     }
 
     if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
@@ -1534,12 +1648,12 @@ const AiPanel = (() => {
 
     // Both new builds and edits run as a job-backed generation with a live
     // progress card. This is only ever reached with Review off (see
-    // sendMessage), so both auto-apply straight through to staging on
-    // completion, with no manual gate until Publish to Live (see
-    // handlePlanResponse and applyPlan's willAutoTest).
+    // sendMessage), so both run straight through — edits auto-apply+test as
+    // before; builds use the unified 7-stage watch-only pipeline, which
+    // handles its own deploy+test instead of going through handlePlanResponse.
     return body.project_id
       ? proceedWithEditStreaming(body, sess)
-      : proceedWithPlanStreaming(body, sess);
+      : runBuildWatchOnly(body, sess);
   }
 
   async function handlePlanResponse(response) {
@@ -1840,7 +1954,7 @@ const AiPanel = (() => {
       if (finalEv) {
         const seeded = finalEv.seeded || [];
         await addMessage(currentSessionId, { role: 'ai', type: 'chat',
-          content: seeded.length ? 'Seeded: ' + seeded.join(', ') + '.' : 'No eligible tables found to seed.' });
+          content: seeded.length ? 'Seeded: ' + seeded.join(', ') + '.' : NO_SEED_ELIGIBLE_MSG });
       } else if (!pollState.cancelled) {
         await addMessage(currentSessionId, { role: 'ai', type: 'error', content: progressMsg.data.error || 'Seeding failed' });
       }
@@ -2562,6 +2676,19 @@ const AiPanel = (() => {
     { key: 'frontend', label: 'Generating frontend code' },
   ];
 
+  // Review-off ("watch only") build: one continuous progress card spanning
+  // everything from understanding the request through a live, tested app —
+  // seven stages so nothing (design brief, deploy, tests) is left invisible.
+  const BUILD_WATCH_ONLY_STAGES = [
+    { key: 'requirements', label: 'Understanding your requirements' },
+    { key: 'schema',       label: 'Designing database schema' },
+    { key: 'design',       label: 'Choosing a visual design' },
+    { key: 'frontend',     label: 'Generating frontend code' },
+    { key: 'validate',     label: 'Checking for mismatches' },
+    { key: 'deploy',       label: 'Deploying to staging' },
+    { key: 'test',         label: 'Running tests' },
+  ];
+
   // Review-on build splits the above into two confirmable stages: schema+design
   // first (paused for user confirmation), then frontend on its own.
   const BUILD_SCHEMA_STAGES = [
@@ -2612,6 +2739,27 @@ const AiPanel = (() => {
     if (detail != null && detail !== '') stages[idx].detail = detail;
   }
 
+  // Maps a progress card's stage keys to the aiTrace 'stage' values the
+  // backend tags its AI calls with — lets each stage row show its own raw
+  // system prompt/response/tokens once the job finishes, instead of only
+  // being visible in the separate, undifferentiated trace card.
+  const STAGE_TRACE_KEYS = {
+    requirements: ['intent'],
+    schema:       ['schema_pass_1', 'schema_retry'],
+    design:       ['design_brief'],
+    frontend:     ['frontend_pass_2'],
+    changes:      ['edit_pass', 'edit_retry'],
+  };
+  function attachTraceToStages(progressMsg, aiTrace) {
+    if (!aiTrace || !aiTrace.length) return;
+    for (const stage of progressMsg.data.stages) {
+      const keys = STAGE_TRACE_KEYS[stage.key];
+      if (!keys) continue;
+      const entries = aiTrace.filter(t => keys.includes(t.stage));
+      if (entries.length) stage.traceEntries = entries;
+    }
+  }
+
   // Map a streamed build event onto the progress card's stage list.
   function applyProgressEvent(msg, ev) {
     if (!ev || !ev.stage) return;
@@ -2636,9 +2784,21 @@ const AiPanel = (() => {
       const icon = s.status === 'active'
         ? el('span', { class: 'ai-progress-spin' })
         : el('span', { class: 'ai-progress-icon ai-progress-icon--' + s.status }, ICON[s.status] || '○');
+      // Once a stage has something to show (detail text, or full AI-call
+      // trace once the job finishes), its row becomes a click-to-expand
+      // disclosure instead of a static line — "click the stage, see the
+      // details" instead of a wall of always-on text.
+      if (s.detail || (s.traceEntries && s.traceEntries.length)) {
+        const summary = el('summary', { class: 'ai-progress-summary' }, icon, el('span', { class: 'ai-progress-label ai-progress-label--clickable' }, s.label));
+        const body = el('div', { class: 'ai-progress-detail-body' });
+        if (s.detail) body.appendChild(el('div', { class: 'ai-progress-detail' }, s.detail));
+        if (s.traceEntries && s.traceEntries.length) {
+          body.appendChild(el('div', { class: 'ai-progress-trace' }, ...s.traceEntries.map(renderAiCallEntry)));
+        }
+        return el('details', { class: 'ai-progress-row ai-progress-row--' + s.status }, summary, body);
+      }
       const textWrap = el('div', { class: 'ai-progress-text' },
-        el('div', { class: 'ai-progress-label' }, s.label),
-        s.detail ? el('div', { class: 'ai-progress-detail' }, s.detail) : null
+        el('div', { class: 'ai-progress-label' }, s.label)
       );
       return el('div', { class: 'ai-progress-row ai-progress-row--' + s.status }, icon, textWrap);
     });
@@ -2957,6 +3117,7 @@ const AiPanel = (() => {
         updateSendBtn(); renderMessages();
         return;
       }
+      console.error('[AiPanel] /v1/ai/apply failed', { mode, status: e.status, error: e });
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
       renderMessages();
       stopThinkingStages?.();
@@ -3717,7 +3878,7 @@ async function loadOverviewPane(projectId, container, switchTab) {
           const outcome = await pollJobUntilDone(job_id);
           if (outcome.ok) {
             const seeded = outcome.result.seeded || [];
-            alert(seeded.length ? 'Seeded: ' + seeded.join(', ') : 'No eligible tables found to seed.');
+            alert(seeded.length ? 'Seeded: ' + seeded.join(', ') : NO_SEED_ELIGIBLE_MSG);
             if (seeded.length) loadOverviewPane(projectId, container, switchTab); // refresh so Clear Seed Data now shows
           } else {
             alert('Seeding failed: ' + (outcome.error || 'try again'));
