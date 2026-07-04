@@ -1096,14 +1096,10 @@ function ai_deploy_files(
             mkdir($parentDir, 0755, true);
         }
 
-        $rawContent = (string)($fileDef['content'] ?? '');
-        if ($relPath === 'index.html') {
-            $rawContent = ai_ensure_error_script_tag($rawContent);
-        }
         $content = str_replace(
             array_keys($replacements),
             array_values($replacements),
-            $rawContent
+            (string)($fileDef['content'] ?? '')
         );
 
         if (file_put_contents($fullPath, $content) === false) {
@@ -1115,6 +1111,23 @@ function ai_deploy_files(
         \SupaBein\Deploy::rrmdir($deployDir);
         $catalog->updateDeploy($deployId, 'failed');
         return ['error' => implode('; ', $errors), 'deploy' => null];
+    }
+
+    // Ensure the error-capture script tag on whatever index.html actually
+    // ended up in the deploy dir — not just one freshly written this round.
+    // An edit job that doesn't touch index.html merges the file forward
+    // unchanged from the previous deploy (see $mergeFromCurrent above), so
+    // checking only $frontendFiles here would miss every such deploy. Reading
+    // back off disk after both the merge and the write loop is what makes
+    // this actually unconditional on every deploy, matching the doc comment
+    // on ai_ensure_error_script_tag().
+    $indexPath = $deployDir . '/index.html';
+    if (is_file($indexPath)) {
+        $indexHtml = file_get_contents($indexPath);
+        $patched   = ai_ensure_error_script_tag((string)$indexHtml);
+        if ($patched !== $indexHtml) {
+            file_put_contents($indexPath, $patched);
+        }
     }
 
     // Hardening .htaccess (force-written, cannot be skipped).
