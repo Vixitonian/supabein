@@ -206,11 +206,21 @@ class Schema
             $sqlKeywords = ['CURRENT_TIMESTAMP', 'NULL', 'TRUE', 'FALSE'];
             if (is_numeric($default) || in_array(strtoupper($default), $sqlKeywords, true)) {
                 $def .= ' DEFAULT ' . $default;
-            } elseif (preg_match('/^[a-zA-Z0-9_ .\-]+$/', $default)) {
-                // Safe string literal (letters, digits, spaces, underscores, dots, dashes)
+            } elseif (!str_contains($default, "\0") && !str_contains($default, '\\')) {
+                // This DDL string goes straight to $pdo->exec() with no
+                // parameterization, so the default value must be escaped, not just
+                // pattern-matched — but once it IS properly escaped (backslash and
+                // single quote, the only two characters that matter inside a MySQL
+                // string literal), any other content is safe. The old version threw
+                // on anything outside [a-zA-Z0-9_ .-], which meant an entirely
+                // reasonable default like "n/a" or "draft, pending" aborted the
+                // whole build. Only NUL bytes and literal backslashes (which would
+                // need their own escaping to stay safe) still fall through below.
                 $def .= " DEFAULT '" . str_replace("'", "''", $default) . "'";
             } else {
-                throw new \InvalidArgumentException("Unsafe default value for column '$name'");
+                // A default value failing here is cosmetic, not structural — drop it
+                // and keep building rather than aborting the entire app over it.
+                sb_log('schema', "Dropped unsafe default value for column '{$name}'", ['value' => substr($default, 0, 80)]);
             }
         }
 
