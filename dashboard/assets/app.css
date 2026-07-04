@@ -1078,6 +1078,14 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-progress-card { border: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; }
 .ai-progress-title { font-weight: 600; font-size: 13px; color: var(--accent); margin-bottom: 8px; }
 .ai-progress-row { display: flex; align-items: flex-start; gap: 10px; padding: 5px 0; }
+/* An expandable stage row is a <details> wrapping <summary> (icon+label) and
+   the detail body — .ai-progress-row's flex above was meant for the OTHER
+   (plain-div, icon+text side by side) case, but the same class flexes this
+   one's two children horizontally too, forcing the whole detail body to sit
+   to the right of a narrow label column instead of below it. <summary>'s own
+   icon+label layout is handled separately by .ai-progress-summary below;
+   this only needs to stack summary above body like any other <details>. */
+details.ai-progress-row { display: block; }
 .ai-progress-row--pending { opacity: 0.5; }
 .ai-progress-icon {
   width: 18px; height: 18px; flex-shrink: 0;
@@ -1111,17 +1119,6 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
    without a border the two blend into one shapeless block. */
 .ai-progress-detail-body > .ai-msg { border: 1px solid var(--border); margin-top: 4px; }
 .ai-progress-trace { margin-top: 4px; }
-
-/* Narrow screens: the fixed 28px indent plus nested trace/JSON padding leaves
-   almost no usable width for stage detail content, and pre-formatted JSON
-   forces its own cramped horizontal scrollbar inside an already-scrolled
-   page. Shrink the indent and let JSON wrap instead of scroll sideways. */
-@media (max-width: 480px) {
-  .ai-progress-detail-body { margin-left: 10px; }
-  .ai-trace-json { white-space: pre-wrap; word-break: break-word; max-height: 220px; }
-  .ai-trace-summary, .ai-trace-ai-summary { flex-wrap: wrap; }
-  .ai-trace-call, .ai-trace-ai-stage { word-break: break-word; }
-}
 
 /* ─── Plan card ──────────────────────────────────────────────────────────── */
 .ai-plan-card { border: 1px solid var(--border); }
@@ -1865,6 +1862,21 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
   font-family: monospace;
 }
 .ai-trace-prompt { white-space: pre-wrap; word-break: break-word; }
+
+/* Narrow screens: the fixed 28px indent plus nested trace/JSON padding leaves
+   almost no usable width for stage detail content, and pre-formatted JSON
+   forces its own cramped horizontal scrollbar inside an already-scrolled
+   page. Shrink the indent and let JSON wrap instead of scroll sideways.
+   Placed after every rule it overrides (.ai-trace-json etc. are defined
+   above, in the AI-internal call breakdown section) — equal-specificity
+   CSS resolves by source order regardless of the media query, so a
+   same-specificity override earlier in the file has no effect at all. */
+@media (max-width: 480px) {
+  .ai-progress-detail-body { margin-left: 10px; }
+  .ai-trace-json { white-space: pre-wrap; word-break: break-word; max-height: 220px; }
+  .ai-trace-summary, .ai-trace-ai-summary { flex-wrap: wrap; }
+  .ai-trace-call, .ai-trace-ai-stage { word-break: break-word; }
+}
 
 /* Mode toggle button (Chat / Build) */
 .ai-mode-btn {
