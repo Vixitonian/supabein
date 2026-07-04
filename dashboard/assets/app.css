@@ -1106,6 +1106,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-progress-label--clickable { text-decoration: underline dotted; text-underline-offset: 2px; }
 .ai-progress-detail-body { margin: 4px 0 6px 28px; }
 .ai-progress-detail-body .ai-progress-detail { margin-bottom: 4px; }
+/* A test-results card nested inside a stage's expand body needs its own
+   visible edge — it shares a background with the outer progress card, so
+   without a border the two blend into one shapeless block. */
+.ai-progress-detail-body > .ai-msg { border: 1px solid var(--border); margin-top: 4px; }
 .ai-progress-trace { margin-top: 4px; }
 
 /* ─── Plan card ──────────────────────────────────────────────────────────── */

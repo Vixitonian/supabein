@@ -65,7 +65,12 @@ try {
         $history        = $payload['history'] ?? [];
         $approvedIntent = $payload['intent']  ?? null;
         $validate       = $payload['validate'] ?? true;
-        $result = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $report, $validate);
+        // The '/v1/ai/build/job' route is only ever used by the Review-off
+        // ("watch only") flow now — Review-on uses the separate
+        // build_schema/build_frontend jobs below — so it's safe for this one
+        // job to also deploy and test, giving the whole pipeline one
+        // reload-proof progress trail instead of three separately-tracked steps.
+        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'build'], $result));
 
     } elseif ($mode === 'build_schema') {
