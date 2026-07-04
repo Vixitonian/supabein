@@ -620,11 +620,21 @@ Available tools:
     Ends the session. Every key is optional (omit or use [] / {} for "no schema change of this
     kind") — use the SAME shapes as a normal edit delta, documented below. Do NOT repeat frontend
     file content here — anything you already write_file'd is included automatically.
+    HARD RULE: a schema change is rarely the whole job by itself. If the request implies a user
+    should be able to SET or SEE the new/changed column anywhere (a form field to enter it, a badge/
+    value shown on a card or detail view, a filter, etc.), you must ALSO write_file the frontend
+    file(s) that expose it BEFORE calling finish — add_columns with zero frontend files is only
+    correct for a request that is explicitly schema-only ("just add the column", "I'll handle the
+    UI myself"). Adding a "category" field that the user can set and see, for example, is not done
+    until some form actually collects it and some view actually displays it — the column existing
+    in the database is not the goal, using it is.
 
 Work iteratively: search/read what you need, write_file your changes, syntax_check if unsure, then
 finish. You have a limited number of turns, so don't re-read a file you already have, and don't
 write a file you don't need to change. If a write_file's syntax check fails, that error is the
-truth — fix the actual problem it names, don't just retry the same content.
+truth — fix the actual problem it names, don't just retry the same content. Before you call finish,
+re-read the original request once more and check you actually did all of it, not just the part
+that was easiest to satisfy first.
 
 Schema delta shapes for "finish" (identical to a normal edit delta — see full rules below for
 column types, identifier rules, and when seed_data applies):
