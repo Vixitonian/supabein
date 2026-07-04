@@ -506,7 +506,7 @@ function renderLogin() {
     try {
       const res = await Api.post('/v1/auth/login', { email, password });
       Auth.setToken(res.token);
-      Router.navigate('/projects');
+      Router.navigate('/home');
     } catch (e) {
       showAlert(wrap.querySelector('.auth-box'), e.message);
       btn.disabled = false; btn.textContent = 'Sign In';
@@ -548,7 +548,7 @@ function renderSignup() {
     try {
       const res = await Api.post('/v1/auth/signup', { email, password });
       Auth.setToken(res.token);
-      Router.navigate('/projects');
+      Router.navigate('/home');
     } catch (e) {
       showAlert(wrap.querySelector('.auth-box'), e.message);
       btn.disabled = false; btn.textContent = 'Create Account';
@@ -627,7 +627,7 @@ function renderReset(params) {
     try {
       const res = await Api.post('/v1/auth/reset', { token, password });
       Auth.setToken(res.token);
-      Router.navigate('/projects');
+      Router.navigate('/home');
     } catch (e) {
       showAlert(wrap.querySelector('.auth-box'), e.message);
       btn.disabled = false; btn.textContent = 'Reset Password';
@@ -1337,14 +1337,14 @@ const AiPanel = (() => {
   // in ai_routes.php) instead of two more client-driven HTTP calls chained by
   // JS awaits — those didn't survive a reload (a backgrounded mobile tab could
   // resume mid-build and lose the whole chain), a job polled by id does.
-  async function runBuildWatchOnly(body, sess) {
+  async function runBuildWatchOnly(body, sess, existingProgressMsg) {
     return streamGenerate(body, sess, {
       jobEndpoint: '/v1/ai/build/job',
       stages: BUILD_WATCH_ONLY_STAGES,
       mode: 'build',
       title: 'Building your app',
       onComplete: (ev, progressMsg) => finishBuildWatchOnly(ev, sess, progressMsg),
-    });
+    }, existingProgressMsg, (msg) => runBuildWatchOnly(body, sess, msg));
   }
 
   // Renders the single result/action card (project, tables, deploy status,
@@ -1402,7 +1402,7 @@ const AiPanel = (() => {
     renderProjectPicker();
   }
 
-  function proceedWithEditStreaming(body, sess) {
+  function proceedWithEditStreaming(body, sess, existingProgressMsg) {
     return streamGenerate(body, sess, {
       jobEndpoint: '/v1/ai/edit/job',
       stages: EDIT_PROGRESS_STAGES,
@@ -1411,20 +1411,20 @@ const AiPanel = (() => {
       // Auto-apply the edit straight to staging (no extra Deploy click), then the
       // result card offers View Staging + Publish to Live.
       onComplete: (ev) => applyPlan(ev.plan, 'edit', null, ev.validation),
-    });
+    }, existingProgressMsg, (msg) => proceedWithEditStreaming(body, sess, msg));
   }
 
   // ── Review-on build pipeline: schema+design, then a confirm card, then
   // frontend, reusing the existing plan/apply card as the next confirm gate. ──
 
-  function runBuildSchemaDesignStage(body, sess) {
+  function runBuildSchemaDesignStage(body, sess, existingProgressMsg) {
     return streamGenerate(body, sess, {
       jobEndpoint: '/v1/ai/build-schema/job',
       stages: BUILD_SCHEMA_STAGES,
       mode: 'build_schema',
       title: 'Designing your app',
       onComplete: (ev) => showSchemaDesignReviewCard(ev.schema, ev.design_brief, body),
-    });
+    }, existingProgressMsg, (msg) => runBuildSchemaDesignStage(body, sess, msg));
   }
 
   function renderSchemaDesignCard(schema, designBrief, onConfirm, onCancel) {
@@ -1456,7 +1456,7 @@ const AiPanel = (() => {
     container.scrollTop = container.scrollHeight;
   }
 
-  async function runBuildFrontendStage(schema, designBrief, body) {
+  async function runBuildFrontendStage(schema, designBrief, body, existingProgressMsg) {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
     const jobBody = { prompt: body.prompt, schema, design_brief: designBrief };
@@ -1466,7 +1466,7 @@ const AiPanel = (() => {
       mode: 'build_frontend',
       title: 'Generating frontend code',
       onComplete: (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation }),
-    });
+    }, existingProgressMsg, (msg) => runBuildFrontendStage(schema, designBrief, body, msg));
   }
 
   // Poll a job's progress until it resolves, replaying new stage events onto
@@ -1496,7 +1496,18 @@ const AiPanel = (() => {
         job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
         consecutiveFailures = 0;
       } catch (e) {
-        if (e.status === 401 || e.status === 404) return null;
+        if (e.status === 401 || e.status === 404) {
+          // Session expired or the job vanished server-side — neither is
+          // retryable, but the card must still resolve to a visible state
+          // instead of spinning forever with no explanation.
+          progressMsg.data.jobDone = true;
+          const active = progressMsg.data.stages.find(s => s.status === 'active');
+          if (active) active.status = 'error';
+          progressMsg.data.error = e.status === 401
+            ? 'Your session expired — please log in again.'
+            : 'This job no longer exists.';
+          return null;
+        }
         consecutiveFailures++;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
           progressMsg.data.jobDone = true;
@@ -1533,17 +1544,44 @@ const AiPanel = (() => {
     return null;
   }
 
+  // Clears a failed card back to its just-started shape so a retry can reuse
+  // it in place instead of appending a whole new "Building your app" card
+  // below the old (now-confusing) failed one.
+  function resetProgressMsgForRetry(progressMsg) {
+    progressMsg.data.error = null;
+    progressMsg.data.jobDone = false;
+    progressMsg.data.slowWarning = null;
+    delete progressMsg.data.jobId;
+    progressMsg.data.stages.forEach((s, i) => {
+      s.status = i === 0 ? 'active' : 'pending';
+      s.detail = '';
+      delete s.traceEntries;
+      delete s.testData;
+      delete s.rawData;
+      delete s.expanded;
+    });
+  }
+
   // Shared driver for build and edit: creates a server-side job, shows a live
   // progress card, polls until the job resolves, then hands the final plan to
-  // opts.onComplete.
-  async function streamGenerate(body, sess, opts) {
-    const progressMsg = makeProgressMsg(opts.stages, opts.title, opts.mode);
-    // Stashed so a reload mid-job can reconstruct enough of the original
-    // request to resume correctly (see resumeActiveJobIfAny) — only the
-    // build_schema stage actually needs this today, to hand the prompt back
-    // to the schema/design confirm card once that job finishes.
-    progressMsg.data.resumePrompt = body.prompt;
-    sess.messages.push(progressMsg);
+  // opts.onComplete. Pass `existingProgressMsg` (with `retryFn`) to retry a
+  // failed card in place rather than starting a fresh one — every caller
+  // passes its own retryFn, a closure over its own original arguments, so
+  // retrying replays exactly the request that failed (e.g. a failed frontend-
+  // generation retry still skips straight past the already-confirmed schema).
+  async function streamGenerate(body, sess, opts, existingProgressMsg, retryFn) {
+    const progressMsg = existingProgressMsg || makeProgressMsg(opts.stages, opts.title, opts.mode);
+    if (existingProgressMsg) {
+      resetProgressMsgForRetry(progressMsg);
+    } else {
+      // Stashed so a reload mid-job can reconstruct enough of the original
+      // request to resume correctly (see resumeActiveJobIfAny) — only the
+      // build_schema stage actually needs this today, to hand the prompt back
+      // to the schema/design confirm card once that job finishes.
+      progressMsg.data.resumePrompt = body.prompt;
+      sess.messages.push(progressMsg);
+    }
+    progressMsg.data.retry = retryFn || null;
 
     liveTraceMsg = { id: 'trace_' + Date.now(), role: 'ai', type: 'trace', data: [], live: true };
     sess.messages.push(liveTraceMsg);
@@ -1571,8 +1609,9 @@ const AiPanel = (() => {
       console.error('[AiPanel] job creation failed', { jobEndpoint: opts.jobEndpoint, error: e });
       const active = progressMsg.data.stages.find(s => s.status === 'active');
       if (active) active.status = 'error';
+      progressMsg.data.jobDone = true;
+      progressMsg.data.error = aiFriendlyError(e);
       liveTraceMsg.data.push({ call: 'POST ' + opts.jobEndpoint, inputs: body, status: e.status || 0, outputs: { error: e.message }, ms: Date.now() - t0 });
-      await addMessage(currentSessionId, { role: 'ai', type: 'error', content: aiFriendlyError(e), retryBody: body, retryType: 'plan' });
       if (liveTraceMsg) { liveTraceMsg.live = false; liveTraceMsg = null; }
       operationInProgress = false; operationMode = null;
       updateSendBtn();
@@ -1599,9 +1638,9 @@ const AiPanel = (() => {
         sess.messages = sess.messages.filter(m => m.id !== progressMsg.id);
       } else {
         const emsg = progressMsg.data.error || 'The job failed — please try again.';
+        progressMsg.data.error = emsg;
         console.error('[AiPanel] job failed', { jobEndpoint: opts.jobEndpoint, jobId, error: emsg });
         liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 0, outputs: { error: emsg }, ms: Date.now() - t0 });
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: emsg, retryBody: body, retryType: 'plan' });
       }
     } else {
       liveTraceMsg.data.push({ call: 'GET /v1/ai/jobs/' + jobId, inputs: {}, status: 200, outputs: { mode: finalEv.mode, summary: finalEv.summary, usage: finalEv.usage, aiTrace: finalEv.aiTrace }, ms: Date.now() - t0 });
@@ -1611,7 +1650,12 @@ const AiPanel = (() => {
       } catch (e) {
         console.error('[AiPanel] onComplete handler failed', { jobEndpoint: opts.jobEndpoint, jobId, error: e });
         progressSetStage(progressMsg, progressMsg.data.stages.find(s => s.status === 'active')?.key, 'error', e.message);
-        await addMessage(currentSessionId, { role: 'ai', type: 'error', content: e.message || 'Something went wrong after generation finished.', retryBody: body, retryType: 'plan' });
+        progressMsg.data.error = e.message || 'Something went wrong after generation finished.';
+        // No retry button here on purpose: the job itself already succeeded
+        // server-side (this failure is in applying/displaying the result), so
+        // "retry" re-running the whole generation would just redo already-
+        // successful work rather than fix anything.
+        progressMsg.data.retry = null;
       }
     }
 
@@ -2894,6 +2938,16 @@ const AiPanel = (() => {
     }
     if (data.error) {
       card.appendChild(el('div', { class: 'ai-progress-error' }, '✕ ' + data.error));
+      if (typeof data.retry === 'function') {
+        const retryBtn = el('button', { class: 'btn btn-ai btn-sm ai-progress-retry-btn' }, '↻ Retry');
+        retryBtn.addEventListener('click', async () => {
+          retryBtn.disabled = true;
+          retryBtn.textContent = 'Retrying…';
+          try { await data.retry(); }
+          catch (e) { console.error('[AiPanel] retry failed', e); retryBtn.disabled = false; retryBtn.textContent = '↻ Retry'; }
+        });
+        card.appendChild(retryBtn);
+      }
     }
     return card;
   }
@@ -3971,11 +4025,17 @@ async function loadOverviewPane(projectId, container, switchTab) {
       el('div', { class: 'home-stat-num' }, String(val)),
       el('div', { class: 'home-stat-label' }, label)
     );
-    container.appendChild(el('div', { class: 'home-stats' },
+    const statCards = [
       stat(o.stats.tables, o.stats.tables === 1 ? 'Table' : 'Tables'),
       stat(o.stats.live ? 'Live' : (o.stats.has_staging ? 'Staging' : '—'), 'Status'),
-      stat(fmtDate(o.project.created_at), 'Created')
-    ));
+    ];
+    // Users replaces the old "Created" card — more actionable at a glance —
+    // but only when the app actually has an auth table; otherwise leave the
+    // row at two cards rather than showing a meaningless zero.
+    if (o.stats.user_count !== null && o.stats.user_count !== undefined) {
+      statCards.push(stat(o.stats.user_count, o.stats.user_count === 1 ? 'User' : 'Users'));
+    }
+    container.appendChild(el('div', { class: 'home-stats', style: `grid-template-columns: repeat(${statCards.length}, 1fr)` }, ...statCards));
 
     const ctas = el('div', { class: 'overview-ctas' },
       el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open({ projectId: parseInt(projectId) }) }, '✦ Edit with AI')
@@ -3989,7 +4049,7 @@ async function loadOverviewPane(projectId, container, switchTab) {
     } else if (!o.stats.live) {
       ctas.appendChild(el('button', { class: 'btn btn-secondary', onClick: () => switchTab(3) }, 'Deploy'));
     }
-    if (o.stats.tables > 0) {
+    if (o.stats.tables > 0 && !o.stats.has_seed_data) {
       const seedAppBtn = el('button', { class: 'btn btn-secondary' }, '🌱 Seed App');
       seedAppBtn.addEventListener('click', async () => {
         seedAppBtn.disabled = true;
@@ -5033,111 +5093,114 @@ async function loadDeployContent(projectId, siteId) {
       }
     });
 
-    const currentDeploy = deploys.find(d => d.id === site.current_deploy_id);
     const statusBadge = d => {
       const cls = d.status === 'ready' ? 'green' : d.status === 'failed' ? 'red' : 'yellow';
       return `<span class="badge badge-${cls}">${d.status}</span>`;
     };
 
     const deployTable = deploys.length
-      ? el('table', { class: 'data-table' },
-          el('thead', {}, el('tr', {},
-            el('th', {}, 'Version'), el('th', {}, 'Status'), el('th', {}, 'Size'), el('th', {}, 'Uploaded'), el('th', {}, '')
-          )),
-          el('tbody', {}, ...deploys.map((d, idx) => {
-            const isCurrent = d.id === site.current_deploy_id;
-            const nextReady = deploys.slice(idx + 1).find(x => x.status === 'ready');
-            const isStaging = d.id === site.staging_deploy_id;
-            const labelEl = el('span', {}, d.version_label || '—');
-            if (isCurrent) {
-              const chip = el('span', { class: 'badge badge-green', style: 'margin-left:6px;font-size:0.7rem' }, 'live');
-              labelEl.appendChild(chip);
-            } else if (isStaging) {
-              const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'staging');
-              labelEl.appendChild(chip);
-            } else if (d.status === 'pending') {
-              const chip = el('span', { class: 'badge badge-yellow', style: 'margin-left:6px;font-size:0.7rem' }, 'pending');
-              labelEl.appendChild(chip);
-            }
-            const actions = el('td', { style: 'white-space:nowrap' });
-            if (isStaging && d.status === 'ready') {
-              actions.appendChild(el('button', {
-                class: 'btn btn-sm btn-primary',
-                style: 'margin-right:6px',
-                onClick: async () => {
-                  const warn = await latestTestWarning(projectId);
-                  if (!confirm((warn ? '⚠ ' + warn + '.\n\n' : '') + 'Publish this staging deploy to live?')) return;
-                  try {
-                    await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/publish`);
-                    loadDeployContent(projectId, siteId);
-                  } catch (e) { alert(e.message); }
-                }
-              }, 'Publish to Live'));
-            }
-            if (!isCurrent && !isStaging && d.status === 'ready') {
-              actions.appendChild(el('button', {
-                class: 'btn btn-sm btn-secondary',
-                style: 'margin-right:6px',
-                onClick: async () => {
-                  if (!confirm('Roll back to this deploy?')) return;
-                  try {
-                    await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/rollback`);
-                    loadDeployContent(projectId, siteId);
-                  } catch (e) { alert(e.message); }
-                }
-              }, 'Rollback'));
-            }
-            if (nextReady && d.status === 'ready') {
-              actions.appendChild(el('button', {
-                class: 'btn btn-sm btn-ghost',
-                onClick: async () => {
-                  try {
-                    const diff = await Api.get(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/diff?vs=${nextReady.id}`);
-                    const lines = [
-                      `Diff: deploy ${d.id} vs ${nextReady.id}`,
-                      '',
-                      `Added (${diff.added.length}):    ${diff.added.join(', ') || 'none'}`,
-                      `Removed (${diff.removed.length}): ${diff.removed.join(', ') || 'none'}`,
-                      `Modified (${diff.modified.length}): ${diff.modified.join(', ') || 'none'}`,
-                      `Unchanged: ${diff.unchanged}`,
-                    ];
-                    alert(lines.join('\n'));
-                  } catch (e) { alert(e.message); }
-                }
-              }, 'Diff'));
-            }
-            if (d.status === 'ready') {
-              actions.appendChild(el('button', {
-                class: 'btn btn-sm btn-ghost',
-                onClick: async (e) => {
-                  e.target.disabled = true; e.target.textContent = '…';
-                  try {
-                    const res = await fetch(`/api/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/download`, {
-                      headers: { Authorization: 'Bearer ' + (Auth.getToken() || '') }
-                    });
-                    if (!res.ok) throw new Error('Download failed');
-                    const cd = res.headers.get('Content-Disposition') || '';
-                    const fnMatch = cd.match(/filename="([^"]+)"/);
-                    const filename = fnMatch ? fnMatch[1] : `deploy-${d.id}.zip`;
-                    const blob = await res.blob();
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url; a.download = filename; a.click();
-                    URL.revokeObjectURL(url);
-                  } catch (err) { alert(err.message); }
-                  finally { e.target.disabled = false; e.target.textContent = '↓ ZIP'; }
-                }
-              }, '↓ ZIP'));
-            }
-            return el('tr', {},
-              el('td', {}, labelEl),
-              el('td', {}, ...h(`<span>${statusBadge(d)}</span>`).children),
-              el('td', { class: 'text-muted text-sm' }, d.size_bytes ? Math.round(d.size_bytes / 1024) + ' KB' : '—'),
-              el('td', { class: 'text-muted text-sm' }, fmtDate(d.uploaded_at)),
-              actions
-            );
-          }))
-        )
+      ? el('div', { class: 'deploy-card-list' }, ...deploys.map((d, idx) => {
+          const isCurrent = d.id === site.current_deploy_id;
+          const nextReady = deploys.slice(idx + 1).find(x => x.status === 'ready');
+          const isStaging = d.id === site.staging_deploy_id;
+
+          const badges = [];
+          if (isCurrent) badges.push(el('span', { class: 'home-badge home-badge-live' }, 'live'));
+          else if (isStaging) badges.push(el('span', { class: 'home-badge home-badge-staging' }, 'staging'));
+          else if (d.status === 'pending') badges.push(el('span', { class: 'home-badge home-badge-staging' }, 'pending'));
+
+          const footerLinks = [];
+          if (isCurrent && siteId) {
+            footerLinks.push(el('a', { class: 'home-proj-link', href: `/sites/s${siteId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →'));
+          }
+          if (isStaging && d.status === 'ready') {
+            footerLinks.push(el('button', {
+              class: 'home-proj-link',
+              style: 'background:none;border:none;cursor:pointer;font:inherit',
+              onClick: async () => {
+                const warn = await latestTestWarning(projectId);
+                if (!confirm((warn ? '⚠ ' + warn + '.\n\n' : '') + 'Publish this staging deploy to live?')) return;
+                try {
+                  await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/publish`);
+                  loadDeployContent(projectId, siteId);
+                } catch (e) { alert(e.message); }
+              }
+            }, 'Publish to Live'));
+          }
+          if (!isCurrent && !isStaging && d.status === 'ready') {
+            footerLinks.push(el('button', {
+              class: 'home-proj-link',
+              style: 'background:none;border:none;cursor:pointer;font:inherit',
+              onClick: async () => {
+                if (!confirm('Roll back to this deploy?')) return;
+                try {
+                  await Api.post(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/rollback`);
+                  loadDeployContent(projectId, siteId);
+                } catch (e) { alert(e.message); }
+              }
+            }, 'Rollback'));
+          }
+          if (nextReady && d.status === 'ready') {
+            footerLinks.push(el('button', {
+              class: 'home-proj-link',
+              style: 'background:none;border:none;cursor:pointer;font:inherit',
+              onClick: async () => {
+                try {
+                  const diff = await Api.get(`/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/diff?vs=${nextReady.id}`);
+                  const lines = [
+                    `Diff: deploy ${d.id} vs ${nextReady.id}`,
+                    '',
+                    `Added (${diff.added.length}):    ${diff.added.join(', ') || 'none'}`,
+                    `Removed (${diff.removed.length}): ${diff.removed.join(', ') || 'none'}`,
+                    `Modified (${diff.modified.length}): ${diff.modified.join(', ') || 'none'}`,
+                    `Unchanged: ${diff.unchanged}`,
+                  ];
+                  alert(lines.join('\n'));
+                } catch (e) { alert(e.message); }
+              }
+            }, 'Diff'));
+          }
+          if (d.status === 'ready') {
+            const dlBtn = el('button', {
+              class: 'home-proj-link',
+              style: 'background:none;border:none;cursor:pointer;font:inherit',
+              onClick: async (e) => {
+                dlBtn.disabled = true; dlBtn.textContent = '…';
+                try {
+                  const res = await fetch(`/api/v1/projects/${projectId}/sites/${siteId}/deploys/${d.id}/download`, {
+                    headers: { Authorization: 'Bearer ' + (Auth.getToken() || '') }
+                  });
+                  if (!res.ok) throw new Error('Download failed');
+                  const cd = res.headers.get('Content-Disposition') || '';
+                  const fnMatch = cd.match(/filename="([^"]+)"/);
+                  const filename = fnMatch ? fnMatch[1] : `deploy-${d.id}.zip`;
+                  const blob = await res.blob();
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url; a.download = filename; a.click();
+                  URL.revokeObjectURL(url);
+                } catch (err) { alert(err.message); }
+                finally { dlBtn.disabled = false; dlBtn.textContent = '↓ ZIP'; }
+              }
+            }, '↓ ZIP');
+            footerLinks.push(dlBtn);
+          }
+
+          return el('div', { class: 'proj-card deploy-card' },
+            el('div', { class: 'proj-card-body' },
+              el('div', { class: 'proj-card-name' }, d.version_label || `Deploy #${d.id}`),
+              el('div', { class: 'proj-card-meta' },
+                ...h(`<span>${statusBadge(d)}</span>`).children,
+                ...badges,
+                d.size_bytes ? `${Math.round(d.size_bytes / 1024)} KB` : null,
+              )
+            ),
+            el('div', { class: 'proj-card-footer' },
+              ...footerLinks,
+              el('span', { class: 'proj-card-date' }, fmtDate(d.uploaded_at))
+            )
+          );
+        }))
       : el('div', { class: 'text-muted' }, 'No deploys yet. Upload a zip above.');
 
     const tabDeploy = el('div', { class: 'tab active', id: 'tab-deploy' }, 'Deploy');
