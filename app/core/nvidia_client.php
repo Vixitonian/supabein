@@ -104,7 +104,10 @@ class NvidiaClient
                 // A too-high max_tokens is self-correcting: the error almost
                 // always states the real ceiling for this model, so shrink to
                 // it and retry — same mechanism as AnthropicClient/OpenRouterClient.
-                if ($attempt < 4 && $httpCode === 400 && stripos($msg, 'token') !== false) {
+                // Not gated on a specific HTTP status — extractLimit() itself
+                // is the real safety gate (only ever returns a strictly lower
+                // value than what was sent).
+                if ($attempt < 4 && stripos($msg, 'token') !== false) {
                     $corrected = MaxTokensProbe::extractLimit($msg, $maxTokens);
                     if ($corrected !== null) {
                         $maxTokens = $corrected;
