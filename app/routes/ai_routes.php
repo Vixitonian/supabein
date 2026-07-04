@@ -181,10 +181,27 @@ Therefore:
   again anywhere — not inline, not in a second file.
 - Do NOT dump the whole app into index.html. The files are the app; index.html only wires them.
 
-The inline bootstrap contains ONLY:
+The inline bootstrap contains ONLY (when auth exists, nav-login and nav-logout are TWO SEPARATE,
+ALWAYS-PRESENT elements toggled by the 'hidden' class — NEVER one element whose id/text/href you
+rewrite between "login" and "logout" state. An id you just reassigned is no longer findable by its
+old id on the next call, so re-querying it by that old id later returns null and crashes; toggling
+visibility on two static elements has no such trap and needs no listener to be added more than once):
+  <nav id="nav-menu" ...>
+    <a href="#/" ...>Notes</a>
+    <a href="#/login" id="nav-login" ...>Login</a>
+    <button id="nav-logout" class="hidden ...">Logout</button>
+  </nav>
   <script>
     /* define updateNav() here ONCE (function declaration is fine) */
-    function updateNav() { /* toggle nav links based on auth.getCurrentUser() */ }
+    function updateNav() {
+      const user = auth.getCurrentUser();
+      document.getElementById('nav-login').classList.toggle('hidden', !!user);
+      document.getElementById('nav-logout').classList.toggle('hidden', !user);
+    }
+    document.getElementById('nav-logout').addEventListener('click', (e) => {
+      e.preventDefault();
+      auth.logout();
+    });
 
     router.defineRoute('/', featureA.renderView);
     router.defineRoute('/login', auth.renderLogin);   // only if schema has a PASSWORD column
@@ -463,10 +480,11 @@ PLACEHOLDERS + OWNERSHIP
   name is "__AUTH_TABLE__" and its identifier column is "__AUTH_FIELD__", in case you need to
   reference them elsewhere (e.g. displaying the logged-in user's email on a profile page).
   Auth wiring requirements (mandatory when auth exists):
-  1. updateNav() MUST show a "Login" link (href="#/login") when auth.getCurrentUser() is null,
-     and a Logout button with the EXACT id="nav-logout" calling auth.logout() when a user is set
-     (the automated test suite looks for this exact id — a differently-named logout button is
-     invisible to it and reports as "missing", even though it works fine for real users).
+  1. Use the exact two-element, class-toggled nav pattern shown under RULE 2 above — a Login link
+     and a Logout button with the EXACT id="nav-logout", both always present in the DOM, shown/hidden
+     via the 'hidden' class (never a single element whose id/text you rewrite at runtime). The
+     automated test suite looks for this exact id — a missing or differently-named logout button is
+     invisible to it and reports as "missing", even though it might work fine for real users.
   2. Protected routes MUST redirect, not dead-end: if a gated render finds no current user, call
      router.navigate('/login') instead of printing "Access Denied" — otherwise the form is
      unreachable.
