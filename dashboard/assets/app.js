@@ -1926,7 +1926,8 @@ const AiPanel = (() => {
     await persistSession(sess);
 
     try {
-      const jobBody = { project_id: projectId };
+      const { provider, model } = getSelectedModel();
+      const jobBody = { project_id: projectId, provider, model };
       if (sess.id && !String(sess.id).startsWith('tmp_')) jobBody.session_id = sess.id;
       const created = await Api.post('/v1/ai/seed/job', jobBody);
       progressMsg.data.jobId = created.job_id;
@@ -3436,7 +3437,7 @@ const AiPanel = (() => {
     if (id) { try { await switchSession(id); } catch (_) {} }
   }
 
-  return { open, close, toggle, openSession };
+  return { open, close, toggle, openSession, getSelectedModel };
 })();
 
 // Projects list
@@ -3920,7 +3921,8 @@ async function loadOverviewPane(projectId, container, switchTab) {
         const orig = seedAppBtn.textContent;
         seedAppBtn.textContent = '⏳ Seeding…';
         try {
-          const { job_id } = await Api.post('/v1/ai/seed/job', { project_id: projectId });
+          const { provider, model } = AiPanel.getSelectedModel();
+          const { job_id } = await Api.post('/v1/ai/seed/job', { project_id: projectId, provider, model });
           const outcome = await pollJobUntilDone(job_id);
           if (outcome.ok) {
             const seededAnything = (outcome.result.seeded || []).length || (outcome.result.test_accounts || []).length;
@@ -3959,6 +3961,35 @@ async function loadOverviewPane(projectId, container, switchTab) {
       ctas.appendChild(clearSeedBtn);
     }
     container.appendChild(ctas);
+
+    // Test login accounts — deterministic test1@/test2@ rows created by
+    // "Seed App" when the schema has auth; nothing to show if seeding never
+    // ran or the app has no auth table at all.
+    try {
+      const { accounts } = await Api.get(`/v1/projects/${projectId}/test-accounts`);
+      if (accounts && accounts.length) {
+        container.appendChild(el('div', { class: 'home-section-head' },
+          el('span', { class: 'sb-section-label' }, 'Test login accounts')
+        ));
+        const list = el('div', { class: 'test-accounts-list' });
+        accounts.forEach(a => {
+          list.appendChild(el('div', { class: 'test-account-row' },
+            el('code', {}, a.identifier),
+            el('code', {}, a.password),
+            (() => {
+              const btn = el('button', { class: 'btn btn-secondary btn-sm' }, 'Copy');
+              btn.addEventListener('click', () => {
+                navigator.clipboard.writeText(`${a.identifier} / ${a.password}`).catch(() => {});
+                btn.textContent = 'Copied!';
+                setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+              });
+              return btn;
+            })()
+          ));
+        });
+        container.appendChild(list);
+      }
+    } catch (_) { /* best-effort — not worth failing the whole overview over */ }
 
     container.appendChild(el('div', { class: 'home-section-head' },
       el('span', { class: 'sb-section-label' }, 'Recent activity')
