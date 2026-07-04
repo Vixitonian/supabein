@@ -28,6 +28,13 @@ try {
     exit;
 }
 
+// The session's time_zone defaults to the MySQL server's SYSTEM setting, which
+// is NOT guaranteed to be UTC (on this host it isn't) — while PHP's own
+// date.timezone is UTC. Without this, every CURRENT_TIMESTAMP/NOW() written to
+// the DB is silently offset from the UTC the rest of the app assumes, which is
+// exactly what made "just happened" activity show up as several hours old.
+$pdo->exec("SET time_zone = '+00:00'");
+
 // Simple container
 final class App
 {

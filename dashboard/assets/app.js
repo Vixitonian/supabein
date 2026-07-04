@@ -192,8 +192,22 @@ function showAlert(container, msg, type = 'error') {
   container.insertBefore(div, container.firstChild);
 }
 
+// Backend timestamps are plain "YYYY-MM-DD HH:MM:SS" with no timezone marker,
+// and are always UTC (the DB connection is pinned to UTC in bootstrap.php).
+// A bare string like that gets parsed as LOCAL time by `new Date()`, which
+// silently shifts every timestamp by the viewer's UTC offset — this is what
+// made brand-new activity read as hours old. Force UTC interpretation instead.
+function parseServerDate(ts) {
+  if (!ts) return null;
+  let iso = String(ts).replace(' ', 'T');
+  if (!/[zZ]|[+-]\d\d:?\d\d$/.test(iso)) iso += 'Z';
+  const d = new Date(iso);
+  return isNaN(d) ? null : d;
+}
+
 function fmtDate(d) {
-  return d ? new Date(d).toLocaleString() : '—';
+  const parsed = parseServerDate(d);
+  return parsed ? parsed.toLocaleString() : '—';
 }
 
 
@@ -222,337 +236,6 @@ function makeCollapsible(card, open = false) {
     body.style.display = nowOpen ? 'none' : '';
     chevron.textContent = nowOpen ? '▸' : '▾';
   });
-}
-
-function generateClaudeMd(baseUrl, projectId, serviceKey, pat) {
-  const pid  = projectId  || 'YOUR_PROJECT_ID';
-  const skey = serviceKey || 'YOUR_SERVICE_KEY';
-  const token = pat       || 'sb_pat_xxxx          # create one above in Personal Access Tokens';
-  const siteUrl = baseUrl;
-
-  return `# CLAUDE.md — SupaBein Project
-
-This project uses **SupaBein** as its backend (database, REST API, and site hosting).
-Read this file before writing any backend code — all data and hosting goes through SupaBein.
-
----
-
-## Configuration
-
-\`\`\`
-SUPABEIN_URL=${siteUrl}
-SUPABEIN_TOKEN=${token}
-SUPABEIN_PROJECT_ID=${pid}
-SUPABEIN_SERVICE_KEY=${skey}
-SUPABEIN_SITE_ID=YOUR_SITE_ID       # Fill in after creating a site (from Deploy tab)
-\`\`\`
-
-> The PAT authenticates as the project owner — use it for control-plane operations (tables, policies, deploys).
-> The service_key bypasses all row-level policies — use it only in trusted server-side code, never in frontend bundles.
-
----
-
-## First-time Setup (run once)
-
-### 1. Create the project
-\`\`\`bash
-PROJECT=$(curl -s -X POST "${siteUrl}/api/v1/projects" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"my-app"}')
-
-PROJECT_ID=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-SERVICE_KEY=$(echo $PROJECT | python3 -c "import sys,json; print(json.load(sys.stdin)['service_key'])")
-
-echo "Project ID:  $PROJECT_ID"
-echo "Service key: $SERVICE_KEY"
-\`\`\`
-
-### 2. Create a site (for frontend hosting)
-\`\`\`bash
-curl -s -X POST "${siteUrl}/api/v1/projects/$PROJECT_ID/sites" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{"subdomain":"my-app","spa_mode":true}'
-\`\`\`
-Save the returned \`id\` as \`SUPABEIN_SITE_ID\`.
-
-> **spa_mode** — when \`true\`, every URL path serves \`index.html\` so your client-side router (React Router, Vue Router, etc.) handles routing. Set \`false\` for plain static sites where each URL must match a real file.
-
----
-
-## Tables
-
-### Create a table with columns
-\`\`\`bash
-curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "name": "posts",
-    "columns": [
-      { "name": "title",   "type": "VARCHAR(255)", "nullable": false },
-      { "name": "body",    "type": "TEXT",         "nullable": true  },
-      { "name": "user_id", "type": "INT",          "nullable": false }
-    ]
-  }'
-\`\`\`
-
-### Allowed column types
-\`INT\` \`BIGINT\` \`VARCHAR(255)\` \`TEXT\` \`BOOLEAN\` \`DATETIME\` \`DECIMAL(10,2)\` \`FLOAT\` \`PASSWORD\`
-
-
-> \`PASSWORD\` columns are stored as bcrypt hashes. Reads always return \`null\`. Write a plaintext value and it is hashed automatically. Use the data login endpoint to verify credentials.
-
-### List / delete tables
-\`\`\`bash
-curl -s "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables" -H "Authorization: Bearer $SUPABEIN_TOKEN"
-curl -s -X DELETE "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts" -H "Authorization: Bearer $SUPABEIN_TOKEN"
-\`\`\`
-
----
-
-## Row-Level Policies
-
-Every table defaults to **deny all**. Set policies before querying as anon.
-
-The endpoint accepts **one policy object per call** OR **an array** for batch upsert:
-
-\`\`\`bash
-# Batch — send an array (recommended)
-curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/policies" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '[
-    { "api_role": "anon",          "operation": "SELECT", "allowed": true  },
-    { "api_role": "anon",          "operation": "INSERT", "allowed": false },
-    { "api_role": "authenticated", "operation": "SELECT", "allowed": true  },
-    { "api_role": "authenticated", "operation": "INSERT", "allowed": true  },
-    { "api_role": "authenticated", "operation": "UPDATE", "allowed": true  },
-    { "api_role": "authenticated", "operation": "DELETE", "allowed": true  }
-  ]'
-
-# Single — send one object
-curl -s -X PUT "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/tables/posts/policies" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  -d '{ "api_role": "anon", "operation": "SELECT", "allowed": true }'
-\`\`\`
-
-Roles: \`anon\` (no token / public), \`authenticated\` (valid project-user JWT from /login).
-Operations: \`SELECT\` \`INSERT\` \`UPDATE\` \`DELETE\`
-
----
-
-## Data API
-
-Requests with **no Authorization header** are treated as the \`anon\` role and are subject to table policies. Use the **service_key** for trusted server-side calls that need to bypass policies.
-
-> **ID types**: \`id\` fields in responses are numbers (integers), not strings.
-> Use \`===\` comparisons safely.
-
-### Query parameters for list endpoints
-
-| Param | Effect |
-|-------|--------|
-| \`?limit=N\` | Max rows to return (1–1000, default 20) |
-| \`?offset=N\` | Skip N rows for pagination |
-| \`?col=value\` | Exact-match filter (shorthand for eq) |
-| \`?col=op.value\` | Filter with operator: \`eq\` \`neq\` \`gt\` \`gte\` \`lt\` \`lte\` \`like\` |
-| \`?order=col.dir\` | Sort: \`?order=name.asc\` or multiple: \`?order=age.desc,name.asc\` |
-
-Filter examples: \`?age=gte.18\` \`?name=like.Alice%25\` \`?status=neq.archived\`
-
-\`\`\`bash
-# List rows — returns {data: [...], count: N, limit: N, offset: N} — always unwrap .data
-curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts?limit=20&offset=0&status=active"
-# Response: {"data":[...],"count":42,"limit":20,"offset":0}
-
-# Insert a single row (authenticated user JWT from /login)
-curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts" \\
-  -H "Authorization: Bearer $USER_JWT" \\
-  -H "Content-Type: application/json" \\
-  -d '{"title":"Hello","body":"World","user_id":1}'
-
-# Bulk insert up to 500 rows in one request (service key for seeding)
-curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/batch" \\
-  -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '[{"title":"Row 1"},{"title":"Row 2"},{"title":"Row 3"}]'
-# Response: {"inserted":3,"rows":[...]}
-
-# Get (anon) / Update (user JWT) / Delete (service key)
-curl -s "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1"
-curl -s -X PATCH "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $USER_JWT" -H "Content-Type: application/json" -d '{"title":"Updated"}'
-curl -s -X DELETE "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/posts/1" -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY"
-\`\`\`
-
----
-
-## Auth (optional — only when project has a PASSWORD column)
-
-When any project table has a column of type \`PASSWORD\`, passwords are auto-hashed on write
-and never returned on read. Use the data API login endpoint for authentication.
-
-\`\`\`bash
-# Insert a user (password is auto-hashed; use service key to bypass policies)
-curl -s -X POST "${siteUrl}/api/v1/data/$SUPABEIN_PROJECT_ID/users" \\
-  -H "Authorization: Bearer $SUPABEIN_SERVICE_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email":"user@example.com","password":"secret123"}'
-
-# Log in → returns { token: "eyJ...", row: { id, email, ... } }
-curl -s -X POST "${siteUrl}/api/v1/data/${pid}/users/login" \\
-  -H "Content-Type: application/json" \\
-  -d '{"email":"user@example.com","password":"secret123"}'
-
-# Use the token for authenticated requests
-curl -s "${siteUrl}/api/v1/data/${pid}/posts" \\
-  -H "Authorization: Bearer $USER_TOKEN"
-\`\`\`
-
-Tokens contain \`sub\` (user row id), \`pid\` (project id), \`type: "project_user"\`.
-Store as \`sb:token\` in localStorage. Policy \`api_role: "authenticated"\` matches these tokens.
-
----
-
-## File Storage
-
-\`\`\`bash
-# Upload  (multipart, field name: file)
-curl -s -X POST "${siteUrl}/api/v1/projects/${pid}/storage/avatars" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "file=@photo.jpg"
-# returns { name, bucket, size, url }
-
-# List files in bucket
-curl -s "${siteUrl}/api/v1/projects/${pid}/storage/avatars" -H "Authorization: Bearer $SUPABEIN_TOKEN"
-
-# Delete a file
-curl -s -X DELETE "${siteUrl}/api/v1/projects/${pid}/storage/avatars/photo.jpg" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN"
-\`\`\`
-
-Public URL (use in <img> tags, no auth): \`${siteUrl}/api/v1/storage/${pid}/avatars/photo.jpg\`
-
-> Bucket names: 1–63 chars, lowercase/numbers/hyphens/underscores. Max 50 MB. No .php/.py/.sh uploads.
-
----
-
-## Rate Limiting
-
-The data API allows **600 requests per minute per project**. Excess requests get \`429\` with \`Retry-After: 60\`.
-
----
-
-## Deploying the Frontend
-
-> **Staging-first rule (mandatory):** Every deploy lands in **staging** first — never directly live.
-> Do NOT publish to live unless the user explicitly says so (e.g. "go live", "publish", "push to production").
-> Staging URL: \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/staging/\`
-> Live URL:    \`${siteUrl}/sites/s$SUPABEIN_SITE_ID/current/\`
-
-### Step 1 — Upload to staging
-
-#### Option A — Zip upload
-> **Zip structure**: files must be at the **root** of the zip, not inside a subfolder.
-> ✓ correct: \`cd dist && zip -r ../deploy.zip .\`
-> ✗ wrong: \`zip -r deploy.zip dist/\` — creates a \`dist/\` subfolder inside the zip and the site will 404.
-
-\`\`\`bash
-cd dist && zip -r ../deploy.zip . && cd ..
-DEPLOY=$(curl -s -X POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" -F "zipfile=@./deploy.zip" -F "label=v1.0.0")
-DEPLOY_ID=$(echo $DEPLOY | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-echo "Staged at: ${siteUrl}/sites/s$SUPABEIN_SITE_ID/staging/"
-\`\`\`
-
-#### Option B — File by file (CI/CD)
-\`\`\`bash
-DID=$(curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/open" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN" -H "Content-Type: application/json" \\
-  -d '{"label":"v1.0.0"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-
-find dist -type f | while read f; do
-  REL="\${f#dist/}"
-  curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/files?path=$REL" \\
-    -H "Authorization: Bearer $SUPABEIN_TOKEN" --data-binary "@$f"
-done
-
-# Finalize moves to staging — not live yet
-curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DID/finalize" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN"
-\`\`\`
-
-### Step 2 — Publish to live (only when explicitly told)
-
-\`\`\`bash
-curl -sX POST "${siteUrl}/api/v1/projects/$SUPABEIN_PROJECT_ID/sites/$SUPABEIN_SITE_ID/deploys/$DEPLOY_ID/publish" \\
-  -H "Authorization: Bearer $SUPABEIN_TOKEN"
-\`\`\`
-
----
-
-## Querying the Data API from Frontend JS
-
-\`\`\`js
-const SB_URL = '${siteUrl}/api/v1';
-const SB_PID = ${pid};
-
-const authHeaders = () => {
-  const t = localStorage.getItem('sb:token');
-  return t ? { Authorization: \`Bearer \${t}\` } : {};
-};
-
-// Anonymous request (no auth — subject to anon policies)
-// List response is a paginated envelope {data, count, limit, offset} — unwrap .data
-async function sbQuery(table, params = {}) {
-  const qs  = new URLSearchParams(params).toString();
-  const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`);
-  if (!res.ok) throw new Error(await res.text());
-  const result = await res.json();
-  return result.data ?? result;
-}
-
-// Authenticated request — pass a project_user JWT obtained from the login endpoint
-async function sbQueryAuth(table, token, params = {}) {
-  const qs  = new URLSearchParams(params).toString();
-  const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}?\${qs}\`, {
-    headers: { Authorization: \`Bearer \${token}\` }
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const result = await res.json();
-  return result.data ?? result;
-}
-
-async function sbInsert(table, data, token = null) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = \`Bearer \${token}\`;
-  const res = await fetch(\`\${SB_URL}/data/\${SB_PID}/\${table}\`, {
-    method: 'POST', headers, body: JSON.stringify(data)
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
-\`\`\`
-
-> Never put the \`service_key\` in frontend code — it bypasses all policies. Use anon requests (no header) for public data, and project_user JWTs (from the login endpoint) for per-user authenticated access.
-
----
-
-## Rules for Claude
-
-- Never use a separate database — all data goes through the SupaBein data API.
-- Never hardcode project ID or tokens in source files — read from environment variables.
-- Always create tables before inserting data.
-- Always set policies on new tables — the default is deny all.
-- Prefer the file-by-file deploy (Option B) for CI/CD; use zip upload for one-off deploys.
-- **Always deploy to staging first. Never publish to live unless the user explicitly instructs it** (e.g. "go live", "publish", "push to production"). Staging is safe to overwrite at any time.
-- Never expose your PAT or service_key in client-side code — the PAT gives owner access to all projects; the service_key bypasses all policies.
-- Anon requests (no Authorization header) are subject to table policies. Use a project-user JWT (from /login) for authenticated user access.
-- Do not invent API endpoints — the full reference is at ${siteUrl}/docs.
-- For app-user authentication, use \`POST /v1/data/:pid/:table/login\` with a table that has a \`PASSWORD\` column. Project-user JWTs are scoped to their project.
-- Use \`/v1/auth/*\` only for SupaBein platform management (operators/CI), never for app end-users.
-`;
 }
 
 function requireAuth() {
@@ -905,9 +588,6 @@ const AiPanel = (() => {
   let backdropEl = null;
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
-  // Single toggle covers both: validate generated code for mismatches, and
-  // (for build/edit) automatically run the combined test+validate job after deploy.
-  let autoTestEnabled = localStorage.getItem('sb:ai_autotest') !== '0'; // default ON
   let buildMode = localStorage.getItem('sb:ai_build') === '1';
   let liveTraceMsg = null;
   let operationInProgress = false;
@@ -3004,8 +2684,9 @@ const AiPanel = (() => {
 
     const sess = currentSession();
 
-    // Build conversation history for Gemini context
-    const body = { prompt, validate: autoTestEnabled };
+    // Build conversation history for Gemini context. Validation and testing
+    // are now unconditional stages of every build/edit, not a toggle.
+    const body = { prompt, validate: true };
     if (selectedProjectId) body.project_id = selectedProjectId;
     const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
     if (priorMessages.length > 0) {
@@ -3143,9 +2824,10 @@ const AiPanel = (() => {
       // Edits auto-apply (no separate review step), so validation shows here,
       // after the deploy — build mode already showed it in the plan card
       // before the user chose to apply at all. Skip this when auto-test is
-      // about to fire anyway — its combined test+validate card will show the
-      // same findings fresh moments later, and showing both would be redundant.
-      const willAutoTest = autoTestEnabled && (result.deploy || result.staging || result.site);
+      // about to fire anyway (always, once a frontend actually deployed) —
+      // its combined test+validate card will show the same findings fresh
+      // moments later, and showing both would be redundant.
+      const willAutoTest = !!(result.deploy || result.staging || result.site);
       if (mode === 'edit' && validation && !willAutoTest) {
         await addMessage(currentSessionId, { role: 'ai', type: 'validation', content: '', data: { findings: validation } });
       }
@@ -3265,16 +2947,6 @@ const AiPanel = (() => {
       }
     }, 'Review');
 
-    const autoTestToggle = el('button', {
-      class: 'ai-review-toggle' + (autoTestEnabled ? ' active' : ''),
-      title: 'Automatically check for mismatches and run browser tests after every build/edit deploy',
-      onClick: () => {
-        autoTestEnabled = !autoTestEnabled;
-        localStorage.setItem('sb:ai_autotest', autoTestEnabled ? '1' : '0');
-        autoTestToggle.classList.toggle('active', autoTestEnabled);
-      }
-    }, 'Auto-test');
-
     const modeBtn = el('button', {
       class: 'ai-mode-btn' + (buildMode ? ' active' : ''),
       title: buildMode ? 'Switch to Chat mode' : 'Switch to Build mode',
@@ -3330,7 +3002,6 @@ const AiPanel = (() => {
           modelSelectorBtn,
           modeBtn,
           reviewToggle,
-          autoTestToggle,
           sendBtn
         )
       )
@@ -3470,8 +3141,8 @@ const AiPanel = (() => {
 // Projects list
 function homeTimeAgo(ts) {
   if (!ts) return '';
-  const d = new Date((ts || '').replace(' ', 'T'));
-  if (isNaN(d)) return fmtDate(ts);
+  const d = parseServerDate(ts);
+  if (!d) return fmtDate(ts);
   const s = Math.floor((Date.now() - d.getTime()) / 1000);
   if (s < 60) return 'just now';
   if (s < 3600) return Math.floor(s / 60) + 'm ago';
@@ -5129,7 +4800,7 @@ async function renderAccount() {
       ),
       el('div', { style: 'display:flex;gap:12px;font-size:0.85rem' },
         el('span', { style: 'color:var(--muted);width:80px;flex-shrink:0' }, 'Member since'),
-        el('span', {}, new Date(user.created_at).toLocaleDateString())
+        el('span', {}, parseServerDate(user.created_at)?.toLocaleDateString() || '—')
       )
     )
   );
@@ -5162,11 +4833,11 @@ async function renderAccount() {
           renderPatList();
         } catch (e) { alert(e.message); }
       };
-      const lastUsed = pat.last_used_at ? new Date(pat.last_used_at).toLocaleDateString() : 'Never';
+      const lastUsed = pat.last_used_at ? (parseServerDate(pat.last_used_at)?.toLocaleDateString() || 'Never') : 'Never';
       listEl.appendChild(
         el('div', { class: 'pat-row' },
           el('span', { class: 'pat-name' }, pat.name),
-          el('span', { class: 'text-muted pat-meta' }, `Created ${new Date(pat.created_at).toLocaleDateString()} · Last used: ${lastUsed}`),
+          el('span', { class: 'text-muted pat-meta' }, `Created ${parseServerDate(pat.created_at)?.toLocaleDateString() || '—'} · Last used: ${lastUsed}`),
           revokeBtn
         )
       );
@@ -5213,82 +4884,6 @@ async function renderAccount() {
     tokenDisplay
   );
 
-  // ── CLAUDE.md Builder card ──
-  let projects = [];
-  try { projects = await Api.get('/v1/projects'); } catch (_) {}
-
-  const baseUrl   = window.location.origin;
-  const previewEl = el('textarea', {
-    readonly: 'readonly',
-    style: 'width:100%;height:320px;font-family:monospace;font-size:0.75rem;background:#0a0d14;color:#e2e8f0;border:1px solid var(--border);border-radius:6px;padding:12px;resize:vertical;white-space:pre',
-  });
-  previewEl.value = generateClaudeMd(baseUrl, null, null);
-
-  const projSelect = el('select', { class: 'form-control', style: 'max-width:320px' },
-    el('option', { value: '' }, '— No project (generic template) —'),
-    ...projects.map(p => el('option', { value: p.id }, `${p.name} (id: ${p.id})`))
-  );
-
-  const patInput = el('input', {
-    type: 'text',
-    class: 'form-control',
-    placeholder: 'Paste your PAT here (sb_pat_…)',
-    style: 'max-width:480px;font-family:monospace;font-size:0.82rem',
-  });
-
-  let currentProjId = null, currentServiceKey = null;
-
-  function refreshPreview() {
-    const pat = patInput.value.trim() || null;
-    previewEl.value = generateClaudeMd(baseUrl, currentProjId, currentServiceKey, pat);
-  }
-
-  projSelect.addEventListener('change', async () => {
-    const pid = projSelect.value;
-    if (!pid) {
-      currentProjId = null; currentServiceKey = null;
-      refreshPreview();
-      return;
-    }
-    try {
-      const proj = await Api.get(`/v1/projects/${pid}`);
-      currentProjId  = proj.id;
-      currentServiceKey = proj.service_key;
-      refreshPreview();
-    } catch (e) { alert(e.message); }
-  });
-
-  patInput.addEventListener('input', refreshPreview);
-
-  const copyMdBtn = el('button', { class: 'btn btn-secondary btn-sm' }, 'Copy');
-  copyMdBtn.onclick = () => {
-    navigator.clipboard.writeText(previewEl.value).then(() => {
-      const orig = copyMdBtn.textContent;
-      copyMdBtn.textContent = 'Copied!';
-      setTimeout(() => { copyMdBtn.textContent = orig; }, 1500);
-    });
-  };
-
-  const dlBtn = el('button', { class: 'btn btn-primary btn-sm' }, 'Download CLAUDE.md');
-  dlBtn.onclick = () => downloadText('CLAUDE.md', previewEl.value);
-
-  const builderCard = el('div', { class: 'api-table-card' },
-    el('div', { class: 'api-table-title' }, 'CLAUDE.md Builder'),
-    el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-      'Generate a ready-to-use CLAUDE.md for any new project repo. Drop it at the repo root — Claude Code will read it automatically and know how to use SupaBein as the backend.'
-    ),
-    el('div', { style: 'margin-bottom:12px' },
-      el('label', { class: 'label', style: 'margin-bottom:4px;display:block' }, 'Project (optional)'),
-      projSelect
-    ),
-    el('div', { style: 'margin-bottom:12px' },
-      el('label', { class: 'label', style: 'margin-bottom:4px;display:block' }, 'Personal Access Token — create one above, then paste it here'),
-      patInput
-    ),
-    previewEl,
-    el('div', { style: 'display:flex;gap:8px;margin-top:10px' }, copyMdBtn, dlBtn)
-  );
-
   // ── Change password card ──
   const pwFields = {
     current: el('input', { type: 'password', class: 'form-control', placeholder: 'Current password' }),
@@ -5326,7 +4921,6 @@ async function renderAccount() {
 
   makeCollapsible(pwCard);
   makeCollapsible(patCard);
-  makeCollapsible(builderCard);
 
   renderLayout(null, 'account', [
     el('div', { class: 'page-header' },
@@ -5336,7 +4930,6 @@ async function renderAccount() {
     infoCard,
     pwCard,
     patCard,
-    builderCard,
   ]);
 }
 
