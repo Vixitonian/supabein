@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS `users` (
     `email`         VARCHAR(255) NOT NULL,
     `password_hash` VARCHAR(255) NOT NULL,
     `role`          ENUM('owner','member') NOT NULL DEFAULT 'owner',
+    `country`       CHAR(2) DEFAULT NULL,
     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY `uq_email` (`email`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -333,3 +334,7 @@ SET foreign_key_checks = 1;
 --     `count`        INT UNSIGNED NOT NULL DEFAULT 0,
 --     PRIMARY KEY (`project_id`, `window_start`)
 -- ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ─── Migration: users.country (run once on existing installs) ───────────────
+-- ALTER TABLE `users`
+--   ADD COLUMN `country` CHAR(2) DEFAULT NULL AFTER `role`;
