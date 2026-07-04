@@ -35,18 +35,130 @@ function ai_validator_severity_rank(string $severity): int
     return match ($severity) { 'error' => 3, 'warning' => 2, 'info' => 1, default => 0 };
 }
 
-// const NAME = (() => { ...; return { a, b: c, ... }; })();  →  ['a', 'b']
-function ai_validator_extract_exports(string $js): array
+// Splits the inner content of an object literal into its top-level members,
+// respecting nested {}/()/[] and string/template literals so a comma inside a
+// method body or argument list isn't mistaken for a member separator.
+function ai_validator_split_top_level(string $body): array
 {
-    if (!preg_match('/return\s*\{([^}]*)\}\s*;\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/s', trim($js), $m)) {
+    $parts = [];
+    $depth = 0;
+    $state = 'code'; // code | ' | " | `
+    $buf   = '';
+    $len   = strlen($body);
+    $i     = 0;
+    while ($i < $len) {
+        $ch = $body[$i];
+        if ($state === 'code') {
+            if ($ch === '/' && $i + 1 < $len && $body[$i + 1] === '/') {
+                $nl = strpos($body, "\n", $i);
+                $i  = $nl === false ? $len : $nl + 1;
+                continue;
+            }
+            if ($ch === '/' && $i + 1 < $len && $body[$i + 1] === '*') {
+                $end = strpos($body, '*/', $i + 2);
+                $i   = $end === false ? $len : $end + 2;
+                continue;
+            }
+            if ($ch === "'" || $ch === '"' || $ch === '`') { $state = $ch; $buf .= $ch; $i++; continue; }
+            if ($ch === '{' || $ch === '(' || $ch === '[') { $depth++; $buf .= $ch; $i++; continue; }
+            if ($ch === '}' || $ch === ')' || $ch === ']') { $depth--; $buf .= $ch; $i++; continue; }
+            if ($ch === ',' && $depth === 0) { $parts[] = $buf; $buf = ''; $i++; continue; }
+            $buf .= $ch; $i++; continue;
+        }
+        // Inside a string/template literal: copy verbatim until the matching
+        // unescaped quote. Template `${...}` interpolation is treated as
+        // opaque text here (not re-entered as code) — a heuristic, not a full
+        // parser, but sufficient to find member boundaries correctly.
+        $buf .= $ch;
+        if ($ch === '\\' && $i + 1 < $len) { $buf .= $body[$i + 1]; $i += 2; continue; }
+        if ($ch === $state) { $state = 'code'; }
+        $i++;
+    }
+    if (trim($buf) !== '') $parts[] = $buf;
+    return $parts;
+}
+
+// Given one top-level object member's raw source, return its key name for
+// all three legal forms: `name: value`, method-shorthand `name(...) {...}`
+// (optionally `async`/generator `*`), and property-shorthand `name`.
+function ai_validator_key_from_member(string $part): ?string
+{
+    $part = trim($part);
+    if ($part === '') return null;
+    if (preg_match('/^(?:async\s+|\*\s*)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/', $part, $m)) return $m[1];
+    if (preg_match('/^([A-Za-z_$][A-Za-z0-9_$]*)\s*:/', $part, $m)) return $m[1];
+    if (preg_match('/^([A-Za-z_$][A-Za-z0-9_$]*)$/', $part, $m)) return $m[1];
+    return null;
+}
+
+// Scans forward from an opening `{` at $braceStart to its matching `}`
+// (respecting nested braces and string/template literals) and returns the
+// content strictly between them, or null if unbalanced.
+function ai_validator_extract_balanced_body(string $js, int $braceStart): ?string
+{
+    $len = strlen($js);
+    if ($braceStart >= $len || $js[$braceStart] !== '{') return null;
+    $depth = 0;
+    $state = 'code';
+    $i     = $braceStart;
+    while ($i < $len) {
+        $ch = $js[$i];
+        if ($state === 'code') {
+            if ($ch === '/' && $i + 1 < $len && $js[$i + 1] === '/') {
+                $nl = strpos($js, "\n", $i);
+                $i  = $nl === false ? $len : $nl + 1;
+                continue;
+            }
+            if ($ch === '/' && $i + 1 < $len && $js[$i + 1] === '*') {
+                $end = strpos($js, '*/', $i + 2);
+                $i   = $end === false ? $len : $end + 2;
+                continue;
+            }
+            if ($ch === "'" || $ch === '"' || $ch === '`') { $state = $ch; $i++; continue; }
+            if ($ch === '{') { $depth++; $i++; continue; }
+            if ($ch === '}') {
+                $depth--;
+                if ($depth === 0) return substr($js, $braceStart + 1, $i - $braceStart - 1);
+                $i++; continue;
+            }
+            $i++; continue;
+        }
+        if ($ch === '\\' && $i + 1 < $len) { $i += 2; continue; }
+        if ($ch === $state) { $state = 'code'; }
+        $i++;
+    }
+    return null; // unbalanced
+}
+
+// A feature module is legitimately written in either of two shapes:
+//   (a) const NAME = (() => { ...; return { a, b: c }; })();  — IIFE, exports via return
+//   (b) const NAME = { a: fn, b: fn2 };                        — plain object literal
+// Both are common model output; only recognizing (a) makes every module
+// written as (b) look like it "exports nothing" no matter what it actually
+// contains, which then false-positives every route pointing at it forever
+// (no edit can fix a check that can't see the file's real exports).
+function ai_validator_extract_exports(string $js, string $moduleName): array
+{
+    if (preg_match('/return\s*\{([^}]*)\}\s*;\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/s', trim($js), $m)) {
+        $names = [];
+        foreach (ai_validator_split_top_level($m[1]) as $part) {
+            $name = ai_validator_key_from_member($part);
+            if ($name !== null) $names[] = $name;
+        }
+        return $names;
+    }
+
+    if (!preg_match('/(?:const|let|var)\s+' . preg_quote($moduleName, '/') . '\s*=\s*\{/', $js, $m2, PREG_OFFSET_CAPTURE)) {
         return [];
     }
+    $braceStart = $m2[0][1] + strlen($m2[0][0]) - 1;
+    $body       = ai_validator_extract_balanced_body($js, $braceStart);
+    if ($body === null) return [];
+
     $names = [];
-    foreach (explode(',', $m[1]) as $part) {
-        $part = trim($part);
-        if ($part === '') continue;
-        $name = trim(explode(':', $part)[0]); // shorthand "a" or renamed "a: b" — exported name is the left side
-        if (preg_match('/^[A-Za-z_$][A-Za-z0-9_$]*$/', $name)) $names[] = $name;
+    foreach (ai_validator_split_top_level($body) as $part) {
+        $name = ai_validator_key_from_member($part);
+        if ($name !== null) $names[] = $name;
     }
     return $names;
 }
@@ -129,7 +241,7 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
     $exportsByModule = [];
     foreach ($byPath as $path => $content) {
         if (!preg_match('#^features/([a-zA-Z0-9_]+)/\1\.js$#', $path, $m)) continue;
-        $exportsByModule[$m[1]] = ai_validator_extract_exports($content);
+        $exportsByModule[$m[1]] = ai_validator_extract_exports($content, $m[1]);
     }
 
     $routeDefs     = [];
