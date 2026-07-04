@@ -825,12 +825,20 @@ function ai_deploy_files(
         return ['error' => 'Cannot create deploy directory', 'deploy' => null];
     }
 
-    // Seed from the live deploy so an edit that returns only some files
-    // doesn't blank the rest of the site.
+    // Seed from the site's actual live deploy so an edit that returns only
+    // some files doesn't blank the rest of the site. A project can sit in
+    // staging-only for its whole test-and-fix loop (Review-off builds deploy
+    // to staging first; "current" only exists after an explicit Publish), so
+    // this must prefer staging over current exactly like ai_effective_deploy_target()
+    // elsewhere — merging from a nonexistent "current" here silently drops
+    // every file the edit didn't re-output, which then fails the smoke check
+    // below and the whole edit apply fails with nothing actually deployed.
     if ($mergeFromCurrent) {
-        $currentDir = $sitesPath . '/s' . $siteId . '/current';
-        if (is_dir($currentDir)) {
-            \SupaBein\Deploy::rcopy($currentDir, $deployDir);
+        $mergeSite   = $catalog->getSiteById($siteId) ?? [];
+        $mergeTarget = ai_effective_deploy_target($mergeSite);
+        $mergeDir    = $sitesPath . '/s' . $siteId . '/' . $mergeTarget;
+        if (is_dir($mergeDir)) {
+            \SupaBein\Deploy::rcopy($mergeDir, $deployDir);
             @unlink($deployDir . '/.htaccess');   // regenerated below
         }
     }
