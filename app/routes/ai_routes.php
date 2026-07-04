@@ -185,9 +185,11 @@ The inline bootstrap contains ONLY (when auth exists, nav-login and nav-logout a
 ALWAYS-PRESENT elements toggled by the 'hidden' class — NEVER one element whose id/text/href you
 rewrite between "login" and "logout" state. An id you just reassigned is no longer findable by its
 old id on the next call, so re-querying it by that old id later returns null and crashes; toggling
-visibility on two static elements has no such trap and needs no listener to be added more than once):
+visibility on two static elements has no such trap and needs no listener to be added more than once.
+Any OTHER nav link whose route requires a logged-in user — see RULE 3's "gate the nav link itself"
+paragraph — gets class="nav-authed-only" and is toggled the same way, in the same function):
   <nav id="nav-menu" ...>
-    <a href="#/" ...>Notes</a>
+    <a href="#/" class="nav-authed-only hidden" ...>Notes</a>
     <a href="#/login" id="nav-login" ...>Login</a>
     <button id="nav-logout" class="hidden ...">Logout</button>
   </nav>
@@ -197,6 +199,7 @@ visibility on two static elements has no such trap and needs no listener to be a
       const user = auth.getCurrentUser();
       document.getElementById('nav-login').classList.toggle('hidden', !!user);
       document.getElementById('nav-logout').classList.toggle('hidden', !user);
+      document.querySelectorAll('.nav-authed-only').forEach(el => el.classList.toggle('hidden', !user));
     }
     document.getElementById('nav-logout').addEventListener('click', (e) => {
       e.preventDefault();
@@ -251,6 +254,15 @@ combined screen:
   router.defineRoute('/signup', auth.renderSignup);
 Each page already cross-links to the other (Login → "Sign up", Signup → "Log in"), so nav only ever
 needs a single "Login" link — same as before, nothing extra required for signup to stay reachable.
+
+GATE THE NAV LINK ITSELF, not just the route: if a route's render function immediately redirects an
+anonymous visitor to /login (every row it shows is owned by :current_user_id and there's no anon
+SELECT policy on that table — the normal shape for "your notes", "your orders", etc.), its nav link
+must be hidden until the user is logged in, using class="nav-authed-only" from RULE 2's boilerplate.
+A logged-out visitor should see ONLY Login in the nav — showing a link that just bounces them
+straight to a login page instead of displaying anything is confusing, not helpful, and looks broken.
+If the route's data genuinely has an anon SELECT policy (publicly viewable), leave its nav link
+visible at all times instead — it isn't gated, so nothing needs toggling for it.
 
 ═══════════════════════════════════════════════════════
 RULE 4 — ROUTER NAVIGATION PATHS
@@ -404,6 +416,29 @@ Pattern for every form submit handler:
       btn.disabled = false;
     }
   });
+
+WHERE this runs matters as much as the code itself: call formEl.addEventListener(...) (or any
+"initX()" wiring function that does it) SYNCHRONOUSLY, in the SAME render function that just set
+appDiv.innerHTML to the form's markup — never as a separate top-level statement gated by inspecting
+window.location.hash (or any other check evaluated once when the script file first loads).
+  ✗ // bottom of the file, outside any function:
+    if (window.location.hash.startsWith('#/items/')) { initItemForm(); }
+This is a fatal, hard-to-notice bug in a hash-routed SPA: script files execute exactly ONCE per
+page load. Navigating to the form's route via a normal in-app link (clicking, not reloading) never
+re-runs this check, so initItemForm() is simply never called and the form silently has no submit
+handler — clicking its button falls through to the browser's native (unhandled) form submission,
+which reloads the page. And if the user instead lands on that URL via a hard refresh, the hash DOES
+match on that load, but the check runs before the router has rendered anything into #app yet — so
+document.getElementById('item-form') is still null, and .addEventListener throws "Cannot read
+properties of null (reading 'addEventListener')".
+  ✓ renderItemForm: (item) => {
+      const appDiv = document.getElementById('app');
+      appDiv.innerHTML = `<form id="item-form">...</form>`;
+      document.getElementById('item-form').addEventListener('submit', async (e) => { ... });
+    }
+Every view that needs a listener is self-contained this way: render its HTML, then wire it, in the
+same function call, every single time that view renders — regardless of whether this was a fresh
+page load or a client-side navigation.
 
 ═══════════════════════════════════════════════════════
 RULE 11 — HTML HEAD + QUALITY FLOOR
@@ -3610,6 +3645,41 @@ function ai_seed_test_accounts(\PDO $pdo, \SupaBein\Catalog $catalog, int $proje
     return $accounts;
 }
 
+// Read-only counterpart to ai_seed_test_accounts() — checks whether the
+// deterministic test1@/test2@ (or test1/test2) rows already exist, without
+// creating anything. Nothing about test accounts is stored anywhere beyond
+// the auth table itself; their identifier and password are both fixed and
+// derivable, so "do they exist" is answerable on demand instead of needing
+// its own tracking table.
+function ai_get_test_accounts_status(\PDO $pdo, \SupaBein\Catalog $catalog, int $projectId, array $schema): array
+{
+    $auth = ai_detect_auth($schema);
+    if (!$auth['table']) return [];
+
+    $tbl = $catalog->getTable($projectId, $auth['table']);
+    if (!$tbl) return [];
+
+    $idField      = $auth['field'] ?? 'email';
+    $isEmailField = str_contains(strtolower($idField), 'email');
+    $physical     = $tbl['physical_name'];
+    $accounts     = [];
+
+    for ($i = 1; $i <= AI_TEST_ACCOUNT_COUNT; $i++) {
+        $identifier = $isEmailField ? "test{$i}@example.com" : "test{$i}";
+        try {
+            $existing = $pdo->prepare("SELECT id FROM `{$physical}` WHERE `{$idField}` = ? LIMIT 1");
+            $existing->execute([$identifier]);
+            if ($existing->fetchColumn()) {
+                $accounts[] = ['identifier' => $identifier, 'password' => AI_TEST_ACCOUNT_PASSWORD];
+            }
+        } catch (\Throwable $e) {
+            // Table/column mismatch (e.g. schema changed since accounts were
+            // seeded) — treat as "no test accounts", not a hard failure.
+        }
+    }
+    return $accounts;
+}
+
 // On-demand seeding for the "Seed App" button — same seed_data shape and
 // insertion path as build's initial seed and edit mode's "seed N rows"
 // requests (ai_insert_seed_data), just triggered directly instead of via a
@@ -4914,6 +4984,19 @@ PROMPT;
         $catalog   = \SupaBein\Catalog::getInstance();
         if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
         json_out($catalog->getLatestTestStatus($projectId, $userId) ?? ['tested' => false]);
+    }, ['auth_middleware']);
+
+    // ── Test login accounts seeded for this project (if any) — read-only,
+    //    checks for the deterministic test1@/test2@ rows rather than storing
+    //    anything separately; see ai_get_test_accounts_status().
+    $router->get('/v1/projects/:id/test-accounts', function (array $req): void {
+        $userId    = (int)$req['auth']['user_id'];
+        $projectId = (int)$req['params']['id'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        if (!$catalog->getProjectById($projectId, $userId)) abort(404, 'Project not found');
+        $schema = ai_schema_from_db($projectId, $catalog);
+        $pdo    = \App::get('db');
+        json_out(['accounts' => ai_get_test_accounts_status($pdo, $catalog, $projectId, $schema)]);
     }, ['auth_middleware']);
 
     // ── Run Playwright user-story tests as a background job — same pattern as
