@@ -1112,6 +1112,17 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .ai-progress-detail-body > .ai-msg { border: 1px solid var(--border); margin-top: 4px; }
 .ai-progress-trace { margin-top: 4px; }
 
+/* Narrow screens: the fixed 28px indent plus nested trace/JSON padding leaves
+   almost no usable width for stage detail content, and pre-formatted JSON
+   forces its own cramped horizontal scrollbar inside an already-scrolled
+   page. Shrink the indent and let JSON wrap instead of scroll sideways. */
+@media (max-width: 480px) {
+  .ai-progress-detail-body { margin-left: 10px; }
+  .ai-trace-json { white-space: pre-wrap; word-break: break-word; max-height: 220px; }
+  .ai-trace-summary, .ai-trace-ai-summary { flex-wrap: wrap; }
+  .ai-trace-call, .ai-trace-ai-stage { word-break: break-word; }
+}
+
 /* ─── Plan card ──────────────────────────────────────────────────────────── */
 .ai-plan-card { border: 1px solid var(--border); }
 .ai-plan-settled { opacity: 0.65; }
