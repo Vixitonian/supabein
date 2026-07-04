@@ -1,14 +1,29 @@
 'use strict';
 
-// Seeding deliberately never touches auth tables or anything owned by a
-// specific user (via user_id / :current_user_id policies) — only "global"
-// catalogue-style data is safe to fill with generic sample rows. An app
-// where every table is user-scoped (e.g. a personal budget tracker) will
-// always report nothing eligible — that's expected, not a failure. Shared
-// by the AI panel's seed flow and the Overview page's Seed App button.
-const NO_SEED_ELIGIBLE_MSG = 'No eligible tables to seed — every table in this app is either the auth table or ' +
-  "scoped to individual users (via a user_id/current_user_id policy), so there's no \"global\" data safe to fill " +
-  'with generic samples. This is expected for apps where all data belongs to a specific user.';
+// Shown only when NOTHING got seeded at all — no global tables to fill, and
+// no auth table to create test login accounts against either (e.g. a schema
+// with a single user-owned table and no way to log in and see it).
+const NO_SEED_ELIGIBLE_MSG = "No eligible tables to seed, and this app has no auth table to create test " +
+  'login accounts against either — there\'s nothing "global" to fill and no way to log in and see ' +
+  'user-owned data. This is expected for some schemas, not a failure.';
+
+// Builds the seed result message shared by the AI panel's seed flow and the
+// Overview page's Seed App button — test accounts (if any were created) are
+// surfaced prominently since they're the only way to actually see rows
+// seeded into user-owned tables (see ai_seed_test_accounts on the backend).
+function formatSeedResultMessage(result) {
+  const seeded   = result?.seeded || [];
+  const accounts = result?.test_accounts || [];
+  if (!seeded.length && !accounts.length) return NO_SEED_ELIGIBLE_MSG;
+
+  const parts = [];
+  if (seeded.length) parts.push('Seeded: ' + seeded.join(', ') + '.');
+  if (accounts.length) {
+    const logins = accounts.map(a => `${a.identifier} / ${a.password}`).join(', ');
+    parts.push(`Test login${accounts.length !== 1 ? 's' : ''}: ${logins} — log in to see the seeded data.`);
+  }
+  return parts.join(' ');
+}
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -1913,6 +1928,7 @@ const AiPanel = (() => {
   let seedRunning = false;
   const SEED_PROGRESS_STAGES = [
     { key: 'schema',   label: 'Reading schema' },
+    { key: 'accounts', label: 'Setting up test login accounts' },
     { key: 'generate', label: 'Generating sample data' },
     { key: 'insert',   label: 'Inserting rows' },
   ];
@@ -1952,9 +1968,7 @@ const AiPanel = (() => {
       if (activeJobPoll === pollState) activeJobPoll = null;
 
       if (finalEv) {
-        const seeded = finalEv.seeded || [];
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat',
-          content: seeded.length ? 'Seeded: ' + seeded.join(', ') + '.' : NO_SEED_ELIGIBLE_MSG });
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: formatSeedResultMessage(finalEv) });
       } else if (!pollState.cancelled) {
         await addMessage(currentSessionId, { role: 'ai', type: 'error', content: progressMsg.data.error || 'Seeding failed' });
       }
@@ -3877,9 +3891,9 @@ async function loadOverviewPane(projectId, container, switchTab) {
           const { job_id } = await Api.post('/v1/ai/seed/job', { project_id: projectId });
           const outcome = await pollJobUntilDone(job_id);
           if (outcome.ok) {
-            const seeded = outcome.result.seeded || [];
-            alert(seeded.length ? 'Seeded: ' + seeded.join(', ') : NO_SEED_ELIGIBLE_MSG);
-            if (seeded.length) loadOverviewPane(projectId, container, switchTab); // refresh so Clear Seed Data now shows
+            const seededAnything = (outcome.result.seeded || []).length || (outcome.result.test_accounts || []).length;
+            alert(formatSeedResultMessage(outcome.result));
+            if (seededAnything) loadOverviewPane(projectId, container, switchTab); // refresh so Clear Seed Data now shows
           } else {
             alert('Seeding failed: ' + (outcome.error || 'try again'));
           }
