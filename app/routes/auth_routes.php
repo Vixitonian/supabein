@@ -121,13 +121,39 @@ function register_auth_routes(\SupaBein\Router $router): void
     // GET /v1/auth/me
     $router->get('/v1/auth/me', function (array $req): void {
         $pdo = App::get('db');
-        $stmt = $pdo->prepare('SELECT id, email, role, created_at FROM users WHERE id = ?');
+        $stmt = $pdo->prepare('SELECT id, email, role, country, created_at FROM users WHERE id = ?');
         $stmt->execute([$req['auth']['user_id']]);
         $user = $stmt->fetch();
         if (!$user) {
             abort(404);
         }
         json_out($user);
+    }, ['auth_middleware']);
+
+    // PATCH /v1/auth/profile — update profile fields that don't need password
+    // re-verification (unlike /v1/auth/password). Currently just country, but
+    // shaped as a general profile endpoint rather than a country-specific one
+    // so future fields (name, timezone, ...) land here too.
+    $router->patch('/v1/auth/profile', function (array $req): void {
+        if (!array_key_exists('country', $req['body'])) {
+            abort(422, 'country is required');
+        }
+        $country = $req['body']['country'];
+
+        if ($country !== null && $country !== '') {
+            $country = strtoupper(trim((string)$country));
+            if (!preg_match('/^[A-Z]{2}$/', $country)) {
+                abort(422, 'country must be a 2-letter ISO 3166-1 code (e.g. "US"), or null to clear it');
+            }
+        } else {
+            $country = null;
+        }
+
+        $pdo = App::get('db');
+        $pdo->prepare('UPDATE users SET country = ? WHERE id = ?')
+            ->execute([$country, $req['auth']['user_id']]);
+
+        json_out(['country' => $country]);
     }, ['auth_middleware']);
 
     // ── Personal Access Tokens ───────────────────────────────────────────────
