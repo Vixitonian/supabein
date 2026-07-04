@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SupaBein — Self-Hosted BaaS + Site Hosting</title>
+<title>SupaBein — Turn Your Idea Into a Real App</title>
 <meta name="theme-color" content="#3ecf8e">
-<meta name="description" content="Self-hosted BaaS that gives you an instant REST API, row-level security, and static site hosting on your own cPanel server.">
+<meta name="description" content="Describe your idea in plain English and SupaBein builds it — a real database, a live website, and a working business tool. No developers, no code, no waiting.">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -228,109 +228,108 @@ footer p{color:var(--muted);font-size:.8rem}
 </script>
 
 <section class="hero">
-  <div class="hero-tag">Self-Hosted · Open Source</div>
-  <h1>Your backend,<br><span>your rules</span></h1>
-  <p>SupaBein is a self-hosted BaaS that gives you an instant REST API for any table you define, row-level security, and atomic static site hosting — all on your own cPanel server.</p>
+  <div class="hero-tag">From Idea to App — Today</div>
+  <h1>Your idea.<br><span>Now a real app.</span></h1>
+  <p>Describe what you need in plain English, and SupaBein builds it — a working database, a live website, and a real business tool. No developers, no code, no waiting. Built for founders, business owners, and professionals ready to move now.</p>
   <div class="hero-cta">
     <a href="/dashboard/#/signup" class="btn btn-green">Get Started Free</a>
-    <a href="/docs" class="btn btn-ghost">Read the Docs</a>
+    <a href="#features" class="btn btn-ghost">See How It Works</a>
   </div>
 
   <div class="hero-code">
     <div class="hero-code-top">
       <div class="dot dot-r"></div><div class="dot dot-y"></div><div class="dot dot-g"></div>
     </div>
-    <pre><span class="c-muted"># Fetch rows from any table — no backend code needed</span>
-<span class="c-key">curl</span> <span class="c-blue">-X GET</span> <span class="c-str">"https://your-domain.com/api/v1/data/1/users"</span> \
-  <span class="c-blue">-H</span> <span class="c-str">"Authorization: Bearer &lt;anon_key&gt;"</span>
+    <pre><span class="c-muted">You:</span>
+<span class="c-str">"Build me a booking system for my salon — clients, services, and appointments."</span>
 
-<span class="c-muted"># Insert a row</span>
-<span class="c-key">curl</span> <span class="c-blue">-X POST</span> <span class="c-str">"https://your-domain.com/api/v1/data/1/users"</span> \
-  <span class="c-blue">-H</span> <span class="c-str">"Authorization: Bearer &lt;anon_key&gt;"</span> \
-  <span class="c-blue">-d</span> <span class="c-str">'{"name": "Alice", "email": "alice@example.com"}'</span></pre>
+<span class="c-muted">SupaBein:</span>
+<span class="c-green">✓</span> <span class="c-key">Database ready</span> <span class="c-muted">— clients, services, appointments</span>
+<span class="c-green">✓</span> <span class="c-key">Website generated</span> <span class="c-muted">and deployed to a preview link</span>
+<span class="c-blue">→</span> <span class="c-muted">Ready to publish — live in minutes, not weeks</span></pre>
   </div>
 </section>
 
 <section id="features">
-  <div class="section-label">Features</div>
-  <h2 class="section-title">Everything you need, nothing you don't</h2>
-  <p class="section-sub">Built for PHP shared hosting. No Docker, no Node, no DevOps required.</p>
+  <div class="section-label">Why SupaBein</div>
+  <h2 class="section-title">Everything it takes to go from idea to launch</h2>
+  <p class="section-sub">No technical team required — just describe what you want.</p>
   <div class="features">
     <div class="feat">
-      <div class="feat-icon">⚡</div>
-      <h3>Instant REST API</h3>
-      <p>Create a table in the dashboard and a fully typed REST API appears instantly — list, create, get, update, delete.</p>
+      <div class="feat-icon">💬</div>
+      <h3>Describe it, get it built</h3>
+      <p>Tell it what you need in plain English — a booking system, a store, a directory — and get a real, working app in minutes.</p>
     </div>
     <div class="feat">
-      <div class="feat-icon">🔒</div>
-      <h3>Row-Level Security</h3>
-      <p>Define policies per table and role. Unauthenticated visitors get the <em>anon</em> role; logged-in users get <em>authenticated</em>. You control what each can do.</p>
+      <div class="feat-icon">🗄️</div>
+      <h3>A real database, automatically</h3>
+      <p>Every app comes with its own secure database, set up and ready — no configuration, no technical setup on your part.</p>
     </div>
     <div class="feat">
       <div class="feat-icon">🚀</div>
-      <h3>Atomic Site Deploys</h3>
-      <p>Upload a zip and your static site goes live instantly. Roll back to any previous deploy with one click.</p>
+      <h3>Live in minutes</h3>
+      <p>Go from a written idea to a working, shareable website the same day — preview it, then publish when you're ready.</p>
     </div>
     <div class="feat">
-      <div class="feat-icon">🔑</div>
-      <h3>Project API Keys</h3>
-      <p>Each project gets an <em>anon key</em> (safe for frontends) and a <em>service key</em> (bypasses policies). No key rotation headaches.</p>
+      <div class="feat-icon">✏️</div>
+      <h3>Keep shaping it</h3>
+      <p>Ask for changes anytime, in plain English — new features, new pages, new data. Your app keeps growing with your business.</p>
     </div>
     <div class="feat">
-      <div class="feat-icon">📁</div>
-      <h3>File Browser</h3>
-      <p>Browse and read every file in your deployed site directly from the dashboard with syntax highlighting.</p>
+      <div class="feat-icon">🔒</div>
+      <h3>Secure by default</h3>
+      <p>Built-in access rules keep your data and your customers' data protected, without you having to think about it.</p>
     </div>
     <div class="feat">
-      <div class="feat-icon">🛠</div>
-      <h3>cPanel Compatible</h3>
-      <p>Runs on standard PHP + MySQL shared hosting. No root access, no server configuration, no monthly VPS bill.</p>
+      <div class="feat-icon">🏠</div>
+      <h3>You own it, always</h3>
+      <p>Self-hosted on your own infrastructure. Your app and your data stay yours — no vendor lock-in, no surprise bills.</p>
     </div>
   </div>
 </section>
 
 <section style="padding-top:0">
   <div class="section-label">How it works</div>
-  <h2 class="section-title">Up and running in minutes</h2>
-  <p class="section-sub">No infrastructure setup, just build.</p>
+  <h2 class="section-title">From idea to live app, in five steps</h2>
+  <p class="section-sub">No technical setup — just describe what you want.</p>
   <div class="steps">
     <div class="step">
       <div class="step-num">1</div>
-      <h3>Create a project</h3>
-      <p>Sign up, create a project — your data namespace with its own API keys.</p>
+      <h3>Describe your idea</h3>
+      <p>Tell SupaBein what you want to build, in your own words — no technical detail required.</p>
     </div>
     <div class="step">
       <div class="step-num">2</div>
-      <h3>Define tables</h3>
-      <p>Add tables and columns from the dashboard. SupaBein creates the MySQL tables instantly.</p>
+      <h3>Review the plan</h3>
+      <p>See who'll use it and what it does, then approve it or ask for changes before anything gets built.</p>
     </div>
     <div class="step">
       <div class="step-num">3</div>
-      <h3>Set policies</h3>
-      <p>Choose who can read or write each table — anonymous visitors, authenticated users, or only you.</p>
+      <h3>Watch it get built</h3>
+      <p>Your database, design, and working app get generated automatically, right in front of you.</p>
     </div>
     <div class="step">
       <div class="step-num">4</div>
-      <h3>Call the API</h3>
-      <p>Use the auto-generated REST API from any frontend. Copy your anon key from the API tab.</p>
+      <h3>Try it yourself</h3>
+      <p>Your app deploys to a private preview link so you can test it before anyone else sees it.</p>
     </div>
     <div class="step">
       <div class="step-num">5</div>
-      <h3>Deploy your site</h3>
-      <p>Zip your static site and upload it. It goes live immediately at your SupaBein URL.</p>
+      <h3>Publish</h3>
+      <p>One click makes it live for real customers — then keep shaping it with plain-English requests.</p>
     </div>
   </div>
 </section>
 
 <div class="cta-banner">
-  <h2>Start building today</h2>
-  <p>Free, self-hosted, and yours forever.</p>
+  <h2>Your idea can be real today</h2>
+  <p>Free to start, self-hosted, and yours forever.</p>
   <a href="/dashboard/#/signup" class="btn btn-green">Create Your Account</a>
 </div>
 
 <footer>
   <span class="footer-logo">SupaBein</span>
-  <p>Self-hosted BaaS + site hosting on PHP &amp; MySQL.</p>
+  <p>Turn your idea into a real, working app — built for founders and business owners.</p>
   <div class="footer-links">
     <a href="/docs">Docs</a>
     <a href="/dashboard/#/login">Sign In</a>
