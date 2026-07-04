@@ -1897,17 +1897,32 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
 
 // ─── Frontend file reader ────────────────────────────────────────────────────
 
+// Review-off ("watch only") builds deploy to staging first and only promote to
+// the "current" (live/published) slot on an explicit Publish click — so a
+// project can sit in staging-only for its entire test-and-fix loop. Anything
+// that needs to read "what's actually deployed right now" (edit-mode context,
+// validation merges) must prefer staging over current, exactly like
+// ai_run_project_tests() already does when picking what to test against —
+// otherwise it silently reads an empty/nonexistent "current" deploy on any
+// project that hasn't been published yet.
+function ai_effective_deploy_target(array $site): string
+{
+    if ($site['staging_deploy_id'] ?? null) return 'staging';
+    return 'current';
+}
+
 // Full, unfiltered file dump for the validator (an edit's delta only contains
 // CHANGED files, so validating it alone would false-positive on every route/
 // nav check that depends on a file the edit didn't touch — this reads the
 // complete current deploy so the delta can be merged onto it before validating,
 // mirroring exactly what ai_deploy_files($mergeFromCurrent=true) does on disk).
-function ai_read_full_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId, string $target = 'current'): array
+function ai_read_full_frontend_files(array $config, \SupaBein\Catalog $catalog, int $projectId, ?string $target = null): array
 {
     $sites = $catalog->listSites($projectId);
     if (empty($sites)) return [];
 
-    $site = $sites[0];
+    $site   = $sites[0];
+    $target = $target ?? ai_effective_deploy_target($site);
     $deployIdKey = $target === 'staging' ? 'staging_deploy_id' : 'current_deploy_id';
     if (!($site[$deployIdKey] ?? null)) return [];
 
@@ -1934,11 +1949,13 @@ function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $
     $sites = $catalog->listSites($projectId);
     if (empty($sites)) return '';
 
-    $site = $sites[0];
-    if (!($site['current_deploy_id'] ?? null)) return '';
+    $site        = $sites[0];
+    $target      = ai_effective_deploy_target($site);
+    $deployIdKey = $target === 'staging' ? 'staging_deploy_id' : 'current_deploy_id';
+    if (!($site[$deployIdKey] ?? null)) return '';
 
     $sitesPath  = rtrim($config['SITES_PATH'], '/');
-    $currentDir = $sitesPath . '/s' . $site['id'] . '/current';
+    $currentDir = $sitesPath . '/s' . $site['id'] . '/' . $target;
     if (!is_dir($currentDir)) return '';
 
     // Index all text files
