@@ -8,14 +8,14 @@ class OpenRouterClient
 {
     private const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 
-    // Some models are routed through providers that pre-authorize spend against
-    // max_tokens regardless of actual usage; cap these to what the account can afford.
-    // Keep this generous enough for a real frontend-generation response (a multi-table
-    // app easily needs 15-20k+ output tokens) — 12000 was hit constantly and produced
-    // truncated, unparseable JSON that surfaced as a confusing "not valid JSON" error.
-    private const MAX_TOKENS_OVERRIDES = [
-        'moonshotai/kimi-k2' => 32000,
-    ];
+    // Deliberately generous starting point. Different models routed through
+    // OpenRouter (and different underlying providers pre-authorizing spend
+    // against max_tokens) have wildly different real ceilings — rather than
+    // hand-maintain a per-model override table that goes stale the moment a
+    // new model is added, the real ceiling is auto-discovered from the
+    // rejecting error's own message on first use (see MaxTokensProbe) and
+    // cached from then on.
+    private const MAX_TOKENS_DEFAULT = 100000;
 
     private array $lastUsage = [];
     private string $lastRawText = '';
@@ -61,21 +61,25 @@ class OpenRouterClient
 
     private function call(array $messages): array
     {
-        $body    = [
-            'model'      => $this->model,
-            'messages'   => $messages,
-            // Not all routed providers support response_format=json_object (some reject
-            // the request outright, others silently drop the final answer into a
-            // "reasoning" field). We rely on the system prompt + ai_lenient_json() instead.
-            'max_tokens' => self::MAX_TOKENS_OVERRIDES[$this->model] ?? 65536,
-        ];
-        $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        $probeKey  = 'openrouter:' . $this->model;
+        $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);
 
         // Several free-tier models route through a single backing provider with no
         // OpenRouter-side failover, so a transient upstream hiccup surfaces as an
-        // outright request failure. Retry rate limits and 5xx before giving up.
+        // outright request failure. Retry rate limits and 5xx before giving up;
+        // a too-high max_tokens gets one correction attempt too (see below).
         $lastError = null;
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
+            $body = [
+                'model'      => $this->model,
+                'messages'   => $messages,
+                // Not all routed providers support response_format=json_object (some reject
+                // the request outright, others silently drop the final answer into a
+                // "reasoning" field). We rely on the system prompt + ai_lenient_json() instead.
+                'max_tokens' => $maxTokens,
+            ];
+            $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+
             $ch = curl_init(self::ENDPOINT);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
@@ -102,13 +106,29 @@ class OpenRouterClient
             if ($httpCode !== 200) {
                 $errBody = json_decode($response, true);
                 $msg = $errBody['error']['message'] ?? ('HTTP ' . $httpCode);
+                $msg = is_string($msg) ? $msg : json_encode($msg);
                 $lastError = new \RuntimeException('OpenRouter error: ' . $msg);
-                if (($httpCode === 429 || $httpCode >= 500) && $attempt < 3) {
+
+                // A too-high max_tokens is self-correcting: the error (almost
+                // always) states the real ceiling for this model/provider, so
+                // shrink to it and retry — same mechanism as AnthropicClient,
+                // and what replaced the old hand-maintained override table.
+                if ($attempt < 4 && $httpCode === 400 && stripos($msg, 'token') !== false) {
+                    $corrected = MaxTokensProbe::extractLimit($msg, $maxTokens);
+                    if ($corrected !== null) {
+                        $maxTokens = $corrected;
+                        MaxTokensProbe::remember($probeKey, $maxTokens);
+                        continue;
+                    }
+                }
+                if (($httpCode === 429 || $httpCode >= 500) && $attempt < 4) {
                     sleep($attempt * 2);
                     continue;
                 }
                 throw $lastError;
             }
+
+            MaxTokensProbe::remember($probeKey, $maxTokens);
 
             $envelope     = json_decode($response, true);
             $text         = $envelope['choices'][0]['message']['content'] ?? null;
@@ -137,7 +157,7 @@ class OpenRouterClient
                 // from an actually-malformed response.
                 if ($finishReason === 'length') {
                     throw new \RuntimeException(
-                        "OpenRouter response was cut off before finishing (hit the {$body['max_tokens']}-token limit for {$this->model}) — "
+                        "OpenRouter response was cut off before finishing (hit the {$maxTokens}-token limit for {$this->model}) — "
                         . 'try a simpler request, or switch to a different model.'
                     );
                 }

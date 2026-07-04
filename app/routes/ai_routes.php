@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+require_once SUPABEIN_ROOT . '/app/core/max_tokens_probe.php';
 require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
 require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';

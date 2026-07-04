@@ -7,6 +7,10 @@ namespace SupaBein;
 class NvidiaClient
 {
     private const ENDPOINT = 'https://integrate.api.nvidia.com/v1/chat/completions';
+    // Deliberately generous starting point — the real per-model ceiling is
+    // auto-discovered from the API's own rejection message on first use
+    // (see MaxTokensProbe) rather than hand-maintained here.
+    private const MAX_TOKENS_DEFAULT = 100000;
 
     private array $lastUsage = [];
     private string $lastRawText = '';
@@ -51,17 +55,20 @@ class NvidiaClient
 
     private function call(array $messages): array
     {
-        $body    = [
-            'model'                => $this->model,
-            'messages'             => $messages,
-            'max_tokens'           => 65536,
-            'stream'               => false,
-            'chat_template_kwargs' => ['enable_thinking' => false],
-        ];
-        $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $probeKey  = 'nvidia:' . $this->model;
+        $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);
 
         $lastError = null;
-        for ($attempt = 1; $attempt <= 3; $attempt++) {
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
+            $body = [
+                'model'                => $this->model,
+                'messages'             => $messages,
+                'max_tokens'           => $maxTokens,
+                'stream'               => false,
+                'chat_template_kwargs' => ['enable_thinking' => false],
+            ];
+            $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+
             $ch = curl_init(self::ENDPOINT);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
@@ -91,14 +98,29 @@ class NvidiaClient
                     ?? $errBody['detail']
                     ?? $errBody['message']
                     ?? ('HTTP ' . $httpCode . ': ' . substr($response, 0, 300));
+                $msg = is_string($msg) ? $msg : json_encode($msg);
                 $lastError = new \RuntimeException('NVIDIA error: ' . $msg);
+
+                // A too-high max_tokens is self-correcting: the error almost
+                // always states the real ceiling for this model, so shrink to
+                // it and retry — same mechanism as AnthropicClient/OpenRouterClient.
+                if ($attempt < 4 && $httpCode === 400 && stripos($msg, 'token') !== false) {
+                    $corrected = MaxTokensProbe::extractLimit($msg, $maxTokens);
+                    if ($corrected !== null) {
+                        $maxTokens = $corrected;
+                        MaxTokensProbe::remember($probeKey, $maxTokens);
+                        continue;
+                    }
+                }
                 // Retry on DEGRADED (transient backend failure) or 500
-                if (($httpCode >= 500 || str_contains($msg, 'DEGRADED')) && $attempt < 3) {
+                if (($httpCode >= 500 || str_contains($msg, 'DEGRADED')) && $attempt < 4) {
                     sleep($attempt * 2);
                     continue;
                 }
                 throw $lastError;
             }
+
+            MaxTokensProbe::remember($probeKey, $maxTokens);
 
             $envelope     = json_decode($response, true);
             $choice       = $envelope['choices'][0] ?? [];
