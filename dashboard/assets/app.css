@@ -457,8 +457,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   .landing-headline { font-size: 26px; }
 }
 
-/* Tabs */
-.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+/* Tabs — scrolls horizontally instead of overflowing the page once there are
+   more tabs than fit (5 tabs, incl. Errors, routinely don't fit under ~400px). */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 20px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tab {
   padding: 8px 16px;
   cursor: pointer;
@@ -466,6 +468,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
   font-size: 13px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
@@ -693,6 +697,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .proj-card-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
 .proj-card-date { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .proj-grid-sentinel { grid-column: 1 / -1; text-align: center; padding: 10px 0 4px; font-size: 12px; color: var(--muted); min-height: 1px; }
+
+/* Deploy history — same card look as .proj-card, stacked as a list rather
+   than a grid (a handful of deploys reads better as a list than a grid). */
+.deploy-card-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.deploy-card .proj-card-meta { flex-wrap: wrap; }
+.deploy-card .home-proj-link { background: none; }
 
 /* File browser */
 .fb-row:hover td { background: rgba(255,255,255,0.04); }
@@ -1134,6 +1144,7 @@ details.ai-progress-row { display: block; }
 .ai-progress-row--pending .ai-progress-label { color: var(--muted); }
 .ai-progress-detail { font-size: 11px; color: var(--muted); word-break: break-word; }
 .ai-progress-error { margin-top: 8px; font-size: 12px; color: var(--danger); }
+.ai-progress-retry-btn { margin-top: 8px; }
 .ai-progress-warning { margin-top: 8px; font-size: 12px; color: #f59e0b; }
 /* Click-to-expand stage rows (once a stage has detail/trace to show) */
 .ai-progress-row summary { list-style: none; cursor: pointer; }
@@ -1904,6 +1915,13 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
   .ai-trace-json { white-space: pre-wrap; word-break: break-word; max-height: 220px; }
   .ai-trace-summary, .ai-trace-ai-summary { flex-wrap: wrap; }
   .ai-trace-call, .ai-trace-ai-stage { word-break: break-word; }
+  /* Error log rows: the message's 160px min-width (fine on desktop) leaves no
+     room next to the badge/count/time on a narrow phone, forcing the row to
+     overflow instead of wrapping. Drop the floor and let it wrap properly. */
+  .error-log-message { min-width: 0; }
+  .error-log-header { gap: 8px; }
+  .error-log-actions { width: 100%; }
+  .error-log-actions .btn { flex: 1; }
 }
 
 /* Mode toggle button (Chat / Build) */

@@ -286,6 +286,24 @@ class Catalog
         $seedStmt = $this->pdo->prepare('SELECT 1 FROM project_seed_rows WHERE project_id = ? LIMIT 1');
         $seedStmt->execute([$projectId]);
 
+        // Users stat: the first table with a PASSWORD-type column is the app's
+        // auth table (same detection rule as ai_detect_auth() in ai_routes.php,
+        // duplicated here rather than shared since that lives in a different
+        // layer) — null when the app has no auth at all, so the frontend can
+        // tell "no auth table" apart from "auth table with zero users".
+        $userCount = null;
+        foreach ($tables as $t) {
+            $hasPassword = false;
+            foreach ($this->listColumns((int)$t['id']) as $c) {
+                if (strtoupper(trim((string)($c['data_type'] ?? ''))) === 'PASSWORD') { $hasPassword = true; break; }
+            }
+            if ($hasPassword) {
+                $countStmt = $this->pdo->query('SELECT COUNT(*) FROM `' . $t['physical_name'] . '`');
+                $userCount = (int)$countStmt->fetchColumn();
+                break;
+            }
+        }
+
         return [
             'project' => $project,
             'stats' => [
@@ -293,6 +311,7 @@ class Catalog
                 'live'           => (bool)($site && !empty($site['current_deploy_id'])),
                 'has_staging'    => (bool)($site && !empty($site['staging_deploy_id'])),
                 'has_seed_data'  => (bool)$seedStmt->fetchColumn(),
+                'user_count'     => $userCount,
             ],
             'site_id'  => $site ? (int)$site['id'] : null,
             'activity' => $this->capActivityWithSession($activity, 4),
