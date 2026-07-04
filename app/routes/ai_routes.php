@@ -1028,6 +1028,28 @@ function ai_ensure_error_script_tag(string $html): string
     return $tag . $html;
 }
 
+// Strips a dangling features/auth/auth.js <script> tag from index.html when
+// the schema has no auth table. The prompt already tells the AI to only
+// include this tag when the schema has a PASSWORD column (see RULE 3), but
+// a weaker model can still include it unconditionally as boilerplate habit
+// even for an app with no auth at all. Left unfixed, that tag is deploy-time
+// fatal in a way that's invisible from the result: ai_inject_canonical_frontend_files()
+// correctly never creates features/auth/auth.js when there's no auth table,
+// so ai_smoke_check_dir()'s "every referenced script must exist" check
+// rejects the WHOLE deploy over one dangling tag — which is exactly what
+// silently produced "Site created — no frontend deployed" for a plain
+// to-do app with zero auth. Making this a deploy-time guarantee instead of
+// a prompt-compliance hope matches ai_ensure_error_script_tag()'s approach.
+function ai_strip_dangling_auth_script_tag(string $html, ?array $authInfo): string
+{
+    if (!empty($authInfo['table'])) return $html; // auth.js will actually exist — tag is valid
+    return preg_replace(
+        '#\s*<script\b[^>]*\ssrc\s*=\s*["\'][^"\']*features/auth/auth\.js["\'][^>]*>\s*</script>#i',
+        '',
+        $html
+    );
+}
+
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
 
 function ai_deploy_files(
@@ -1130,6 +1152,7 @@ function ai_deploy_files(
     if (is_file($indexPath)) {
         $indexHtml = file_get_contents($indexPath);
         $patched   = ai_ensure_error_script_tag((string)$indexHtml);
+        $patched   = ai_strip_dangling_auth_script_tag($patched, $authInfo);
         if ($patched !== $indexHtml) {
             file_put_contents($indexPath, $patched);
         }
