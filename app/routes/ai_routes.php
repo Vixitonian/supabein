@@ -607,6 +607,13 @@ Available tools:
     index.html to add its <script src="./features/<name>/<name>.js"> tag (after its dependencies,
     before the inline bootstrap script) and register any new route(s) it needs. The result tells you
     immediately whether the write passed a syntax check — fix it and write_file again if not.
+    HARD RULE: if the path already exists, you MUST read_file it first in this same session before
+    write_file'ing it — write_file on an existing path you haven't read is rejected. This is not
+    optional: regenerating a file you haven't actually read (even one you're confident you know the
+    shape of) silently drops whatever it already did that your request didn't ask you to change —
+    e.g. "just add an About page" is not license to rewrite the notes list from memory and lose its
+    create/edit form in the process. A path you're creating for the first time has nothing to read,
+    so this only applies to paths list_files already showed you.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
   finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
@@ -3214,7 +3221,13 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
 // $byPath is the read-only starting file set; $changedFiles is the in-progress
 // staged-writes map, passed by reference so write_file's effects are visible
 // to later read_file/search_code/syntax_check calls in the same loop.
-function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array $config): array
+// $readPaths tracks which pre-existing paths have actually been read_file'd
+// this session — write_file refuses to overwrite a pre-existing path that
+// hasn't been read first (see the case below), so a model can't silently
+// regenerate an existing file from general knowledge instead of its real
+// content: exactly the class of bug that dropped a whole feature's worth of
+// working code (note creation/editing) in the file that surfaced this rule.
+function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config): array
 {
     static $platformPaths = ['core/router.js', 'core/api.js', 'features/auth/auth.js'];
 
@@ -3260,6 +3273,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             }
             $content = $changedFiles[$path] ?? $byPath[$path] ?? null;
             if ($content === null) return ['tool' => 'read_file', 'error' => "no such file: {$path}"];
+            $readPaths[$path] = true;
             return ['tool' => 'read_file', 'result' => ['path' => $path, 'content' => $content]];
 
         case 'write_file':
@@ -3267,6 +3281,13 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             if ($path === null) return ['tool' => 'write_file', 'error' => 'args.path is missing or unsafe'];
             if (in_array($path, $platformPaths, true)) {
                 return ['tool' => 'write_file', 'error' => 'platform-provided file — writes to this path are always discarded at deploy time, do not write it'];
+            }
+            $preExisting = isset($byPath[$path]) && !isset($changedFiles[$path]);
+            if ($preExisting && !isset($readPaths[$path])) {
+                return ['tool' => 'write_file', 'error' =>
+                    "\"{$path}\" already exists and you haven't read_file'd it yet this session — " .
+                    'read_file it first so your write is based on its real content, not a guess, ' .
+                    'then write_file again with your change merged in.'];
             }
             $content = (string)($args['content'] ?? '');
             $changedFiles[$path] = $content;
@@ -3327,6 +3348,7 @@ function ai_run_edit_generation_agentic(
         if (isset($f['path'])) $byPath[$f['path']] = (string)($f['content'] ?? '');
     }
     $changedFiles = [];
+    $readPaths    = [];
     $aiTrace      = [];
     $finishArgs   = null;
     // Aggregated across every turn — a loop of up to AI_EDIT_AGENT_MAX_TURNS
@@ -3376,7 +3398,7 @@ function ai_run_edit_generation_agentic(
             continue;
         }
 
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $config));
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config));
     }
 
     if ($finishArgs === null) {
