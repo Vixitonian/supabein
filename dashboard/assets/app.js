@@ -3102,11 +3102,20 @@ const AiPanel = (() => {
   }
 
   async function newSession() {
+    // A new session must be scoped to whatever project this panel is
+    // actually on top of right now — the previous session's own recorded
+    // project, not the module-level selectedProjectId mirror, which can
+    // drift out of sync with it (see renderProjectPicker/sendMessage for the
+    // same class of fix). On the unassigned "Build with AI" bucket (no
+    // project), that's null — correctly starting a fresh new-project session.
+    const effectiveProjectId = currentSession()?.projectId ?? selectedProjectId;
+    selectedProjectId = effectiveProjectId;
     const sess = await createSession(selectedProjectId);
     currentSessionId = sess.id;
     localStorage.setItem(aiSidKey(), sess.id);
     renderSidebar();
     renderMessages();
+    renderProjectPicker();
   }
 
   function toggleSidebar(force) {
