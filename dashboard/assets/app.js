@@ -2194,6 +2194,9 @@ const AiPanel = (() => {
   // a bespoke fix path, so a "Resolve" is just as reliable as a manual edit.
   function buildResolvePrompt(data) {
     const parts = [];
+    if (data.error && !TEST_INFRA_ERRORS.includes(data.error)) {
+      parts.push('The test run itself failed with this error:\n' + data.error);
+    }
     const failedStories = (data.stories || []).filter(s => !s.passed);
     if (failedStories.length) {
       parts.push('Fix these failing test stories:\n' + failedStories.map(s =>
@@ -2235,6 +2238,19 @@ const AiPanel = (() => {
     URL.revokeObjectURL(url);
   }
 
+  // Session/connectivity hiccups a test run can surface as its top-level
+  // error — none of these are app bugs, so Resolve must never turn them into
+  // an AI edit prompt ("fix this: Lost connection to the server" makes no
+  // sense). Everything else reaching data.error is a real failure from the
+  // job itself (e.g. an uncaught exception in ai_run_project_tests) and is
+  // exactly what Resolve exists for.
+  const TEST_INFRA_ERRORS = [
+    'Your session expired — please log in again.',
+    'This job no longer exists.',
+    'Lost connection to the server — please try again.',
+    'Stopped',
+  ];
+
   function renderTestCard(msg) {
     const { stories = [], passed = 0, failed = 0, error, screenshot, validation = [] } = msg.data || {};
     const total = passed + failed;
@@ -2252,6 +2268,17 @@ const AiPanel = (() => {
       el('span', { style: `color:${statusColor};font-size:0.8rem;font-weight:600` }, statusText)
     );
     card.appendChild(hdr);
+
+    // A top-level error (job crashed, was cancelled, or the connection was
+    // lost before any stories could be recorded — distinct from a mid-run
+    // script crash, which is now recorded as a story instead) previously
+    // only showed up in the compact header line above and nowhere else in
+    // the card — easy to miss, and with stories empty and validation absent,
+    // hasIssues (below) used to come out false, so there wasn't even a
+    // Resolve button to act on it. Give it its own visible row here.
+    if (error && !stories.length) {
+      card.appendChild(el('div', { style: 'padding:10px 14px;font-size:0.8rem;color:var(--danger);white-space:pre-wrap;word-break:break-word;border-bottom:1px solid var(--border)' }, error));
+    }
 
     if (stories.length) {
       const list = el('div', { style: 'padding:10px 14px;display:flex;flex-direction:column;gap:4px' });
@@ -2304,7 +2331,7 @@ const AiPanel = (() => {
         renderValidationExplainer(), renderValidationList(validation)));
     }
 
-    const hasIssues = failed > 0 || validation.some(f => f.severity === 'error' || f.severity === 'warning');
+    const hasIssues = failed > 0 || (!!error && !TEST_INFRA_ERRORS.includes(error)) || validation.some(f => f.severity === 'error' || f.severity === 'warning');
     const cardActions = el('div', { style: 'padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--border)' });
     const downloadBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '⭳ Download JSON');
     downloadBtn.addEventListener('click', () => downloadJson(`sb-report-${msg.id || Date.now()}.json`,
