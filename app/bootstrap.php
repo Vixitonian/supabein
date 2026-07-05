@@ -76,6 +76,14 @@ function abort(int $status, string $message = '', array $data = []): never
 function json_out(mixed $data, int $status = 200): never
 {
     http_response_code($status);
+    // API responses are live data and must never be served from a cache — a
+    // stale cached GET (from the browser, a proxy, or an over-eager CDN) would
+    // show out-of-date records with no way for the user to tell. Every JSON
+    // response flows through here, so one no-store guarantees it everywhere.
+    // (Binary/file responses set their own cache headers and do not use this.)
+    if (!headers_sent()) {
+        header('Cache-Control: no-store');
+    }
     echo json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
     exit;
 }
