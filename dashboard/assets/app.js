@@ -1055,6 +1055,14 @@ const AiPanel = (() => {
     if (!panelEl) return;
     const container = panelEl.querySelector('.ai-messages');
     if (!container) return;
+    // pollJob() calls this on every poll tick (every ~2s) for as long as a
+    // job stays live — a test run's agentic story-testing stage alone can run
+    // for minutes. Unconditionally snapping to the bottom on every one of
+    // those renders undid any manual scroll within a couple of seconds, which
+    // made the panel feel completely unscrollable for the whole run. Only
+    // follow new content down if the user was already at (or near) the
+    // bottom before this rebuild — otherwise leave their scroll position alone.
+    const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     container.innerHTML = '';
     const sess = currentSession();
     if (!sess || !sess.messages.length) {
@@ -1074,7 +1082,7 @@ const AiPanel = (() => {
         container.appendChild(el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ Could not display this message.'));
       }
     });
-    container.scrollTop = container.scrollHeight;
+    if (wasNearBottom) container.scrollTop = container.scrollHeight;
   }
 
   // Normalise legacy {actors:string[], stories:string[]} to the nested product-requirements format
