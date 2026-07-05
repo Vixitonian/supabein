@@ -5123,10 +5123,15 @@ PROMPT;
         try {
             $client = make_ai_client($config, null, null); // default fast model — keep it cheap
             $sys = 'You title chat sessions. Given the user\'s first message, return ONLY JSON {"title": "..."} '
-                 . 'with a concise, specific 2-5 word Title Case label (max 40 chars, no trailing punctuation, no quotes).';
+                 . 'with a concise, specific 1-5 word Title Case label (max 40 chars, no trailing punctuation, no quotes).';
             $res   = $client->generateJson($sys, mb_substr($prompt, 0, 500));
             $title = is_array($res) ? trim((string)($res['title'] ?? '')) : '';
             $title = trim($title, " \t\n\r\0\x0B\"'.");
+            if ($title === '') abort(502, 'empty title');
+            // Deterministic guarantee, not prompt-compliance hope — clamp to at
+            // most 5 words server-side regardless of what the model returned.
+            $words = preg_split('/\s+/', $title, -1, PREG_SPLIT_NO_EMPTY);
+            $title = implode(' ', array_slice($words, 0, 5));
             if ($title === '') abort(502, 'empty title');
             json_out(['title' => mb_substr($title, 0, 60)]);
         } catch (\Throwable $e) {
