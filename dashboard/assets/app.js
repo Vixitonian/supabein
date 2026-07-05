@@ -2764,9 +2764,10 @@ const AiPanel = (() => {
       edit_pass:       'Edit Pass',
       edit_retry:      '↩ Edit Retry (self-healing)',
       edit_agent:      'Agent Step',
+      frontend_agent:  'Agent Step',
       diagnose:        'Diagnose',
     };
-    const agentSummary = ai.stage === 'edit_agent' ? agentStepSummary(ai.response) : null;
+    const agentSummary = (ai.stage === 'edit_agent' || ai.stage === 'frontend_agent') ? agentStepSummary(ai.response) : null;
     const label    = agentSummary || STAGE_LABELS[ai.stage] || ai.stage;
     const msStr    = ai.ms ? `${(ai.ms / 1000).toFixed(1)}s` : '';
     const tok      = ai.tokens || {};
@@ -2906,7 +2907,7 @@ const AiPanel = (() => {
     requirements: ['intent'],
     schema:       ['schema_pass_1', 'schema_retry'],
     design:       ['design_brief'],
-    frontend:     ['frontend_pass_2'],
+    frontend:     ['frontend_pass_2', 'frontend_agent'],
     changes:      ['edit_pass', 'edit_retry', 'edit_agent'],
   };
   function attachTraceToStages(progressMsg, aiTrace) {
@@ -3053,12 +3054,19 @@ const AiPanel = (() => {
   function renderProjectPicker() {
     if (!panelEl) return;
     const label = panelEl.querySelector('.ai-project-label');
+    // Prefer the actual current session's own recorded project over the
+    // module-level selectedProjectId mirror — the two can transiently drift
+    // (e.g. mid-way through switching sessions), and a stale selectedProjectId
+    // here both mislabels an existing project's session as "New project" AND,
+    // via sendMessage() making the same mistake, sends its prompts with no
+    // project_id — silently misrouting an edit into a fresh build.
+    const effectiveProjectId = currentSession()?.projectId ?? selectedProjectId;
     if (label) {
-      const proj = projects.find(p => String(p.id) === String(selectedProjectId));
-      label.textContent = proj ? proj.name : (selectedProjectId ? '' : '✦ New project');
+      const proj = projects.find(p => String(p.id) === String(effectiveProjectId));
+      label.textContent = proj ? proj.name : (effectiveProjectId ? '' : '✦ New project');
     }
     const testBtn = panelEl.querySelector('.ai-run-tests-btn');
-    if (testBtn) testBtn.style.display = selectedProjectId ? '' : 'none';
+    if (testBtn) testBtn.style.display = effectiveProjectId ? '' : 'none';
   }
 
   async function loadSessionMessages(id) {
@@ -3126,7 +3134,12 @@ const AiPanel = (() => {
     // Build conversation history for Gemini context. Validation and testing
     // are now unconditional stages of every build/edit, not a toggle.
     const body = { prompt, validate: true };
-    if (selectedProjectId) body.project_id = selectedProjectId;
+    // Prefer the session's own recorded project over the module-level
+    // selectedProjectId mirror (see renderProjectPicker) — using the stale
+    // mirror here is exactly what silently misrouted an edit prompt on an
+    // existing project into a fresh build, with no project_id attached.
+    const effectiveProjectId = sess?.projectId ?? selectedProjectId;
+    if (effectiveProjectId) body.project_id = effectiveProjectId;
     const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
     if (priorMessages.length > 0) {
       body.history = priorMessages.slice(-20).map(m => {

@@ -90,7 +90,7 @@ try {
         $schemaPlan  = $payload['schema']       ?? [];
         $designBrief = $payload['design_brief'] ?? [];
         $validate    = $payload['validate'] ?? true;
-        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $report, $validate);
+        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate);
         $catalog->markJobDone($jobId, array_merge(['mode' => 'build_frontend'], $result));
 
     } elseif ($mode === 'edit') {

@@ -696,6 +696,61 @@ const AI_EDIT_AGENT_SYSTEM_PROMPT = AI_EDIT_AGENT_SYSTEM_HEADER . "\n\n" . AI_FR
 
 const AI_EDIT_AGENT_MAX_TURNS = 12;
 
+// ── Build frontend agent: same ReAct-style loop as the edit agent above, but
+// starting from zero files (a fresh build, not a modification against an
+// existing codebase) and with a trivial finish() — the schema is already
+// finalized by this point in the pipeline, so there's no schema delta left
+// to carry back, just the files themselves.
+const AI_BUILD_FRONTEND_AGENT_SYSTEM_HEADER = <<<'PROMPT'
+You are a frontend developer for SupaBein, a self-hosted BaaS platform, working as an autonomous
+coding agent. The user wants a BRAND-NEW project built from scratch. The database schema and visual
+design have already been finalized — you write every frontend file needed to make the app fully
+functional, one file at a time, deciding for yourself which files to write and in what order.
+
+Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
+exactly as one action:
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+
+Available tools:
+  list_files   args: {}
+    Returns the files you've written so far (paths only) — empty at the very start.
+  search_code  args: {"query": string}
+    Case-insensitive substring search across every file you've written so far. Use this to check
+    whether you already defined something (a route, a helper, a global) before writing it again.
+  read_file    args: {"path": string}
+    Returns the full current content of a file you've already written.
+  write_file   args: {"path": string, "content": string}
+    Creates or overwrites one file. The result tells you immediately whether the write passed a
+    syntax check — fix it and write_file again if not. Write index.html first (or early), then add
+    each feature's <script src="./features/<name>/<name>.js"> tag to it as you write that feature
+    file (after its dependencies, before the inline bootstrap script), and register its route(s).
+    HARD RULE: if you're rewriting a path you already write_file'd earlier this session, you must
+    read_file it first so your change is based on what you actually wrote, not a guess from memory —
+    e.g. adding a second feature's script tag is not license to reconstruct index.html from scratch
+    and lose the first feature's tag/route in the process.
+  syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
+    Re-runs the syntax check on demand.
+  finish       args: {}
+    Ends the session once the app is fully functional — real API calls, real CRUD, real auth flows
+    where auth exists, and no dangling references (every <script src> you wrote corresponds to a
+    real file you write_file'd, and every route you registered has something linking to it). Do NOT
+    repeat file content here — anything you already write_file'd is included automatically.
+
+Work iteratively: write index.html first, then each feature file in turn, wiring up its route and
+nav entry as you go. Use search_code/read_file to stay consistent with what you've already written
+instead of re-deriving it from memory. You have a limited number of turns, so don't re-check
+something you're already sure of. If a write_file's syntax check fails, that error is the truth —
+fix the actual problem it names, don't just retry the same content. Before you call finish, check
+every route you registered actually has something linking to it, and every script tag you wrote
+actually corresponds to a file you wrote.
+
+The FRONTEND RULES below apply to every write_file call:
+PROMPT;
+
+const AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT = AI_BUILD_FRONTEND_AGENT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
+
+const AI_BUILD_FRONTEND_AGENT_MAX_TURNS = 20; // a full build writes more files than a targeted edit
+
 // ─── Platform-provided boilerplate (never AI-authored) ──────────────────────
 // core/router.js and core/api.js are the two files every "route not found" /
 // "module not found" style bug traced back to — either the AI silently
@@ -3225,7 +3280,7 @@ function ai_playwright_test_run(string $script, array $config): array
 // single job. The "confirm each stage" (Review on) flow instead calls
 // ai_run_build_schema_design() and ai_run_build_frontend() as two separate
 // jobs, with a user confirmation in between.
-function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate = true): array
+function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true): array
 {
     $aiTrace = [];
 
@@ -3246,7 +3301,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     }
 
     $schemaResult   = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
-    $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $report, $validate);
+    $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate);
 
     return [
         'plan'       => $frontendResult['plan'],
@@ -3269,7 +3324,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
 // as generation for free.
 function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId): array
 {
-    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $report, $validate);
+    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate);
 
     $report(['stage' => 'deploy', 'status' => 'start', 'label' => 'Deploying to staging…']);
     $applyResult = ai_execute_build($genResult['plan'], $userId);
@@ -3363,21 +3418,18 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
 // schema and design brief, then deterministic validation. Split out so the
 // "Review" build flow can run this as its own job, after the user has
 // confirmed the schema/design in the previous stage.
-function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, callable $report, bool $validate = true): array
+function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true): array
 {
-    $aiTrace  = [];
-    $briefCtx = ai_brief_to_context($designBrief);
-
-    // ── Stage 3: frontend ──────────────────────────────────────────────────
+    // ── Stage 3: frontend — agentic tool-calling loop (search/read/write/
+    // syntax-check), same machinery the edit agent uses, instead of a single
+    // shot at the whole file set. Lets the model verify its own output (a
+    // deterministic syntax check on every write) and read back a file it
+    // wrote earlier before extending it, instead of hoping a one-shot
+    // multi-file JSON blob comes back internally consistent.
     $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
-    $frontendMsg        = "App description: {$prompt}\n\n"
-                        . ($briefCtx ? "{$briefCtx}\n\n" : '')
-                        . "Exact validated schema — use ONLY these column names in JS:\n"
-                        . ai_schema_to_context($schemaPlan);
-    $_frontendSysPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan);
-    $_t0 = microtime(true);
-    $frontendResult = $client->generateJson($_frontendSysPrompt, $frontendMsg);
-    $aiTrace[] = ['stage' => 'frontend_pass_2', 'system' => $_frontendSysPrompt, 'history' => [], 'user_msg' => $frontendMsg, 'response' => ['files' => array_map(fn($f) => ['path' => $f['path'], 'bytes' => mb_strlen($f['content'] ?? '')], $frontendResult['files'] ?? [])], 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report);
+    $aiTrace   = $frontendResult['aiTrace'];
+    $feUsage   = $frontendResult['usage'];
 
     $plan = $schemaPlan;
     $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
@@ -3408,7 +3460,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
         'frontend_files' => count($plan['frontend']['files'] ?? []),
     ];
 
-    return ['plan' => $plan, 'summary' => $summary, 'usage' => $client->getLastUsage(), 'aiTrace' => $aiTrace, 'validation' => $validation];
+    return ['plan' => $plan, 'summary' => $summary, 'usage' => $feUsage, 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
 // ── Edit agent: single tool-call execution ───────────────────────────────────
@@ -3631,6 +3683,95 @@ function ai_run_edit_generation_agentic(
     $delta['aiTrace'] = $aiTrace;
     $delta['usage']   = $totalUsage;
     return $delta;
+}
+
+// ── Build frontend agent: the loop itself ────────────────────────────────────
+// Same ReAct-style loop and tool executor (ai_run_edit_agent_tool) as the edit
+// agent above, starting from zero files. Returns ['files'=>[...], 'aiTrace'=>[...],
+// 'usage'=>[...]] — the exact shape ai_run_build_frontend()'s old single-shot
+// $frontendResult had, so the surgical swap there needs no other changes.
+function ai_run_build_frontend_agentic(
+    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report
+): array {
+    $briefCtx    = ai_brief_to_context($designBrief);
+    $agentPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT, $schemaPlan);
+    $schemaCtx   = ai_schema_to_context($schemaPlan);
+
+    $byPath       = []; // a fresh build starts with nothing on disk
+    $changedFiles = [];
+    $readPaths    = [];
+    $aiTrace      = [];
+    $finished     = false;
+    $totalUsage   = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
+
+    $turnMsg = "App description: {$prompt}\n\n"
+             . ($briefCtx ? "{$briefCtx}\n\n" : '')
+             . "Exact validated schema — use ONLY these column names in JS:\n{$schemaCtx}\n\n"
+             . 'Respond with your first tool action.';
+    $loopHistory = [];
+
+    for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
+        $_t0 = microtime(true);
+        try {
+            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
+        } catch (\Throwable $e) {
+            // Same recoverable-turn treatment as the edit agent — a truncated
+            // write_file response cutting off mid-JSON shouldn't fail the
+            // whole build and discard every file already staged.
+            $ms = (int)((microtime(true) - $_t0) * 1000);
+            $aiTrace[] = ['stage' => 'frontend_agent', 'system' => $agentPrompt, 'history' => [],
+                'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+                'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
+            $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+                'detail' => 'Response was invalid, retrying…']);
+            $turnMsg .= "\n\n(Your previous response to this could not be parsed as valid JSON — it may have "
+                     . "been cut off: {$e->getMessage()}. Respond again with a single valid JSON action; if "
+                     . 'you were writing a large file, keep the content more concise.)';
+            continue;
+        }
+        $ms    = (int)((microtime(true) - $_t0) * 1000);
+        $usage = $client->getLastUsage();
+        foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
+
+        $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
+        $args = is_array($action) && is_array($action['args'] ?? null) ? $action['args'] : [];
+
+        $aiTrace[] = ['stage' => 'frontend_agent', 'system' => $agentPrompt, 'history' => [],
+            'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+            'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
+
+        $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+            'detail' => ai_edit_agent_step_label($tool, $args)]);
+
+        $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
+        $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+
+        if ($tool === 'finish') {
+            if (empty($changedFiles)) {
+                // Nothing written at all — reject and force at least one file
+                // before letting it stop, the same "must actually do
+                // something" guarantee ai_validate_delta gives the edit
+                // agent's finish.
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    "No files have been written yet — write_file the app's frontend before calling finish."]);
+                continue;
+            }
+            $finished = true;
+            break;
+        }
+
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config));
+    }
+
+    if (!$finished) {
+        // Turn budget exhausted without a finish() — force-finish with
+        // whatever's staged rather than hang or hard-fail the whole build.
+        $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+            'detail' => 'Turn limit reached — finishing with what was staged']);
+    }
+
+    $files = array_map(fn($p) => ['path' => $p, 'content' => $changedFiles[$p]], array_keys($changedFiles));
+    return ['files' => $files, 'aiTrace' => $aiTrace, 'usage' => $totalUsage];
 }
 
 function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true): array
