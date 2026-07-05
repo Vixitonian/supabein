@@ -2860,6 +2860,7 @@ const AiPanel = (() => {
   const EDIT_PROGRESS_STAGES = [
     { key: 'read',    label: 'Reading current schema & files' },
     { key: 'changes', label: 'Generating changes' },
+    { key: 'deploy',  label: 'Deploying to staging' },
     { key: 'test',    label: 'Running tests' },
   ];
 
@@ -3236,6 +3237,12 @@ const AiPanel = (() => {
     const thinkingId = 'apply_' + Date.now();
     let autoTestProjectId = null;
     let aborted = false;
+    // Set once the apply succeeds AND this card has its own 'deploy'/'test'
+    // stages (the job-backed edit flow) — holds the result/validation so the
+    // result card (with its View/Publish/Seed actions) is pushed only after
+    // the test stage finishes, instead of appearing mid-card before "Running
+    // tests" has even started.
+    let deferredFinish = null;
     if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: mode });
 
     if (!liveTraceMsg) {
@@ -3248,6 +3255,11 @@ const AiPanel = (() => {
     updateSendBtn();
     renderMessages();
 
+    const deployStage = progressMsg?.data?.stages?.find(s => s.key === 'deploy');
+    const testStage = progressMsg?.data?.stages?.find(s => s.key === 'test');
+    if (deployStage) progressSetStage(progressMsg, 'deploy', 'active');
+    renderMessages();
+
     const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
       const t0 = Date.now();
@@ -3255,16 +3267,8 @@ const AiPanel = (() => {
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
+      if (deployStage) progressSetStage(progressMsg, 'deploy', 'done', result.staging ? 'Deployed to staging' : 'Deployed');
       renderMessages();
-
-      await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
-      // Builds keep it to the result card alone (project/tables/deploy status
-      // + action buttons) — a separate "Done! **X** is ready..." narration on
-      // top of that read as redundant, overly technical noise. Edits still
-      // get the summary since their result card alone doesn't say what changed.
-      if (mode === 'edit') {
-        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
-      }
 
       // Edits always auto-test. Builds only auto-test when Review is off
       // ("watch only" — everything runs straight through); with Review on,
@@ -3272,13 +3276,29 @@ const AiPanel = (() => {
       // in the input bar manually instead of it firing on its own.
       const hasDeployed = !!(result.deploy || result.staging || result.site);
       const willAutoTest = mode === 'edit' ? hasDeployed : (hasDeployed && !reviewEnabled);
-      // Edits auto-apply (no separate review step), so validation shows here,
-      // after the deploy — build mode already showed it in the plan card
-      // before the user chose to apply at all. Skip this when auto-test is
-      // about to fire anyway — its combined test+validate card will show the
-      // same findings fresh moments later, and showing both would be redundant.
-      if (mode === 'edit' && validation && !willAutoTest) {
-        await addMessage(currentSessionId, { role: 'ai', type: 'validation', content: '', data: { findings: validation } });
+      const canIntegrate = mode === 'edit' && willAutoTest && testStage;
+
+      if (canIntegrate) {
+        // Hold off on the result/summary cards — they show up once the test
+        // stage below actually finishes.
+        deferredFinish = { result, validation };
+      } else {
+        await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: result });
+        // Builds keep it to the result card alone (project/tables/deploy status
+        // + action buttons) — a separate "Done! **X** is ready..." narration on
+        // top of that read as redundant, overly technical noise. Edits still
+        // get the summary since their result card alone doesn't say what changed.
+        if (mode === 'edit') {
+          await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(result, mode) });
+        }
+        // Edits auto-apply (no separate review step), so validation shows here,
+        // after the deploy — build mode already showed it in the plan card
+        // before the user chose to apply at all. Skip this when auto-test is
+        // about to fire anyway — its combined test+validate card will show the
+        // same findings fresh moments later, and showing both would be redundant.
+        if (mode === 'edit' && validation && !willAutoTest) {
+          await addMessage(currentSessionId, { role: 'ai', type: 'validation', content: '', data: { findings: validation } });
+        }
       }
 
       // A build starts with no project (selectedProjectId is null) — once it
@@ -3311,7 +3331,13 @@ const AiPanel = (() => {
         console.error('[AiPanel] /v1/ai/apply failed', { mode, status: e.status, error: e });
         liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: e.status || 0, outputs: { error: e.message }, ms: 0 });
 
-        if (planMsg) {
+        if (deployStage) {
+          // Surface the failure on the card itself (same as any other stage
+          // failure) instead of a separate error bubble — the card already
+          // has a retry-less "something went wrong" banner for this.
+          deployStage.status = 'error';
+          progressMsg.data.error = `Something went wrong: ${e.message}`;
+        } else if (planMsg) {
           planMsg.settled = false;
           planMsg.applyError = e.message;
           saveSessions();
@@ -3341,11 +3367,14 @@ const AiPanel = (() => {
     // Kick off the automatic post-deploy test run after the apply operation
     // has fully wound down. When the caller handed us the still-live progress
     // card (the job-backed edit flow) and it has its own 'test' stage, fold
-    // results into that same card instead of spawning a separate one.
+    // results into that same card instead of spawning a separate one, and
+    // wait for it so the deferred result card (View/Publish/Seed actions)
+    // appears right after — not mid-card, before testing even started.
     if (!aborted && autoTestProjectId) {
-      const testStage = progressMsg?.data?.stages?.find(s => s.key === 'test');
-      if (testStage) {
-        runEditAutoTest(autoTestProjectId, progressMsg, sess);
+      if (deferredFinish) {
+        await runEditAutoTest(autoTestProjectId, progressMsg, sess);
+        await addMessage(currentSessionId, { role: 'ai', type: 'result', content: '', data: deferredFinish.result });
+        await addMessage(currentSessionId, { role: 'ai', type: 'chat', content: buildApplySummary(deferredFinish.result, mode) });
       } else {
         runProjectTests(autoTestProjectId, null, true);
       }
@@ -3650,9 +3679,24 @@ const AiPanel = (() => {
     if (isOpen) close(); else open(options);
   }
 
-  // Open the panel and jump straight to a specific saved session (used by Home).
-  async function openSession(id) {
-    await open();
+  // Open the panel and jump straight to a specific saved session (used by
+  // Home's recent-activity feed). Must be scoped to that session's own
+  // project — open() with no options falls back to detectCurrentProject(),
+  // which is null on the Home route, so it would load the unassigned session
+  // list, never find `id` in it, and fall through to creating a brand new
+  // "New session" instead — the exact "recent session just opens a new
+  // session" bug this scoping fixes.
+  async function openSession(id, projectId) {
+    const wantProjectId = projectId != null ? projectId : null;
+    if (!isOpen) {
+      await open({ projectId: wantProjectId });
+    } else if (selectedProjectId !== wantProjectId) {
+      // Already open, but scoped to a different project — rescope before
+      // switching so `id` is actually findable in the loaded session list.
+      selectedProjectId = wantProjectId;
+      await loadSessions(selectedProjectId);
+      renderProjectPicker();
+    }
     if (id) { try { await switchSession(id); } catch (_) {} }
   }
 
@@ -3686,7 +3730,7 @@ function renderHomeActivityItem(a) {
   } else if (a.type === 'session') {
     label = a.name && a.name !== 'New session' ? a.name : 'AI session';
     sub = a.project_name ? 'on ' + a.project_name : 'Platform';
-    onClick = () => AiPanel.openSession(a.session_id);
+    onClick = () => AiPanel.openSession(a.session_id, a.project_id ?? null);
   } else {
     label = a.type;
   }
