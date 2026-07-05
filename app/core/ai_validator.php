@@ -35,6 +35,52 @@ function ai_validator_severity_rank(string $severity): int
     return match ($severity) { 'error' => 3, 'warning' => 2, 'info' => 1, default => 0 };
 }
 
+// Heuristic distinguishing a regex literal's opening '/' from a division
+// operator, by looking backward from $pos (exclusive) at the last non-
+// whitespace character already scanned. Not a full JS tokenizer, but
+// sufficient for the common case: a '/' right after an identifier/number/
+// closing bracket is division; anywhere else (start of expression, after an
+// operator/punctuation/keyword, or at the very start) it opens a regex.
+function ai_validator_regex_starts_at(string $js, int $pos): bool
+{
+    $j = $pos - 1;
+    while ($j >= 0 && ctype_space($js[$j])) $j--;
+    if ($j < 0) return true;
+    $last = $js[$j];
+    if (ctype_alnum($last) || $last === '_' || $last === '$' || $last === ')' || $last === ']') {
+        // "return /x/" is the one common false-negative this trips on —
+        // 'return' ends in an alnum char but is not itself a value. Walk
+        // back over the trailing identifier and compare it to the keyword.
+        $k = $j;
+        while ($k >= 0 && (ctype_alnum($js[$k]) || $js[$k] === '_' || $js[$k] === '$')) $k--;
+        return substr($js, $k + 1, $j - $k) === 'return';
+    }
+    return true;
+}
+
+// Advances $i past a regex literal (opening '/' through its closing '/', not
+// counting escaped '\/' or a '/' inside a [...] character class) starting at
+// $js[$i]. Without this, a literal quote character inside a regex — e.g.
+// .replace(/"/g, '&quot;') to HTML-escape a string, a routine pattern in
+// generated frontend code — is misread as opening a real string, which
+// desyncs brace-depth tracking for the rest of the file and makes every
+// member after it invisible to ai_validator_extract_exports.
+function ai_validator_skip_regex_literal(string $js, int &$i): void
+{
+    $len = strlen($js);
+    $i++; // opening '/'
+    $inClass = false;
+    while ($i < $len) {
+        $c = $js[$i];
+        if ($c === '\\' && $i + 1 < $len) { $i += 2; continue; }
+        if ($c === '[') { $inClass = true; $i++; continue; }
+        if ($c === ']') { $inClass = false; $i++; continue; }
+        if ($c === '/' && !$inClass) { $i++; return; }
+        if ($c === "\n") { return; } // unterminated — bail rather than run away
+        $i++;
+    }
+}
+
 // Splits the inner content of an object literal into its top-level members,
 // respecting nested {}/()/[] and string/template literals so a comma inside a
 // method body or argument list isn't mistaken for a member separator.
@@ -57,6 +103,12 @@ function ai_validator_split_top_level(string $body): array
             if ($ch === '/' && $i + 1 < $len && $body[$i + 1] === '*') {
                 $end = strpos($body, '*/', $i + 2);
                 $i   = $end === false ? $len : $end + 2;
+                continue;
+            }
+            if ($ch === '/' && ai_validator_regex_starts_at($body, $i)) {
+                $start = $i;
+                ai_validator_skip_regex_literal($body, $i);
+                $buf .= substr($body, $start, $i - $start);
                 continue;
             }
             if ($ch === "'" || $ch === '"' || $ch === '`') { $state = $ch; $buf .= $ch; $i++; continue; }
@@ -112,6 +164,10 @@ function ai_validator_extract_balanced_body(string $js, int $braceStart): ?strin
             if ($ch === '/' && $i + 1 < $len && $js[$i + 1] === '*') {
                 $end = strpos($js, '*/', $i + 2);
                 $i   = $end === false ? $len : $end + 2;
+                continue;
+            }
+            if ($ch === '/' && ai_validator_regex_starts_at($js, $i)) {
+                ai_validator_skip_regex_literal($js, $i);
                 continue;
             }
             if ($ch === "'" || $ch === '"' || $ch === '`') { $state = $ch; $i++; continue; }
