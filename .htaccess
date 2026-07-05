@@ -17,3 +17,19 @@ RewriteRule ^sites(/.*)?$ - [F,L]
 
 # /docs → docs.html
 RewriteRule ^docs/?$ /docs.html [L]
+
+# ── Caching policy — never serve a stale HTML shell ──────────────────────────
+# An HTML document is the shell that points at versioned assets (and, for the
+# dashboard, carries the ?v= cache-bust query strings). If the shell itself is
+# cached, the browser keeps requesting old asset versions and no deploy can
+# reach it — the root cause of "my fix is live but the app still shows the old
+# behaviour". Force every HTML document (landing page, docs, any future page)
+# to revalidate on each load. Apache attaches ETag/Last-Modified to these
+# static files automatically, so an unchanged page still costs only a 304.
+# Versioned dashboard assets (assets/*.js|css?v=...) are deliberately NOT
+# matched here — they are immutable per version and stay long-cached.
+<IfModule mod_headers.c>
+  <FilesMatch "\.html$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>

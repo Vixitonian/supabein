@@ -3,3 +3,16 @@ DirectoryIndex index.php index.html
 # Redirect index.html to index.php so bookmarks keep working
 RewriteEngine On
 RewriteRule ^index\.html$ index.php [R=301,L]
+
+# ── PWA control files must always revalidate ─────────────────────────────────
+# sw.js: the browser must see a new service worker promptly, otherwise a bumped
+# CACHE_NAME (which is what clears stale asset caches for installed clients)
+# never activates and users stay pinned to old assets. manifest.json: keeps the
+# installed PWA's name/icons/theme current. Both revalidate on each load (cheap
+# 304 when unchanged). The versioned files in assets/ are untouched — they keep
+# their long immutable cache because their ?v= query string changes on deploy.
+<IfModule mod_headers.c>
+  <FilesMatch "^(sw\.js|manifest\.json)$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>

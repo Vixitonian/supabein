@@ -81,7 +81,40 @@ $mimes = [
 ];
 $mime = $mimes[$ext] ?? 'application/octet-stream';
 
+// Freshness policy for deployed user apps: a redeploy or edit MUST reach
+// visitors (and the owner re-testing) immediately — a flat max-age let a
+// changed app keep serving its old HTML/JS for up to an hour, which silently
+// broke the build→deploy→verify loop. These apps reference their own assets
+// (core/api.js, features/*.js) with plain relative paths and no ?v= cache-bust,
+// so correctness can't rely on versioned URLs — instead every response is
+// revalidated. "no-cache" means the browser may store it but must check with
+// the server before reusing; paired with a strong validator (mtime+size) that
+// check is a cheap 304 when nothing changed and a full fresh body the instant
+// the file changes. Stale deployed apps become impossible, without giving up
+// conditional-request efficiency.
+$mtime = filemtime($fullPath);
+$size  = filesize($fullPath);
+$etag  = '"' . dechex($mtime) . '-' . dechex($size) . '"';
+
 header('Content-Type: ' . $mime);
-header('Content-Length: ' . filesize($fullPath));
-header('Cache-Control: public, max-age=3600');
+header('Cache-Control: no-cache, must-revalidate');
+header('ETag: ' . $etag);
+header('Last-Modified: ' . gmdate('D, d M Y H:i:s', $mtime) . ' GMT');
+
+// Honor conditional requests → 304 Not Modified (no body) when unchanged.
+// If-None-Match (ETag) takes precedence over If-Modified-Since per spec.
+$ifNoneMatch = trim($_SERVER['HTTP_IF_NONE_MATCH'] ?? '');
+$ifModSince  = isset($_SERVER['HTTP_IF_MODIFIED_SINCE']) ? strtotime($_SERVER['HTTP_IF_MODIFIED_SINCE']) : false;
+$notModified = false;
+if ($ifNoneMatch !== '') {
+    $notModified = ($ifNoneMatch === $etag);
+} elseif ($ifModSince !== false) {
+    $notModified = ($ifModSince >= $mtime);
+}
+if ($notModified) {
+    http_response_code(304);
+    exit;
+}
+
+header('Content-Length: ' . $size);
 readfile($fullPath);
