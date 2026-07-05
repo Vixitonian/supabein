@@ -114,6 +114,16 @@ class AnthropicClient
                         continue;
                     }
                 }
+                // 5xx/429 without a backoff here means a tight agentic loop
+                // (many calls in quick succession) hits the rate limit, the
+                // caller's own catch-and-retry fires with no delay, hits it
+                // again instantly, and burns its whole turn budget on
+                // rate-limit errors in milliseconds instead of ever getting a
+                // real generation through.
+                if (($httpCode >= 500 || $httpCode === 429) && $attempt < 3) {
+                    sleep($attempt * 2);
+                    continue;
+                }
                 throw new \RuntimeException('Anthropic API error: ' . $msg);
             }
 
