@@ -2848,8 +2848,9 @@ try {
   browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
   page    = await browser.newPage();
 } catch (connErr) {
-  console.error('Browser connect failed: ' + connErr.message);
-  failed++;
+  // assert(), not a bare failed++ — the stories array is the only thing the
+  // PHP result parser counts, so this must land there to be visible upstream.
+  assert('Browser connection', false, 'Browser connect failed: ' + connErr.message);
   console.log('__STORIES_JSON__' + JSON.stringify(stories));
   process.exit(1);
 }
@@ -3184,7 +3185,11 @@ JSEOF;
          . $reloginBlock
          . $logoutBlock
          . "} catch (e) {\n"
-         . "  if (!e.abort) { console.error('Unexpected error: ' + e.message); failed++; }\n"
+         . "  // Record the crash as a story, not just failed++ — PHP's result parser\n"
+         . "  // (ai_playwright_test_run) counts passed/failed from the stories array\n"
+         . "  // alone, so a bare counter bump reported '0 passed, 0 failed' upstream\n"
+         . "  // while the real error surfaced only as a detached raw string.\n"
+         . "  if (!e.abort) assert('Test run aborted mid-way', false, 'Unexpected error: ' + e.message);\n"
          . "}\n\n"
          . $cleanupBlock
          . $footer;

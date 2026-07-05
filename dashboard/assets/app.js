@@ -2880,10 +2880,14 @@ const AiPanel = (() => {
     { key: 'test',    label: 'Running tests' },
   ];
 
+  // Order must mirror ai_run_project_tests() exactly (script → run → stories
+  // → validate): the deterministic browser tests run BEFORE the agentic
+  // user-story tests. Listing them the other way round made steps appear to
+  // complete out of order while a run was live.
   const TEST_PROGRESS_STAGES = [
     { key: 'script',   label: 'Preparing test script' },
-    { key: 'stories',  label: 'Testing user stories' },
     { key: 'run',      label: 'Running browser tests' },
+    { key: 'stories',  label: 'Testing user stories' },
     { key: 'validate', label: 'Checking for mismatches' },
   ];
 

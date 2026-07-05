@@ -25,6 +25,13 @@ declare(strict_types=1);
 // is dead code. Individually toggleable per request via payload.validate
 // (see /v1/ai/build/job and /v1/ai/edit/job), default on.
 
+// The full callable surface of the platform-injected features/auth/auth.js —
+// both the real implementation (AI_CANONICAL_AUTH_JS) and the auth-less stub
+// (AI_CANONICAL_AUTH_STUB_JS) in ai_routes.php export exactly these names.
+// Kept here, next to the check that uses it, because the validator must know
+// the real contract to reject hallucinated method names like renderAuthForms.
+const AI_VALIDATOR_AUTH_EXPORTS = ['ready', 'getCurrentUser', 'login', 'logout', 'signup', 'renderLogin', 'renderSignup'];
+
 function ai_validator_finding(string $severity, string $category, string $message, ?string $detail = null): array
 {
     return ['severity' => $severity, 'category' => $category, 'message' => $message, 'detail' => $detail];
@@ -227,6 +234,32 @@ function ai_validator_extract_routes(string $js): array
     return $routes;
 }
 
+// defineRoute calls whose second argument is NOT a plain function reference —
+// an object literal ({feature: 'home', render: 'renderView'}) or a string
+// ('home.renderView'). The platform router calls handler(params) directly, so
+// any of these crash (or 404 into a custom dispatch scheme) on every visit.
+// Live-caught: a generated app registered ALL of its routes descriptor-style
+// against a home-rolled window[feature] dispatcher, every page died with
+// "Module X not found", and the validator — whose route regex only matches
+// identifier handlers — saw zero routes and reported nothing at all.
+function ai_validator_extract_non_function_routes(string $js): array
+{
+    preg_match_all('/router\.defineRoute\(\s*[\'"]([^\'"]+)[\'"]\s*,\s*([{\'"])/', $js, $m, PREG_SET_ORDER);
+    $routes = [];
+    foreach ($m as $mm) {
+        $routes[] = ['path' => $mm[1], 'kind' => $mm[2] === '{' ? 'object' : 'string'];
+    }
+    return $routes;
+}
+
+// <script src="..."> paths from an HTML file, normalised (leading ./ and /
+// stripped) so they compare directly against the files array's paths.
+function ai_validator_extract_script_srcs(string $html): array
+{
+    preg_match_all('/<script\s[^>]*src=[\'"]([^\'"]+)[\'"]/i', $html, $m);
+    return array_map(fn($s) => ltrim($s, './'), $m[1]);
+}
+
 function ai_validator_extract_nav_hrefs(string $html): array
 {
     preg_match_all('/href=[\'"]#(\/[^\'"#]*)[\'"]/', $html, $m);
@@ -301,19 +334,43 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
     }
 
     $routeDefs     = [];
+    $badRouteDefs  = [];
     $navHrefs      = [];
     $navigateCalls = [];
+    $scriptSrcs    = [];
     foreach ($byPath as $path => $content) {
-        $routeDefs = array_merge($routeDefs, ai_validator_extract_routes($content));
+        $routeDefs    = array_merge($routeDefs, ai_validator_extract_routes($content));
+        $badRouteDefs = array_merge($badRouteDefs, ai_validator_extract_non_function_routes($content));
         if (str_ends_with($path, '.html')) {
-            $navHrefs = array_merge($navHrefs, ai_validator_extract_nav_hrefs($content));
+            $navHrefs   = array_merge($navHrefs, ai_validator_extract_nav_hrefs($content));
+            $scriptSrcs = array_merge($scriptSrcs, ai_validator_extract_script_srcs($content));
         }
         $navigateCalls = array_merge($navigateCalls, ai_validator_extract_navigate_calls($content));
     }
 
     // ── Route ↔ handler existence, duplicate routes ────────────────────────
+    foreach ($badRouteDefs as $brd) {
+        $findings[] = ai_validator_finding('error', 'route',
+            "Route \"{$brd['path']}\" is registered with " . ($brd['kind'] === 'object' ? 'an object literal' : 'a string') . ' instead of a direct function reference',
+            'The platform router calls handler(params) directly — defineRoute(path, module.renderFn) is the only working form. '
+            . 'Descriptor/string handlers only work against a home-rolled dispatch scheme the platform discards at deploy time, so every visit to this route fails.');
+    }
+
     $seenPaths = [];
     foreach ($routeDefs as $rd) {
+        // A handler reference is only callable if the module's script is actually
+        // loaded by index.html — the file existing in the deploy isn't enough.
+        // Live-caught: a /profile route whose features/profile/profile.js was
+        // written to disk but never given a <script src> tag, so visiting it threw
+        // "profile is not defined" while every static check on the file passed.
+        if (preg_match('/^([a-zA-Z0-9_]+)\./', $rd['handler'], $sm) && $sm[1] !== 'auth') {
+            $modPath = "features/{$sm[1]}/{$sm[1]}.js";
+            if (isset($byPath[$modPath]) && $scriptSrcs && !in_array($modPath, $scriptSrcs, true)) {
+                $findings[] = ai_validator_finding('error', 'route',
+                    "Route \"{$rd['path']}\" uses {$rd['handler']}, but index.html never loads {$modPath} via <script src>",
+                    'This route will throw "' . $sm[1] . ' is not defined" the moment it is visited — add the script tag.');
+            }
+        }
         if (isset($seenPaths[$rd['path']])) {
             $findings[] = ai_validator_finding('warning', 'route',
                 "Route \"{$rd['path']}\" is registered more than once",
@@ -323,17 +380,64 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
 
         if (preg_match('/^([a-zA-Z0-9_]+)\.([a-zA-Z0-9_$]+)$/', $rd['handler'], $hm)) {
             [, $module, $fn] = $hm;
-            if ($module === 'auth') continue; // platform-provided — always has renderLogin/renderSignup
-            if (isset($exportsByModule[$module]) && !in_array($fn, $exportsByModule[$module], true)) {
+            if ($module === 'auth') {
+                // Platform-injected features/auth/auth.js always exposes exactly this
+                // surface (see AI_CANONICAL_AUTH_JS / AI_CANONICAL_AUTH_STUB_JS in
+                // ai_routes.php) — the AI still has to call the real method names, so
+                // this can't be a blanket skip the way it used to be. A live-caught bug:
+                // the model wrote auth.renderAuthForms() (a plausible-sounding name that
+                // doesn't exist), the validator waved it through, and every route into
+                // auth crashed with "is not a function" at deploy time.
+                if (!in_array($fn, AI_VALIDATOR_AUTH_EXPORTS, true)) {
+                    $findings[] = ai_validator_finding('error', 'route',
+                        "Route \"{$rd['path']}\" points to {$rd['handler']}, but features/auth/auth.js does not export \"{$fn}\" (only " . implode(', ', AI_VALIDATOR_AUTH_EXPORTS) . ')',
+                        'This route will throw "is not a function" the moment it is visited.');
+                }
+                continue;
+            }
+            if (isset($exportsByModule[$module])) {
+                if (!in_array($fn, $exportsByModule[$module], true)) {
+                    $findings[] = ai_validator_finding('error', 'route',
+                        "Route \"{$rd['path']}\" points to {$rd['handler']}, but features/{$module}/{$module}.js does not export \"{$fn}\"",
+                        'This route will throw "is not a function" the moment it is visited.');
+                }
+            } else {
+                // The handler references a module for which no features/{module}/{module}.js
+                // file exists at all — not just a missing export. Previously this fell
+                // through both branches silently: a route wired to a feature the model
+                // never actually wrote produced no finding, so a whole-app breakage (every
+                // route throwing "X is not defined") shipped past validation undetected.
                 $findings[] = ai_validator_finding('error', 'route',
-                    "Route \"{$rd['path']}\" points to {$rd['handler']}, but features/{$module}/{$module}.js does not export \"{$fn}\"",
-                    'This route will throw "is not a function" the moment it is visited.');
+                    "Route \"{$rd['path']}\" points to {$rd['handler']}, but features/{$module}/{$module}.js was never generated",
+                    'This route will throw "' . $module . ' is not defined" the moment it is visited.');
+            }
+        }
+    }
+
+    // ── Auth routes must exist when the schema has auth ────────────────────
+    // The canonical features/auth/auth.js cross-links #/login ↔ #/signup, the
+    // api client redirects to #/login on 401, and the generated test suite
+    // navigates straight to both — so with a PASSWORD column in the schema,
+    // an app that fails to register either route has broken auth by
+    // construction, regardless of what the rest of its code looks like.
+    $definedPaths = array_column($routeDefs, 'path');
+    $hasAuthTable = false;
+    foreach ($schema['tables'] ?? [] as $t) {
+        foreach ($t['columns'] ?? [] as $c) {
+            if (strtoupper((string)($c['type'] ?? '')) === 'PASSWORD') { $hasAuthTable = true; break 2; }
+        }
+    }
+    if ($hasAuthTable && ($routeDefs || $badRouteDefs)) {
+        foreach (['/login' => 'auth.renderLogin', '/signup' => 'auth.renderSignup'] as $authPath => $authHandler) {
+            if (!in_array($authPath, $definedPaths, true)) {
+                $findings[] = ai_validator_finding('error', 'route',
+                    "Schema has a login system but no \"{$authPath}\" route is registered",
+                    "Add router.defineRoute('{$authPath}', {$authHandler}) to the bootstrap — the platform auth pages, 401 redirects, and tests all depend on it.");
             }
         }
     }
 
     // ── Nav ↔ route consistency (dead links, unreachable routes) ──────────
-    $definedPaths = array_column($routeDefs, 'path');
     $matchesRoute = function (string $href) use ($definedPaths): bool {
         foreach ($definedPaths as $p) {
             if ($p === $href) return true;
