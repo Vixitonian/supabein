@@ -4085,44 +4085,473 @@ function ai_run_project_seed(int $projectId, \SupaBein\Catalog $catalog, \PDO $p
 // Runs the Playwright user-story tests for a project against its most recent
 // deploy (staging if present — edits land there by design — else live).
 // Called from the worker's 'test' job mode; throws on unrecoverable failure.
-const AI_STORY_TESTS_PROMPT = <<<'PROMPT'
-You write a block of Playwright test code that verifies specific user stories against a deployed web app. Your code is inserted verbatim into an existing test harness, inside an async context, its own block scope, and a surrounding try/catch. Already defined and available to you:
 
-- `page` — a Playwright Page, already open on the app and logged in as a test user (when the app has auth)
-- `APP_URL` — string constant, the app's base URL (a hash-routed SPA)
-- `log(msg)` — prints a section header
-- `assert(label, condition, detailString)` — records one pass/fail story result
-- `pageErrors` — array collecting the page's console/runtime errors so far
+// ── Live browser-testing agent ───────────────────────────────────────────────
+// Story verification used to be a single LLM call writing a whole Playwright
+// code block against the STATIC index.html shell — the only DOM it could ever
+// see, since a hash-routed SPA's real markup (a task row, a "mark complete"
+// control) is rendered by JS at runtime and simply isn't in that file. The
+// model had no choice but to guess selectors like `button:has-text("Mark
+// Complete")`, and a real app rendering that control differently (a checkbox,
+// different wording, a different element entirely) made the test time out and
+// report "failed" for a feature that actually worked — testing the model's
+// guess, not the app. This replaces that with a real turn-by-turn agent that
+// drives a persistent Playwright process: it can only click/fill an element
+// it just observed via `snapshot` (addressed by index into that exact
+// observation, never a selector it invents), so there is nothing left to
+// hallucinate. The existing deterministic script (auth, generic CRUD,
+// isolation, logout — ai_playwright_test_generate/ai_playwright_test_run)
+// is unchanged; this only replaces the freeform "distinctive feature" story
+// tests it used to splice in via $storyBlock.
 
-STRICT RULES — violating any of these makes your output unusable:
-1. Respond with JSON only: {"code": "<the JavaScript block>"}.
-2. For EACH user story you are given, produce exactly this shape (nothing outside it):
-   log('Story: <short story label>');
-   try {
-     await page.goto(APP_URL, { waitUntil: 'networkidle' });
-     await page.waitForTimeout(800);
-     // ...actions: page.fill / page.click / page.textContent / page.$ ...
-     assert('<short story label>', <boolean expression>, <short detail string>);
-   } catch (e) { assert('<short story label>', false, e.message); }
-3. Selectors: use ONLY names, ids, hrefs and visible text (via :has-text()) that actually appear in the provided index.html. Never invent selectors.
-4. FORBIDDEN anywhere in your code: import, require, process, browser, chromium, fetch, XMLHttpRequest, page.close, page.context, eval, while loops, waitForTimeout above 3000, loops over 10 iterations.
-5. Each story must be self-contained: navigate first, create any data it needs through the UI, and make ONE meaningful assertion about the story's outcome (not just "element exists" unless that IS the story).
-6. If a story cannot be verified through this UI (needs email, external services, etc.), emit exactly:
-   log('Story: <label>');
-   assert('<label> (skipped — not verifiable in browser)', true, 'skipped');
-7. Keep the whole block under 200 lines. Prefer covering fewer stories well over covering all of them badly.
+const AI_BROWSER_TEST_AGENT_SYSTEM_HEADER = <<<'PROMPT'
+You are testing a live web app in a real browser, one action at a time. You do NOT get its source
+code — only what `snapshot` shows you: the actual rendered interactive elements and visible text on
+the page right now. Nothing about the app's structure is knowable in advance; find out by looking.
+
+Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
+exactly as one action:
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+
+Available tools:
+  navigate      args: {"path": string}
+    Goes to a hash route of this app, e.g. "/" or "/notes/3/edit". Returns a fresh snapshot.
+  snapshot      args: {}
+    Returns the CURRENT page's visible interactive elements, each tagged with an "index" — the ONLY
+    way to address an element in click/fill. Also returns a short excerpt of visible text. Call this
+    after every navigate, click, or wait — you cannot know what changed otherwise, and an index from
+    an earlier snapshot may no longer point at the same thing.
+  click         args: {"index": number}
+    Clicks the element at that index from the MOST RECENT snapshot.
+  fill          args: {"index": number, "value": string}
+    Types into the input/textarea at that index from the most recent snapshot.
+  wait          args: {"ms": number}  (max 3000)
+    Pauses for async UI updates (a save request, a re-render) to settle before your next snapshot.
+  report_story  args: {"label": string, "passed": boolean, "detail": string}
+    Records ONE story's real, observed result, then move on to testing the next one. "passed" must
+    reflect what a snapshot actually showed you — never assume an action worked, verify it.
+  finish        args: {}
+    Ends the session. Only valid once every story you were given has a report_story call.
+
+Hard rules:
+- NEVER invent a selector or assume a page's structure — the only elements you may click or fill are
+  ones an index from your most recent snapshot actually showed you.
+- Verify, don't assume: after an action that should change something (checking a box, saving a form,
+  deleting a row), call snapshot — after a short `wait` if the change might be async — and read the
+  real result before calling report_story.
+- Never click the same element twice in a row to "make sure" or because you didn't see the expected
+  change yet. A checkbox/toggle you click again before its first click's own effect has landed gets
+  flipped right back to where it started — that looks exactly like "nothing happened" but is actually
+  your own two actions canceling out. If an effect isn't visible yet, `wait` then `snapshot` — never
+  re-click the same control to check again.
+- A tool error saying the page/browser was closed, disconnected, or crashed is a TEST-INFRASTRUCTURE
+  failure, not evidence about the app. Never conclude a feature "doesn't work" from an error like
+  that — report_story it false with a detail that plainly says the test session was interrupted
+  before the story could be verified, not a claim that the feature is broken.
+- If, after genuinely trying (the obvious navigation, a snapshot, maybe one retry) — and ruling out
+  the two causes above — a story's target truly isn't findable or doesn't behave as expected,
+  report_story it false with a specific, concrete detail (what you looked for, what you saw
+  instead). That is a real finding, not a tool failure — do not report a story true just to move on.
+- Don't snapshot twice in a row without having done anything in between — you already know what it
+  will show.
+- Work through the given stories in order, one at a time.
 PROMPT;
 
-// Validate an AI-written JS block compiles — a syntax error in the block would
-// otherwise be a parse error for the ENTIRE test script, producing zero results.
-function ai_js_block_syntax_ok(string $block, array $config): bool
+const AI_BROWSER_TEST_AGENT_MAX_TURNS = 60;
+const AI_BROWSER_TEST_AGENT_TURN_TIMEOUT_SEC = 20;
+
+// Builds the persistent Node/Playwright process the agent loop drives one
+// action at a time. Unlike ai_playwright_test_generate()'s script (assembled
+// then run start-to-finish in one shot), this one sits in a request/response
+// loop over stdin/stdout: one JSON command in, one JSON result out, prefixed
+// with a marker so any stray console output from Playwright can't be mistaken
+// for a protocol line. click/fill resolve purely against real element HANDLES
+// captured by the most recent snapshot — never a selector string — so there
+// is no selector-guessing surface at all, by construction.
+function ai_browser_agent_script_generate(string $appUrl, string $token, bool $hasAuth): string
 {
-    $nodeBin = $config['NODE_BIN'] ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
-    $tmp = sys_get_temp_dir() . '/sb_storycheck_' . getmypid() . '_' . time() . '.mjs';
-    file_put_contents($tmp, "async function __sbStories(page, APP_URL, log, assert, pageErrors) {\n{\n" . $block . "\n}\n}\n");
-    exec(escapeshellarg($nodeBin) . ' --check ' . escapeshellarg($tmp) . ' 2>&1', $out, $code);
-    @unlink($tmp);
-    return $code === 0;
+    $loginBlock = $hasAuth ? <<<'JSEOF'
+  try {
+    await page.goto(APP_URL + '#/signup', { waitUntil: 'networkidle', timeout: 15000 });
+    await page.waitForTimeout(500);
+    const idField = await page.$('#auth-form #auth-identifier');
+    if (idField) {
+      await page.fill('#auth-form #auth-identifier', TEST_EMAIL);
+      await page.fill('#auth-form #auth-password', TEST_PASS);
+      await page.click('#auth-form button[type="submit"]');
+      await page.waitForFunction(
+        () => { const el = document.querySelector('#nav-logout'); return el && !el.classList.contains('hidden'); },
+        { timeout: 15000 }
+      ).catch(() => {});
+    }
+  } catch (_) {}
+JSEOF
+        : '';
+
+    $script = <<<'JSEOF'
+import { chromium } from 'playwright-core';
+import readline from 'readline';
+
+const TOKEN = '__TOKEN__';
+const APP_URL = '__APP_URL__';
+const TEST_EMAIL = `pw-agent-${Date.now()}@testmail.dev`;
+const TEST_PASS = 'TestPass123!';
+
+let browser, page;
+let lastHandles = [];
+let lastPath = '/';
+
+function sendResult(obj) {
+  process.stdout.write('@@RESULT@@' + JSON.stringify(obj) + '\n');
+}
+
+function isDisconnectError(e) {
+  const msg = String((e && e.message) || e || '').toLowerCase();
+  return msg.includes('closed') || msg.includes('disconnected') || msg.includes('crashed');
+}
+
+async function connectAndLogin() {
+  browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
+  page = await browser.newPage();
+  page.setDefaultTimeout(15000);
+__LOGIN_BLOCK__
+}
+
+async function doSnapshot() {
+  const candidates = await page.$$('button, a, input, select, textarea, [role="button"]');
+  const items = [];
+  for (const h of candidates) {
+    let visible = false;
+    try { visible = await h.isVisible(); } catch (_) { visible = false; }
+    if (!visible) continue;
+    let info;
+    try {
+      info = await h.evaluate(el => ({
+        tag: el.tagName.toLowerCase(),
+        text: (el.innerText || el.value || el.placeholder || '').trim().slice(0, 80),
+        type: el.type || null,
+        checked: typeof el.checked === 'boolean' ? el.checked : null,
+        disabled: !!el.disabled,
+      }));
+    } catch (_) { continue; }
+    items.push({ handle: h, info });
+    if (items.length >= 60) break;
+  }
+  lastHandles = items.map(it => it.handle);
+  let bodyText = '';
+  try { bodyText = await page.evaluate(() => document.body.innerText); } catch (_) {}
+  return {
+    url: page.url(),
+    elements: items.map((it, i) => Object.assign({ index: i }, it.info)),
+    bodyText: bodyText.slice(0, 1500),
+  };
+}
+
+// Runs one command against the current page. Thrown errors propagate to the
+// caller, which decides whether they're worth a reconnect-and-retry.
+async function runCommand(cmd) {
+  const tool = cmd.tool;
+  const args = cmd.args || {};
+  if (tool === 'navigate') {
+    const path = String(args.path || '/').replace(/^#?\/?/, '/');
+    lastPath = path;
+    await page.goto(APP_URL + '#' + path, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    return { tool, result: await doSnapshot() };
+  }
+  if (tool === 'snapshot') return { tool, result: await doSnapshot() };
+  if (tool === 'click') {
+    const h = lastHandles[args.index];
+    if (!h) return { tool, error: 'no element at index ' + args.index + ' — call snapshot again' };
+    await h.click({ timeout: 8000 });
+    // Give an async handler (a fetch + re-render) a moment to at least start
+    // before control returns — without this, a snapshot called immediately
+    // after can catch the page mid-update, or a second click on what LOOKS
+    // like the same still-live element can double-toggle it back before the
+    // first click's own effect ever became visible.
+    await page.waitForTimeout(300);
+    return { tool, result: { ok: true } };
+  }
+  if (tool === 'fill') {
+    const h = lastHandles[args.index];
+    if (!h) return { tool, error: 'no element at index ' + args.index + ' — call snapshot again' };
+    await h.fill(String(args.value ?? ''), { timeout: 8000 });
+    return { tool, result: { ok: true } };
+  }
+  if (tool === 'wait') {
+    const ms = Math.min(Math.max(parseInt(args.ms, 10) || 500, 0), 3000);
+    await page.waitForTimeout(ms);
+    return { tool, result: { ok: true } };
+  }
+  return { tool, error: 'unknown tool: ' + tool };
+}
+
+// The remote Browserless session can die mid-test for reasons that have
+// nothing to do with the app under test (a session/idle cap, a network
+// blip) — a multi-story agent loop's real wall-clock time (every turn
+// waits on a full model round-trip) can run well past what a single
+// linear script ever needed. Treating that the same as "the feature is
+// broken" would be exactly the false-negative superstition this whole
+// agent replaced the old selector-guessing tests to avoid. One
+// reconnect-and-retry attempt distinguishes a transient infra hiccup from
+// a real failure; only a SECOND failure is reported to the model as-is.
+async function handleCommand(cmd) {
+  try {
+    return await runCommand(cmd);
+  } catch (e) {
+    if (!isDisconnectError(e)) return { tool: cmd.tool, error: String((e && e.message) || e) };
+    try {
+      try { await browser.close(); } catch (_) {}
+      await connectAndLogin();
+      await page.goto(APP_URL + '#' + lastPath, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(500);
+      return await runCommand(cmd);
+    } catch (e2) {
+      return { tool: cmd.tool, error: 'browser session was interrupted (' + String((e && e.message) || e)
+        + ') and could not be recovered — this is a test-infrastructure failure, not evidence the feature itself is broken' };
+    }
+  }
+}
+
+(async () => {
+  try {
+    await connectAndLogin();
+  } catch (e) {
+    sendResult({ tool: '__init__', error: 'Browser connect failed: ' + e.message });
+    process.exit(1);
+  }
+
+  sendResult({ tool: '__init__', result: { ok: true } });
+
+  const rl = readline.createInterface({ input: process.stdin });
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let cmd;
+    try { cmd = JSON.parse(trimmed); } catch (_) { continue; }
+    if (cmd.tool === '__shutdown__') {
+      try { await browser.close(); } catch (_) {}
+      process.exit(0);
+    }
+    const res = await handleCommand(cmd);
+    sendResult(res);
+  }
+  try { await browser.close(); } catch (_) {}
+  process.exit(0);
+})();
+JSEOF;
+
+    return str_replace(
+        ['__TOKEN__', '__APP_URL__', '__LOGIN_BLOCK__'],
+        [addslashes($token), addslashes($appUrl), $loginBlock],
+        $script
+    );
+}
+
+// Spawns the persistent agent script as its own OS process with stdin/stdout
+// kept open as pipes across many send/receive turns (unlike
+// ai_playwright_test_run's one-shot proc_open, which closes immediately after
+// a single run). stderr goes to a file, not a pipe — an unread stderr pipe
+// fills its OS buffer and blocks the child process, and nothing here ever
+// drains it mid-run the way stdout is drained every turn.
+function ai_browser_agent_spawn(string $script, array $config): ?array
+{
+    $nodeBin       = $config['NODE_BIN'] ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
+    $nodeModules   = $config['PLAYWRIGHT_MODULES'] ?? '/home/dxinethn/playwright-test/node_modules';
+    $playwrightDir = rtrim(dirname($nodeModules), '/');
+    $tmpFile       = $playwrightDir . '/sb_agent_' . getmypid() . '_' . time() . '.mjs';
+    file_put_contents($tmpFile, $script);
+
+    $errFile     = sys_get_temp_dir() . '/sb_agent_stderr_' . getmypid() . '_' . time() . '.log';
+    $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $errFile, 'a']];
+    $env = array_merge(getenv() ?: [], ['HOME' => dirname($playwrightDir), 'PATH' => '/usr/local/bin:/usr/bin:/bin']);
+
+    $process = proc_open(escapeshellarg($nodeBin) . ' ' . escapeshellarg($tmpFile), $descriptors, $pipes, $playwrightDir, $env);
+    if (!is_resource($process)) { @unlink($tmpFile); @unlink($errFile); return null; }
+    stream_set_blocking($pipes[1], false);
+
+    return ['proc' => $process, 'pipes' => $pipes, 'tmpFile' => $tmpFile, 'errFile' => $errFile];
+}
+
+// Sends one command and blocks (up to $timeoutSec) for the matching
+// '@@RESULT@@'-prefixed response line — using stream_select rather than a
+// blocking fgets() so a wedged/crashed Node process degrades to a clear
+// timeout error instead of hanging this PHP process (and the job it's part
+// of) forever.
+// Pure read, no write — used both for the startup handshake (the process
+// sends its __init__ result unprompted, before it ever reads stdin) and by
+// ai_browser_agent_send() below, so a caller waiting on a response can never
+// also be the one that desyncs the request/response pairing by writing an
+// extra, uninvited command just to "wait" for something.
+function ai_browser_agent_read(array $handles, int $timeoutSec): array
+{
+    $deadline = microtime(true) + $timeoutSec;
+    while (microtime(true) < $deadline) {
+        $remaining = $deadline - microtime(true);
+        if ($remaining <= 0) break;
+        $read = [$handles['pipes'][1]];
+        $write = null; $except = null;
+        $sec  = (int)$remaining;
+        $usec = (int)(($remaining - $sec) * 1_000_000);
+        $n = @stream_select($read, $write, $except, $sec, $usec);
+        if ($n === false || $n === 0) continue;
+        $chunk = fgets($handles['pipes'][1]);
+        if ($chunk === false) break; // EOF — the process died
+        $pos = strpos($chunk, '@@RESULT@@');
+        if ($pos === false) continue; // stray output — not a protocol line
+        $decoded = json_decode(trim(substr($chunk, $pos + strlen('@@RESULT@@'))), true);
+        if (is_array($decoded)) return $decoded;
+    }
+    return ['tool' => '', 'error' => 'timed out waiting for the browser agent to respond'];
+}
+
+function ai_browser_agent_send(array $handles, array $cmd, int $timeoutSec = AI_BROWSER_TEST_AGENT_TURN_TIMEOUT_SEC): array
+{
+    $tool = (string)($cmd['tool'] ?? '');
+    if (@fwrite($handles['pipes'][0], json_encode($cmd) . "\n") === false) {
+        return ['tool' => $tool, 'error' => 'failed to write to browser agent process'];
+    }
+    return ai_browser_agent_read($handles, $timeoutSec);
+}
+
+// Sends the shutdown command and gives the process a few seconds to close its
+// browser connection cleanly before forcing it closed either way.
+function ai_browser_agent_shutdown(array $handles): void
+{
+    @fwrite($handles['pipes'][0], json_encode(['tool' => '__shutdown__']) . "\n");
+    @fclose($handles['pipes'][0]);
+    $deadline = microtime(true) + 5;
+    while (microtime(true) < $deadline) {
+        $status = @proc_get_status($handles['proc']);
+        if (!$status || !$status['running']) break;
+        usleep(200_000);
+    }
+    @fclose($handles['pipes'][1]);
+    @proc_close($handles['proc']);
+    @unlink($handles['tmpFile']);
+    @unlink($handles['errFile']);
+}
+
+// Friendly one-line label for the live progress card, mirroring
+// ai_edit_agent_step_label's role for the code-editing agent.
+function ai_browser_agent_step_label(string $tool, array $args): string
+{
+    return match ($tool) {
+        'navigate'      => 'Navigating to ' . ($args['path'] ?? '/') . '…',
+        'snapshot'       => 'Looking at the page…',
+        'click'          => 'Clicking element ' . ($args['index'] ?? '?') . '…',
+        'fill'           => 'Filling element ' . ($args['index'] ?? '?') . '…',
+        'wait'           => 'Waiting…',
+        'report_story'   => 'Recording: ' . ($args['label'] ?? '?') . '…',
+        'finish'         => 'Finishing up…',
+        default          => 'Working…',
+    };
+}
+
+// Drives the live browser-testing agent to completion. Returns the same
+// ['stories'=>[...], 'passed'=>N, 'failed'=>N] shape ai_playwright_test_run()
+// returns, so ai_run_project_tests() can merge the two directly with no
+// shape changes downstream.
+function ai_run_browser_test_agent(
+    object $client, array $stories, string $appUrl, string $browserlessToken, bool $hasAuth, callable $report
+): array {
+    if (!$stories) return ['stories' => [], 'passed' => 0, 'failed' => 0];
+
+    $script  = ai_browser_agent_script_generate($appUrl, $browserlessToken, $hasAuth);
+    $handles = ai_browser_agent_spawn($script, \App::get('config'));
+    if ($handles === null) {
+        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => 'Failed to launch the browser testing agent'];
+    }
+
+    // Wait for the __init__ handshake (browser connected + logged in) before
+    // handing control to the model — a connect failure here is a hard stop,
+    // not something for the agent to work around turn by turn. Pure read, no
+    // write: the process sends this line on its own, before it ever reads
+    // stdin, so writing a command here would just sit unread in its stdin
+    // buffer and desync every response that follows.
+    $init = ai_browser_agent_read($handles, 25);
+    if (!empty($init['error']) && ($init['tool'] ?? '') === '__init__') {
+        ai_browser_agent_shutdown($handles);
+        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => $init['error']];
+    }
+
+    $storiesText = implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . $s, $stories, array_keys($stories)));
+    $agentPrompt = AI_BROWSER_TEST_AGENT_SYSTEM_HEADER;
+    $turnMsg = "User stories to verify, in order:\n{$storiesText}\n\nBegin with your first tool action.";
+    $loopHistory = [];
+    $recorded = [];
+    $aiTrace  = [];
+    $finished = false;
+
+    for ($turn = 1; $turn <= AI_BROWSER_TEST_AGENT_MAX_TURNS; $turn++) {
+        $_t0 = microtime(true);
+        try {
+            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
+        } catch (\Throwable $e) {
+            $ms = (int)((microtime(true) - $_t0) * 1000);
+            $aiTrace[] = ['stage' => 'browser_test_agent', 'system' => $agentPrompt, 'history' => [],
+                'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+                'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
+            $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => 'Response was invalid, retrying…']);
+            $turnMsg .= "\n\n(Your previous response could not be parsed as valid JSON: {$e->getMessage()}. Respond again with a single valid JSON action.)";
+            continue;
+        }
+        $ms = (int)((microtime(true) - $_t0) * 1000);
+
+        $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
+        $args = is_array($action) && is_array($action['args'] ?? null) ? $action['args'] : [];
+
+        $aiTrace[] = ['stage' => 'browser_test_agent', 'system' => $agentPrompt, 'history' => [],
+            'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+            'response' => $action, 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => false];
+
+        $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => ai_browser_agent_step_label($tool, $args)]);
+
+        $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
+        $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+
+        if ($tool === 'report_story') {
+            $recorded[] = [
+                'label'  => (string)($args['label'] ?? 'Untitled story'),
+                'passed' => (bool)($args['passed'] ?? false),
+                'detail' => (string)($args['detail'] ?? ''),
+            ];
+            $turnMsg = json_encode(['tool' => 'report_story', 'result' => ['ok' => true, 'recorded' => count($recorded), 'of' => count($stories)]]);
+            continue;
+        }
+
+        if ($tool === 'finish') {
+            if (count($recorded) < count($stories)) {
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    'Only ' . count($recorded) . ' of ' . count($stories) . ' stories have been reported — continue testing the rest before finishing.']);
+                continue;
+            }
+            $finished = true;
+            break;
+        }
+
+        $result = ai_browser_agent_send($handles, ['tool' => $tool, 'args' => $args]);
+        $turnMsg = json_encode($result);
+    }
+
+    if (!$finished) {
+        // Turn budget exhausted — anything not yet reported is an honest,
+        // visible gap rather than a silently dropped story.
+        $reportedLabels = array_column($recorded, 'label');
+        foreach ($stories as $s) {
+            $alreadyCovered = false;
+            foreach ($reportedLabels as $rl) if (str_contains($rl, $s) || str_contains($s, $rl)) { $alreadyCovered = true; break; }
+            if (!$alreadyCovered) {
+                $recorded[] = ['label' => $s, 'passed' => false, 'detail' => 'Turn budget exhausted before this story could be tested'];
+            }
+        }
+    }
+
+    ai_browser_agent_shutdown($handles);
+
+    $passed = count(array_filter($recorded, fn($s) => $s['passed']));
+    $failed = count($recorded) - $passed;
+    return ['stories' => $recorded, 'passed' => $passed, 'failed' => $failed, 'aiTrace' => $aiTrace];
 }
 
 // Deterministic syntax check for a single agent-written file — used by the
@@ -4195,34 +4624,6 @@ function ai_infer_stories(object $client, array $schema, string $indexHtml): arr
     return array_values(array_unique($out));
 }
 
-/**
- * Turn a list of user-story labels into an AI-written Playwright test block.
- * Returns '' when there are no stories or the AI output fails validation —
- * story tests are additive, never a reason to fail the run.
- */
-function ai_generate_story_tests(object $client, array $stories, array $schema, string $indexHtml, array $config): string
-{
-    $stories = array_slice($stories, 0, 8);
-    if (!$stories) return '';
-
-    $userMsg = "User stories to verify (one test each):\n"
-             . implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . $s, $stories, array_keys($stories)))
-             . "\n\nSchema:\n" . ai_schema_to_context($schema)
-             . "\n\nDeployed index.html (selectors must come from here):\n"
-             . mb_substr($indexHtml, 0, 8000);
-
-    $res  = $client->generateJson(AI_STORY_TESTS_PROMPT, $userMsg);
-    $code = trim((string)($res['code'] ?? ''));
-    if ($code === '' || strlen($code) > 20000) return '';
-
-    foreach (['import ', 'require(', 'process.', 'browser.', 'chromium', 'fetch(', 'XMLHttpRequest', 'page.close', 'page.context', 'eval('] as $banned) {
-        if (stripos($code, $banned) !== false) return '';
-    }
-    if (!ai_js_block_syntax_ok($code, $config)) return '';
-
-    return $code;
-}
-
 function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, ?object $client = null): array
 {
     $project = $catalog->getProjectById($projectId, $userId);
@@ -4253,14 +4654,26 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     $schema = ai_schema_from_db($projectId, $catalog);
     $report(['stage' => 'script', 'status' => 'done', 'label' => 'Test script ready']);
 
+    // Generic auth/CRUD/isolation/logout tests, deterministic and unchanged —
+    // these already target conventions AI_FRONTEND_RULES mandates (name="col",
+    // #auth-form ids, etc.), so they don't share the "distinctive feature"
+    // story tests' guessing problem below.
+    $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId, '');
+
+    $report(['stage' => 'run', 'status' => 'start', 'label' => 'Running browser tests…']);
+    $result = ai_playwright_test_run($script, $config);
+    $report(['stage' => 'run', 'status' => 'done',
+             'label'  => 'Tests finished',
+             'detail' => ($result['passed'] ?? 0) . ' passed, ' . ($result['failed'] ?? 0) . ' failed']);
+
     // Story-driven tests: the user stories captured in the Review flow (saved
-    // to project_requirements) become their own AI-written test cases. If the
-    // project never went through Review, infer stories from the schema + the
-    // deployed frontend instead, so every project still gets story tests. Best
-    // effort throughout — any failure here just means the template tests run alone.
-    $storyBlock = '';
+    // to project_requirements) become their own live, agent-driven browser
+    // checks. If the project never went through Review, infer stories from
+    // the schema + the deployed frontend instead, so every project still gets
+    // story tests. Best effort throughout — any failure here just means the
+    // deterministic tests above stand alone.
     if ($client) {
-        $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Writing user-story tests…']);
+        $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Testing user stories…']);
         try {
             $stories = ai_extract_saved_stories($catalog->getProjectRequirements($projectId));
             $source  = 'saved';
@@ -4268,25 +4681,26 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
                 $stories = ai_infer_stories($client, $schema, $indexHtml);
                 $source  = 'inferred';
             }
-            $storyBlock = $stories ? ai_generate_story_tests($client, $stories, $schema, $indexHtml, $config) : '';
-            $covered    = $storyBlock !== '' ? substr_count($storyBlock, "log('Story:") : 0;
+            $authInfo   = ai_detect_auth($schema);
+            $agentResult = ai_run_browser_test_agent($client, $stories, $appUrl, $browserlessToken, !empty($authInfo['table']), $report);
+            if (!empty($agentResult['stories'])) {
+                $result['stories'] = array_merge($result['stories'] ?? [], $agentResult['stories']);
+                $result['passed']  = ($result['passed'] ?? 0) + $agentResult['passed'];
+                $result['failed']  = ($result['failed'] ?? 0) + $agentResult['failed'];
+            }
+            if (!empty($agentResult['aiTrace'])) {
+                $result['aiTrace'] = array_merge($result['aiTrace'] ?? [], $agentResult['aiTrace']);
+            }
             $report(['stage' => 'stories', 'status' => 'done',
-                     'label'  => $storyBlock !== '' ? 'Story tests ready' : 'No story tests',
-                     'detail' => $storyBlock !== ''
-                         ? "$covered user stories covered (" . $source . ")"
-                         : 'stories could not be turned into tests']);
+                     'label'  => $stories ? 'User stories tested' : 'No user stories',
+                     'detail' => $stories
+                         ? count($stories) . ' user stories tested (' . $source . ') — '
+                             . $agentResult['passed'] . ' passed, ' . $agentResult['failed'] . ' failed'
+                         : (!empty($agentResult['error']) ? $agentResult['error'] : 'no stories to test')]);
         } catch (\Throwable $e) {
-            $report(['stage' => 'stories', 'status' => 'done', 'label' => 'Story tests skipped', 'detail' => $e->getMessage()]);
+            $report(['stage' => 'stories', 'status' => 'done', 'label' => 'User-story testing skipped', 'detail' => $e->getMessage()]);
         }
     }
-
-    $script = ai_playwright_test_generate($appUrl, $browserlessToken, $schema, $indexHtml, $projectId, $storyBlock);
-
-    $report(['stage' => 'run', 'status' => 'start', 'label' => 'Running browser tests…']);
-    $result = ai_playwright_test_run($script, $config);
-    $report(['stage' => 'run', 'status' => 'done',
-             'label'  => 'Tests finished',
-             'detail' => ($result['passed'] ?? 0) . ' passed, ' . ($result['failed'] ?? 0) . ' failed']);
 
     sb_log('ai_test', !empty($result['error']) ? 'Failed: ' . $result['error'] : 'Complete', [
         'project_id' => $projectId,
