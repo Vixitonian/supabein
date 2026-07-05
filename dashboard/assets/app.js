@@ -2751,6 +2751,9 @@ const AiPanel = (() => {
     const args = response.args || {};
     const arg = tool === 'search_code' ? args.query
       : tool === 'read_file' || tool === 'write_file' || tool === 'syntax_check' ? args.path
+      : tool === 'navigate' ? args.path
+      : tool === 'click' || tool === 'fill' ? `index ${args.index}`
+      : tool === 'report_story' ? args.label
       : null;
     return arg ? `${tool}: ${arg}` : tool;
   }
@@ -2763,11 +2766,12 @@ const AiPanel = (() => {
       frontend_pass_2: 'Frontend Pass 2',
       edit_pass:       'Edit Pass',
       edit_retry:      '↩ Edit Retry (self-healing)',
-      edit_agent:      'Agent Step',
-      frontend_agent:  'Agent Step',
+      edit_agent:        'Agent Step',
+      frontend_agent:    'Agent Step',
+      browser_test_agent: 'Agent Step',
       diagnose:        'Diagnose',
     };
-    const agentSummary = (ai.stage === 'edit_agent' || ai.stage === 'frontend_agent') ? agentStepSummary(ai.response) : null;
+    const agentSummary = ['edit_agent', 'frontend_agent', 'browser_test_agent'].includes(ai.stage) ? agentStepSummary(ai.response) : null;
     const label    = agentSummary || STAGE_LABELS[ai.stage] || ai.stage;
     const msStr    = ai.ms ? `${(ai.ms / 1000).toFixed(1)}s` : '';
     const tok      = ai.tokens || {};
@@ -2867,7 +2871,7 @@ const AiPanel = (() => {
 
   const TEST_PROGRESS_STAGES = [
     { key: 'script',   label: 'Preparing test script' },
-    { key: 'stories',  label: 'Writing user-story tests' },
+    { key: 'stories',  label: 'Testing user stories' },
     { key: 'run',      label: 'Running browser tests' },
     { key: 'validate', label: 'Checking for mismatches' },
   ];
@@ -2909,6 +2913,7 @@ const AiPanel = (() => {
     design:       ['design_brief'],
     frontend:     ['frontend_pass_2', 'frontend_agent'],
     changes:      ['edit_pass', 'edit_retry', 'edit_agent'],
+    stories:      ['browser_test_agent'],
   };
   function attachTraceToStages(progressMsg, aiTrace) {
     if (!aiTrace || !aiTrace.length) return;
@@ -3407,6 +3412,13 @@ const AiPanel = (() => {
     if (!projectId || !progressMsg || !sess) return;
     const testStage = progressMsg.data.stages.find(s => s.key === 'test');
     if (!testStage) return;
+    // Flip to active (spinner) immediately, before the job-creation network
+    // round-trip even starts — otherwise the row sits at its plain "pending"
+    // (hollow circle, no spinner) look for however long job creation + the
+    // worker picking it up + the browser launching takes, which reads as the
+    // whole card being stuck rather than genuinely working in the background.
+    progressSetStage(progressMsg, 'test', 'active', 'Starting tests…');
+    renderMessages();
     try {
       const { provider, model } = getSelectedModel();
       const jobBody = { project_id: projectId, provider, model };
