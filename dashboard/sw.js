@@ -1,6 +1,14 @@
 'use strict';
 
-const CACHE_NAME = 'supabein-v4';
+// Bumping this name is what forces every currently-installed client off its
+// stale cache: the new worker's activate handler deletes every cache whose
+// name !== CACHE_NAME, wiping the old versioned assets a client may be pinned
+// to, and index.php's controllerchange listener then auto-reloads the page.
+// Bump it whenever a client-visible fix isn't reaching users because an older
+// generation's cached assets are being served (the exact symptom that made a
+// deployed CSS scroll fix invisible on mobile — a stale HTML shell handed the
+// cache-first handler an old ?v=, so it kept serving pre-fix CSS/JS).
+const CACHE_NAME = 'supabein-v5';
 
 const PRECACHE_ASSETS = [
   '/dashboard/',
