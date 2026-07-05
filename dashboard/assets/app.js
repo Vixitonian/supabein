@@ -895,7 +895,18 @@ const AiPanel = (() => {
       const qs = projectId ? `?project_id=${projectId}` : '?project_id=none';
       const result = await Api.get('/v1/ai/sessions' + qs);
       sessions = Array.isArray(result) ? result : [];
-      sessions.forEach(s => { s.messages = s.messages || []; });
+      // The API returns project_id (snake_case); every other place in this
+      // file reads/writes sess.projectId (camelCase) and none of them ever
+      // mapped the two — so a session loaded from the server (as opposed to
+      // one created fresh in this page load via createSession()) had
+      // .projectId permanently undefined. Every "prefer the session's own
+      // recorded project" fix built on top of that silently fell through to
+      // whatever selectedProjectId happened to be, for every pre-existing
+      // session — this is the actual fix, not another fallback layered on it.
+      sessions.forEach(s => {
+        s.messages = s.messages || [];
+        s.projectId = s.projectId ?? s.project_id ?? null;
+      });
     } catch(e) {
       console.error('[AiPanel] loadSessions failed:', e);
       sessions = [];
