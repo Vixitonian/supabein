@@ -115,8 +115,14 @@ class NvidiaClient
                         continue;
                     }
                 }
-                // Retry on DEGRADED (transient backend failure) or 500
-                if (($httpCode >= 500 || str_contains($msg, 'DEGRADED')) && $attempt < 4) {
+                // Retry on DEGRADED (transient backend failure), 5xx, or 429
+                // (rate limit) — without this, a tight agentic loop hammering
+                // this client (many calls in quick succession) hits 429, the
+                // caller's own catch-and-retry fires immediately with no
+                // delay, hits 429 again instantly, and burns its entire turn
+                // budget on rate-limit errors in milliseconds instead of ever
+                // getting a real generation through.
+                if (($httpCode >= 500 || $httpCode === 429 || str_contains($msg, 'DEGRADED')) && $attempt < 4) {
                     sleep($attempt * 2);
                     continue;
                 }

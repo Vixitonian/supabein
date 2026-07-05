@@ -62,28 +62,40 @@ class GeminiClient
             'generationConfig'  => ['responseMimeType' => 'application/json', 'maxOutputTokens' => 65536],
         ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => $payload,
-            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-            CURLOPT_TIMEOUT        => 420,
-            CURLOPT_CONNECTTIMEOUT => 10,
-        ]);
+        $response = null; $httpCode = 0;
+        for ($attempt = 1; $attempt <= 4; $attempt++) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => $payload,
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_CONNECTTIMEOUT => 10,
+            ]);
 
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curlErr  = curl_error($ch);
-        curl_close($ch);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlErr  = curl_error($ch);
+            curl_close($ch);
 
-        if ($response === false) {
-            throw new \RuntimeException('Gemini API network error: ' . $curlErr);
-        }
+            if ($response === false) {
+                throw new \RuntimeException('Gemini API network error: ' . $curlErr);
+            }
 
-        if ($httpCode !== 200) {
+            if ($httpCode === 200) break;
+
             $body = json_decode($response, true);
             $msg  = $body['error']['message'] ?? ('HTTP ' . $httpCode);
+            // 5xx/429 without a backoff here means a tight agentic loop (many
+            // calls in quick succession) hits the rate limit, the caller's own
+            // catch-and-retry fires with no delay, hits it again instantly,
+            // and burns its whole turn budget on rate-limit errors in
+            // milliseconds instead of ever getting a real generation through.
+            if (($httpCode >= 500 || $httpCode === 429) && $attempt < 4) {
+                sleep($attempt * 2);
+                continue;
+            }
             throw new \RuntimeException('Gemini API error: ' . $msg);
         }
 
