@@ -24,6 +24,7 @@ try {
     error_log('[SUPABEIN] [bootstrap] DB CONNECTION FAILED: ' . $e->getMessage());
     http_response_code(503);
     header('Content-Type: application/json');
+    header('Cache-Control: no-store');
     echo json_encode(['error' => 'Database unavailable']);
     exit;
 }
@@ -58,6 +59,11 @@ App::set('db', $pdo);
 function abort(int $status, string $message = '', array $data = []): never
 {
     http_response_code($status);
+    // Same no-store guarantee as json_out — error responses are live data too
+    // (a cached 401/404/409 is just as wrong to replay as a cached 200).
+    if (!headers_sent()) {
+        header('Cache-Control: no-store');
+    }
     $default = [
         400 => 'Bad request',
         401 => 'Unauthorized',
