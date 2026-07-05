@@ -1,4 +1,13 @@
 <?php
+// The HTML shell must never be cached: it carries the ?v= asset versions
+// below, so a stale shell pins the browser (and the cache-first service
+// worker) to old asset versions and silently defeats the whole cache-bust
+// scheme — a deployed fix then never reaches the user no matter how many
+// times they reload. no-store keeps the shell always-fresh; the versioned
+// assets it points at stay long-cacheable and immutable as before.
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+
 $dir = __DIR__ . '/assets/';
 $css = filemtime($dir . 'app.css');
 $js  = filemtime($dir . 'app.js');
@@ -44,7 +53,7 @@ $rjs = filemtime($dir . 'router.js');
         window.location.reload();
       });
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('/dashboard/sw.js', { scope: '/dashboard/' })
+        navigator.serviceWorker.register('/dashboard/sw.js', { scope: '/dashboard/', updateViaCache: 'none' })
           .then(function (reg) {
             // Force an update check on every load so a changed sw.js installs promptly.
             reg.update();
