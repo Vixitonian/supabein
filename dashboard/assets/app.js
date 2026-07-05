@@ -2347,23 +2347,42 @@ const AiPanel = (() => {
     );
   }
 
+  function renderValidationFinding(f) {
+    const style = VALIDATION_SEVERITY_STYLE[f.severity] || VALIDATION_SEVERITY_STYLE.info;
+    const det = el('details', { style: 'font-size:0.8rem' });
+    det.appendChild(el('summary', { style: `display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;padding:1px 0` },
+      el('span', { style: `color:${style.color};font-weight:700;flex-shrink:0` }, style.icon),
+      el('span', { style: 'color:var(--text)' }, f.message)
+    ));
+    const detailText = [f.explanation, f.detail].filter(Boolean).join(' — ');
+    if (detailText) {
+      det.appendChild(el('div', { style: 'margin:4px 0 4px 18px;font-size:0.72rem;color:var(--text-muted);background:rgba(148,163,184,0.08);padding:6px 8px;border-radius:4px;border-left:2px solid var(--border);white-space:pre-wrap;word-break:break-word' }, detailText));
+    }
+    return det;
+  }
+
   // Shared by the standalone validation card (edit mode, after auto-deploy)
   // and the plan card's validation section (build mode, before the user applies).
+  // Errors/warnings are the actionable findings, so they render inline as
+  // before. Info-level findings are just for awareness — collapsing them
+  // behind one summary keeps a card with a lot of them (a live run against a
+  // 21-table schema produced 73 info notes alongside 14 real errors) from
+  // burying the actionable findings under a wall of low-value rows, which on
+  // mobile is easy to swipe straight past without realizing anything was there.
   function renderValidationList(findings) {
     const list = el('div', { style: 'display:flex;flex-direction:column;gap:4px' });
-    findings.forEach(f => {
-      const style = VALIDATION_SEVERITY_STYLE[f.severity] || VALIDATION_SEVERITY_STYLE.info;
-      const det = el('details', { style: 'font-size:0.8rem' });
-      det.appendChild(el('summary', { style: `display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;padding:1px 0` },
-        el('span', { style: `color:${style.color};font-weight:700;flex-shrink:0` }, style.icon),
-        el('span', { style: 'color:var(--text)' }, f.message)
-      ));
-      const detailText = [f.explanation, f.detail].filter(Boolean).join(' — ');
-      if (detailText) {
-        det.appendChild(el('div', { style: 'margin:4px 0 4px 18px;font-size:0.72rem;color:var(--text-muted);background:rgba(148,163,184,0.08);padding:6px 8px;border-radius:4px;border-left:2px solid var(--border);white-space:pre-wrap;word-break:break-word' }, detailText));
-      }
-      list.appendChild(det);
-    });
+    const prominent = findings.filter(f => f.severity === 'error' || f.severity === 'warning');
+    const info = findings.filter(f => f.severity !== 'error' && f.severity !== 'warning');
+    prominent.forEach(f => list.appendChild(renderValidationFinding(f)));
+    if (info.length) {
+      const infoDet = el('details', { style: 'font-size:0.8rem;margin-top:4px' });
+      infoDet.appendChild(el('summary', { style: 'cursor:pointer;color:var(--text-muted);list-style:none;padding:1px 0' },
+        `ℹ ${info.length} info-level note${info.length !== 1 ? 's' : ''} (for awareness only)`));
+      const infoList = el('div', { style: 'display:flex;flex-direction:column;gap:4px;margin-top:4px;margin-left:10px' });
+      info.forEach(f => infoList.appendChild(renderValidationFinding(f)));
+      infoDet.appendChild(infoList);
+      list.appendChild(infoDet);
+    }
     return list;
   }
 
