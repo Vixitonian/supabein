@@ -5031,12 +5031,12 @@ async function renderTables({ id }) {
 
     const tbl = el('table', { class: 'data-table' },
       el('thead', {}, el('tr', {},
-        el('th', {}, 'Name'), el('th', {}, 'Physical Name'), el('th', {}, 'Rows'), el('th', {}, '')
+        el('th', {}, 'Name'), el('th', { class: 'col-mobile-hide' }, 'Physical Name'), el('th', {}, 'Rows'), el('th', {}, '')
       )),
       el('tbody', {}, ...tables.map(t =>
         el('tr', {},
           el('td', {}, el('a', { href: `#/projects/${id}/tables/${t.table_name}` }, t.table_name)),
-          el('td', { class: 'text-muted text-sm' }, t.physical_name),
+          el('td', { class: 'text-muted text-sm col-mobile-hide' }, t.physical_name),
           el('td', { class: 'text-muted text-sm' }, String(t.row_count ?? 0)),
           el('td', {},
             el('button', {

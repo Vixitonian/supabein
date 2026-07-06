@@ -642,6 +642,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   .auth-box { width: 100%; }
 
   .data-table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Columns marked low-priority are dropped entirely on narrow screens rather
+     than left reachable only by scrolling right — a column that requires
+     horizontal scroll to discover reads as "missing" to a mobile user, not
+     "off-screen" (e.g. the Tables list's Rows count, pushed past the edge by
+     Physical Name, an internal detail nobody needs day to day). */
+  .col-mobile-hide { display: none; }
 }
 
 /* Dropdown menu */
