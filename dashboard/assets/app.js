@@ -917,19 +917,24 @@ const AiPanel = (() => {
       // whatever selectedProjectId happened to be, for every pre-existing
       // session — this is the actual fix, not another fallback layered on it.
       fresh.forEach(s => { s.projectId = s.projectId ?? s.project_id ?? null; });
-      // A session with a job still being actively polled must keep its own
-      // in-memory object rather than being replaced by this fetch's lighter,
-      // messages-less copy (this list endpoint doesn't return `messages` at
-      // all). Blindly reassigning `sessions` here split a live poll in two:
-      // the poll loop kept mutating the old (now-orphaned) object in place,
-      // while everything else rendered and persisted from this fresh one —
-      // which never received the poll's eventual resolution. That's how a
-      // job the server had already marked failed could sit showing "Running
-      // tests" forever: the fix that would have shown it as stopped was
-      // being written to an object nothing else was looking at anymore.
+      // ALWAYS keep an existing in-memory session object rather than replacing
+      // it with this fetch's copy -- this list endpoint never returns
+      // `messages` at all, so there is no version of "the fresh copy is more
+      // up to date" for that field, ever. Gating the reuse on "does it still
+      // look like a job is in flight" (an earlier version of this fix) left
+      // a race exactly at the moment a job finishes: pollJob() flips jobDone
+      // to true on the in-memory object first, and only afterwards does that
+      // land in a persisted write -- if loadSessions() re-ran in that window,
+      // the object no longer "looked" in-flight, so it got swapped for a
+      // stale server copy anyway, silently detaching it from whatever was
+      // still running against it (an apply, an auto-test continuation). That
+      // produced a card frozen mid-step even though a later part of the same
+      // flow had already succeeded and persisted its own result. Reusing the
+      // existing object unconditionally removes the race entirely: it is
+      // never replaced by anything that can't possibly know its messages.
       sessions = fresh.map(s => {
         const existing = sessions.find(old => String(old.id) === String(s.id));
-        if (existing && existing.messages && existing.messages.some(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone)) {
+        if (existing) {
           existing.name = s.name;
           existing.projectId = s.projectId;
           return existing;
