@@ -31,6 +31,10 @@ function register_table_routes(\SupaBein\Router $router): void
     $router->get('/v1/projects/:id/tables', function (array $req) use ($catalog, $ownProject): void {
         $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
         $tables = $catalog->listTables((int)$req['params']['id']);
+        foreach ($tables as &$table) {
+            $table['row_count'] = $catalog->countTableRows($table['physical_name']);
+        }
+        unset($table);
         json_out($tables);
     }, ['auth_middleware']);
 
