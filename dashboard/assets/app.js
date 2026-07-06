@@ -656,6 +656,12 @@ const AiPanel = (() => {
   let operationMode = null;
   let currentAbortController = null;
   let activeJobPoll = null; // { cancelled: bool } while a build/edit job is being polled
+  // Ticked once per pollJob() loop iteration -- a frozen/discarded background
+  // tab can leave activeJobPoll set forever without the loop actually still
+  // running (nothing clears it on freeze), which permanently blocks
+  // resumeActiveJobIfAny()'s "don't double-poll" guard from ever starting a
+  // fresh poll again. Staleness on this timestamp is how that's detected.
+  let lastPollTickAt = 0;
   let sendBtnEl = null;
   // Session ids (as strings) with a job the server currently has queued/
   // running, refreshed periodically from /v1/ai/jobs while the panel is
@@ -1587,6 +1593,7 @@ const AiPanel = (() => {
     const SLOW_JOB_WARNING_MS = 20 * 60 * 1000; // 20 min — a heads-up, not a kill; real jobs can legitimately run long
     let warnedSlow = false;
     while (!pollState.cancelled) {
+      lastPollTickAt = Date.now();
       await sleepOrWakeOnVisible(2000);
       if (pollState.cancelled) return null;
 
@@ -1791,6 +1798,22 @@ const AiPanel = (() => {
       try { await persistSession(sess); } catch (_) {}
       renderSidebar();
       renderMessages();
+    }
+  }
+
+  // A poll loop that's gone quiet for way longer than its own 2s cadence
+  // without clearing activeJobPoll is dead in practice, even though nothing
+  // ever formally cancelled it -- a backgrounded mobile tab can freeze all
+  // JS execution (including in-flight timers) for however long it stays
+  // hidden, sometimes well past when the job it was watching has already
+  // finished server-side. Left alone, resumeActiveJobIfAny()'s "don't
+  // double-poll" guard treats that stale pollState as still-active forever,
+  // so nothing ever re-checks the job again -- exactly the "reopening the
+  // panel doesn't fix it" report. Clearing it here lets a fresh poll start.
+  function clearStalePollIfAny() {
+    if (activeJobPoll && Date.now() - lastPollTickAt > 10000) {
+      activeJobPoll.cancelled = true;
+      activeJobPoll = null;
     }
   }
 
@@ -3850,6 +3873,7 @@ const AiPanel = (() => {
   async function open(options = {}) {
     if (isOpen) return;
     isOpen = true;
+    clearStalePollIfAny();
 
     if (!panelEl) {
       panelEl = buildPanel();
@@ -3945,6 +3969,18 @@ const AiPanel = (() => {
   // app — open() pushes a history entry for this exact reason.
   window.addEventListener('popstate', () => {
     if (isOpen) close();
+  });
+
+  // Covers the panel staying open the whole time across a background/
+  // foreground cycle (open() itself only runs when the panel transitions
+  // from closed to open) -- without this, a job that finished while the tab
+  // was hidden long enough to freeze its poll loop would never get
+  // re-checked until the panel was closed and reopened, and even that only
+  // helps because open() also calls clearStalePollIfAny().
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !isOpen) return;
+    clearStalePollIfAny();
+    resumeActiveJobIfAny(currentSession());
   });
 
   function toggle(options) {
