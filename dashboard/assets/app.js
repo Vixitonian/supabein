@@ -894,7 +894,7 @@ const AiPanel = (() => {
     try {
       const qs = projectId ? `?project_id=${projectId}` : '?project_id=none';
       const result = await Api.get('/v1/ai/sessions' + qs);
-      sessions = Array.isArray(result) ? result : [];
+      const fresh = Array.isArray(result) ? result : [];
       // The API returns project_id (snake_case); every other place in this
       // file reads/writes sess.projectId (camelCase) and none of them ever
       // mapped the two — so a session loaded from the server (as opposed to
@@ -903,9 +903,26 @@ const AiPanel = (() => {
       // recorded project" fix built on top of that silently fell through to
       // whatever selectedProjectId happened to be, for every pre-existing
       // session — this is the actual fix, not another fallback layered on it.
-      sessions.forEach(s => {
+      fresh.forEach(s => { s.projectId = s.projectId ?? s.project_id ?? null; });
+      // A session with a job still being actively polled must keep its own
+      // in-memory object rather than being replaced by this fetch's lighter,
+      // messages-less copy (this list endpoint doesn't return `messages` at
+      // all). Blindly reassigning `sessions` here split a live poll in two:
+      // the poll loop kept mutating the old (now-orphaned) object in place,
+      // while everything else rendered and persisted from this fresh one —
+      // which never received the poll's eventual resolution. That's how a
+      // job the server had already marked failed could sit showing "Running
+      // tests" forever: the fix that would have shown it as stopped was
+      // being written to an object nothing else was looking at anymore.
+      sessions = fresh.map(s => {
+        const existing = sessions.find(old => String(old.id) === String(s.id));
+        if (existing && existing.messages && existing.messages.some(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone)) {
+          existing.name = s.name;
+          existing.projectId = s.projectId;
+          return existing;
+        }
         s.messages = s.messages || [];
-        s.projectId = s.projectId ?? s.project_id ?? null;
+        return s;
       });
     } catch(e) {
       console.error('[AiPanel] loadSessions failed:', e);
@@ -2062,15 +2079,21 @@ const AiPanel = (() => {
   // Seed the project's tables with realistic sample data on demand — same
   // background-job machinery as Run Tests, just a simpler job with no cards
   // of its own; the outcome is reported as a plain chat message.
-  async function runProjectSeed(projectId, btn) {
+  //
+  // existingProgressMsg lets a failed card retry in place (same pattern as
+  // streamGenerate's build/edit retry) instead of leaving a dead-end error
+  // with no way forward — previously only build/edit jobs had this.
+  async function runProjectSeed(projectId, btn, existingProgressMsg = null) {
     if (!projectId || seedRunning) return;
     seedRunning = true;
     if (btn) btn.disabled = true;
     let sess = currentSession();
     if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
 
-    const progressMsg = makeProgressMsg(SEED_PROGRESS_STAGES, 'Seeding your app', 'seed');
-    sess.messages.push(progressMsg);
+    const progressMsg = existingProgressMsg || makeProgressMsg(SEED_PROGRESS_STAGES, 'Seeding your app', 'seed');
+    if (existingProgressMsg) resetProgressMsgForRetry(progressMsg);
+    else sess.messages.push(progressMsg);
+    progressMsg.data.retry = () => runProjectSeed(projectId, null, progressMsg);
     operationInProgress = true;
     operationMode = 'seed';
     updateSendBtn();
@@ -2123,16 +2146,20 @@ const AiPanel = (() => {
   // a live progress card — same machinery as build/edit, so the run survives
   // closing the panel or reloading the page (the old synchronous request lost
   // the result if you navigated away during the 30-60s a run takes).
-  async function runProjectTests(projectId, btn, auto = false) {
+  //
+  // existingProgressMsg retries a failed run in place (see runProjectSeed).
+  async function runProjectTests(projectId, btn, auto = false, existingProgressMsg = null) {
     if (!projectId || testRunning) return;
     testRunning = true;
     if (btn) btn.disabled = true;
     let sess = currentSession();
     if (!sess) { sess = await createSession(projectId); currentSessionId = sess.id; }
-    if (!auto) await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
+    if (!auto && !existingProgressMsg) await addMessage(currentSessionId, { role: 'user', content: 'Run tests' });
 
-    const progressMsg = makeProgressMsg(TEST_PROGRESS_STAGES, auto ? 'Auto-testing your app' : 'Testing your app', 'test');
-    sess.messages.push(progressMsg);
+    const progressMsg = existingProgressMsg || makeProgressMsg(TEST_PROGRESS_STAGES, auto ? 'Auto-testing your app' : 'Testing your app', 'test');
+    if (existingProgressMsg) resetProgressMsgForRetry(progressMsg);
+    else sess.messages.push(progressMsg);
+    progressMsg.data.retry = () => runProjectTests(projectId, null, auto, progressMsg);
     operationInProgress = true;
     operationMode = 'test';
     updateSendBtn();
