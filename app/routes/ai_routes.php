@@ -4630,11 +4630,28 @@ function ai_run_browser_test_agent(
         $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
 
         if ($tool === 'report_story') {
-            $recorded[] = [
-                'label'  => (string)($args['label'] ?? 'Untitled story'),
+            $label = (string)($args['label'] ?? 'Untitled story');
+            $entry = [
+                'label'  => $label,
                 'passed' => (bool)($args['passed'] ?? false),
                 'detail' => (string)($args['detail'] ?? ''),
             ];
+            // The turn-budget timeout above can already have auto-failed this
+            // exact story (moving $recorded forward so later stories still get
+            // a turn) before the model, still mid-investigation, gets around
+            // to reporting it for real. Replace that placeholder instead of
+            // appending — the model's own specific result is strictly better
+            // information than the generic timeout message, and appending
+            // would double-count one story as two entries in the final tally.
+            $dupIndex = null;
+            foreach ($recorded as $i => $r) {
+                if ($r['label'] === $label) { $dupIndex = $i; break; }
+            }
+            if ($dupIndex !== null) {
+                $recorded[$dupIndex] = $entry;
+            } else {
+                $recorded[] = $entry;
+            }
             $turnsAtLastReport = $turn;
             $turnMsg = json_encode(['tool' => 'report_story', 'result' => ['ok' => true, 'recorded' => count($recorded), 'of' => count($stories)]]);
             continue;
