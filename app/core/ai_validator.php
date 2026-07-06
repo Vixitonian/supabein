@@ -503,6 +503,33 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
         }
     }
 
+    // ── Anon/authenticated policy gap ──────────────────────────────────────
+    // Missing policy row = deny by default (Policy::check() in policy.php), so
+    // if anon can do an operation on a table but authenticated has no matching
+    // allowed policy, every logged-in request for it 403s. That's not just a
+    // missing feature — the canonical api.js client (AI_CANONICAL_API_JS)
+    // treats a 403 while a token is present as an invalid session and logs
+    // the user out. Live-caught: a generated app's content_blocks table had
+    // an anon SELECT policy but no authenticated one; content_blocks is read
+    // by the home view immediately after every login, so every login was
+    // followed by an immediate silent logout — looking exactly like a broken
+    // token/reload bug when the actual cause was this policy gap.
+    foreach ($tables as $tname => $t) {
+        $allowedByRoleOp = [];
+        foreach ($t['policies'] ?? [] as $p) {
+            if (!($p['allowed'] ?? false)) continue;
+            $allowedByRoleOp[$p['api_role'] ?? ''][strtoupper((string)($p['operation'] ?? ''))] = true;
+        }
+        foreach ($allowedByRoleOp['anon'] ?? [] as $op => $_) {
+            if (empty($allowedByRoleOp['authenticated'][$op])) {
+                $findings[] = ai_validator_finding('error', 'policy',
+                    "\"{$tname}\" allows anon {$op} but has no matching authenticated {$op} policy",
+                    "A logged-in user gets LESS access than an anonymous visitor here — every authenticated {$op} request 403s, since a missing policy row denies by default. "
+                    . 'If any page reads this table right after login (e.g. the home view), this looks exactly like "logging in logs you out." Add a matching authenticated policy unless this table is deliberately anon-only.');
+            }
+        }
+    }
+
     // ── Seed data ↔ frontend literal-comparison consistency ────────────────
     // Heuristic: a column named *_key or *_type is treated as a "discriminator"
     // apps typically switch on with === comparisons (e.g. content_blocks.section_key).
