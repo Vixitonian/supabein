@@ -365,6 +365,22 @@ class Catalog
         return self::castRows($stmt->fetchAll(), ['id', 'project_id']);
     }
 
+    // Exact row count for one physical table. $physicalName always originates
+    // from a project_tables row (assigned via Schema::validateIdentifier at
+    // creation, never user-supplied here), so it's safe to backtick-quote and
+    // interpolate directly — same convention already used for physical-table
+    // access elsewhere in this codebase (e.g. project_routes.php's seed/clear).
+    // Swallows errors rather than throwing: a table dropped out from under the
+    // catalog by a concurrent request shouldn't break the whole tables list.
+    public function countTableRows(string $physicalName): int
+    {
+        try {
+            return (int)$this->pdo->query('SELECT COUNT(*) FROM `' . $physicalName . '`')->fetchColumn();
+        } catch (\Throwable $e) {
+            return 0;
+        }
+    }
+
     public function getTable(int $projectId, string $logicalName): ?array
     {
         $stmt = $this->pdo->prepare(
