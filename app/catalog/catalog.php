@@ -698,13 +698,42 @@ class Catalog
         return self::castRows($rows, ['id', 'user_id', 'project_id']);
     }
 
+    // A live MySQL connection's actual packet ceiling can be lower than the
+    // server's configured max_allowed_packet (e.g. a long-lived pooled
+    // connection negotiated its limit before the global setting was last
+    // raised) -- confirmed live at exactly 1,048,576 bytes. Since `messages`
+    // is a plain LONGTEXT column (not MySQL's native JSON type), an oversized
+    // bound parameter gets silently truncated mid-string instead of erroring,
+    // corrupting the JSON and permanently bricking the whole session (every
+    // future load fails to parse it, and every future save re-corrupts it).
+    // A single test run's trace data alone can be 100KB+, so a session with
+    // several runs crosses this easily. Trim from the oldest messages first
+    // until the payload is safely under that ceiling, and verify the write
+    // landed intact -- never accept a silently truncated save.
+    private const MESSAGES_BYTE_CAP = 900000;
+
     public function updateAiSession(int $id, int $userId, string $name, array $messages): bool
     {
+        $encoded = json_encode($messages, JSON_UNESCAPED_UNICODE);
+        while (strlen($encoded) > self::MESSAGES_BYTE_CAP && count($messages) > 1) {
+            array_shift($messages);
+            $encoded = json_encode($messages, JSON_UNESCAPED_UNICODE);
+        }
         $stmt = $this->pdo->prepare(
             'UPDATE ai_sessions SET name = ?, messages = ? WHERE id = ? AND user_id = ?'
         );
-        $stmt->execute([$name, json_encode($messages, JSON_UNESCAPED_UNICODE), $id, $userId]);
-        return $stmt->rowCount() > 0;
+        $stmt->execute([$name, $encoded, $id, $userId]);
+        $ok = $stmt->rowCount() > 0;
+        if ($ok && strlen($encoded) > 0) {
+            $check = $this->pdo->prepare('SELECT LENGTH(messages) AS len FROM ai_sessions WHERE id = ?');
+            $check->execute([$id]);
+            $storedLen = (int)($check->fetch()['len'] ?? -1);
+            if ($storedLen !== strlen($encoded)) {
+                error_log("updateAiSession: write truncated for session $id (expected " . strlen($encoded) . " bytes, stored $storedLen)");
+                return false;
+            }
+        }
+        return $ok;
     }
 
     // Attaches a session to the project a completed build just created, so the
