@@ -3568,6 +3568,27 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
     }
 }
 
+// A hard, permanent provider failure (a daily free-tier quota exhausted, out
+// of credits, an invalid key) fails identically no matter how many more turns
+// are spent retrying it -- unlike a truncated or malformed JSON response,
+// which retrying can genuinely fix. Every agent loop below used to treat
+// every \Throwable from generateJsonWithHistory() the same way ("recoverable,
+// give it another turn"), which for one of these silently burned the entire
+// turn budget doing nothing but repeat the exact same doomed call, then
+// force-finished with an empty delta that looks like a normal (if unusually
+// small) result -- an edit that changed nothing sails straight through
+// validate+deploy+test looking successful, with the user's actual request
+// never having been attempted and no visible failure anywhere.
+function ai_is_unrecoverable_provider_error(string $msg): bool
+{
+    $msg = strtolower($msg);
+    if (str_contains($msg, 'rate limit') && (str_contains($msg, 'per-day') || str_contains($msg, 'per day') || str_contains($msg, 'daily'))) return true;
+    foreach (['insufficient credit', 'add credit', 'add 10 credits', 'quota exceeded', 'exceeded your current quota', 'invalid api key', 'unauthorized'] as $needle) {
+        if (str_contains($msg, $needle)) return true;
+    }
+    return false;
+}
+
 function ai_edit_agent_step_label(string $tool, array $args): string
 {
     return match ($tool) {
@@ -3617,6 +3638,9 @@ function ai_run_edit_generation_agentic(
         try {
             $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg);
         } catch (\Throwable $e) {
+            if (ai_is_unrecoverable_provider_error($e->getMessage())) {
+                throw new \RuntimeException('AI provider error during edit generation: ' . $e->getMessage());
+            }
             // A raw parse/HTTP failure from the client (e.g. a truncated
             // write_file response that cuts off mid-JSON) would otherwise
             // throw straight out of this loop and fail the whole job,
@@ -3720,6 +3744,9 @@ function ai_run_build_frontend_agentic(
         try {
             $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
         } catch (\Throwable $e) {
+            if (ai_is_unrecoverable_provider_error($e->getMessage())) {
+                throw new \RuntimeException('AI provider error during frontend generation: ' . $e->getMessage());
+            }
             // Same recoverable-turn treatment as the edit agent — a truncated
             // write_file response cutting off mid-JSON shouldn't fail the
             // whole build and discard every file already staged.
@@ -4493,6 +4520,9 @@ function ai_run_browser_test_agent(
         try {
             $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
         } catch (\Throwable $e) {
+            if (ai_is_unrecoverable_provider_error($e->getMessage())) {
+                throw new \RuntimeException('AI provider error during browser testing: ' . $e->getMessage());
+            }
             $ms = (int)((microtime(true) - $_t0) * 1000);
             $aiTrace[] = ['stage' => 'browser_test_agent', 'system' => $agentPrompt, 'history' => [],
                 'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
