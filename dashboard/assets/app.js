@@ -3032,7 +3032,31 @@ const AiPanel = (() => {
         const body = el('div', { class: 'ai-progress-detail-body' });
         if (s.detail) body.appendChild(el('div', { class: 'ai-progress-detail' }, s.detail));
         if (s.traceEntries && s.traceEntries.length) {
-          body.appendChild(el('div', { class: 'ai-progress-trace' }, ...s.traceEntries.map(renderAiCallEntry)));
+          // Each turn of an agentic loop (browser-test-agent, edit-agent) is
+          // its own renderAiCallEntry with up to 3 always-visible sub-rows
+          // (System Prompt / User Message / AI Response) — collapsed details
+          // still render their summary line, they just hide their body. A
+          // real 32-turn run produced ~128 such summary rows dumped inline
+          // and unconditionally the moment this stage was expanded — before
+          // the user could even reach the Test Results card below it, they
+          // had to scroll past all of that. Same fix as the validator's
+          // info-level findings: keep a short, useful preview inline, put the
+          // rest behind one collapsed toggle instead of exploding every turn
+          // into view at once.
+          const entries = s.traceEntries;
+          const PREVIEW_COUNT = 3;
+          const preview = entries.slice(-PREVIEW_COUNT);
+          const rest = entries.slice(0, -PREVIEW_COUNT);
+          const traceWrap = el('div', { class: 'ai-progress-trace' });
+          if (rest.length) {
+            const moreDet = el('details', { style: 'font-size:0.8rem;margin-bottom:4px' });
+            moreDet.appendChild(el('summary', { style: 'cursor:pointer;color:var(--muted)' },
+              `▸ ${rest.length} earlier agent step${rest.length !== 1 ? 's' : ''} (advanced)`));
+            moreDet.appendChild(el('div', {}, ...rest.map(renderAiCallEntry)));
+            traceWrap.appendChild(moreDet);
+          }
+          traceWrap.append(...preview.map(renderAiCallEntry));
+          body.appendChild(traceWrap);
         }
         if (s.testData) {
           body.appendChild(renderTestCard({ id: (msg.id || 'progress') + '_test', data: s.testData }));
@@ -3676,38 +3700,11 @@ const AiPanel = (() => {
       closeBtn
     );
 
-    // TEMPORARY diagnostic — a mobile device reported the message list as
-    // completely unscrollable even after ruling out data loss, render
-    // exceptions, oversized content, and stale caching (all verified
-    // server-side). This surfaces the one thing that can't be checked
-    // remotely: what the browser's own layout engine thinks .ai-messages'
-    // scroll metrics actually are. scrollHeight <= clientHeight would mean a
-    // genuine layout/measurement bug (nothing to scroll, from the browser's
-    // point of view); scrollHeight > clientHeight with scrollTop never
-    // moving would mean something is capturing/blocking the touch gesture
-    // instead. Remove once we have a screenshot of this from the affected
-    // device. Deliberately renders only on top of the AI panel, not anywhere
-    // else in the app.
-    const scrollDebug = el('div', {
-      style: 'position:fixed;top:4px;left:4px;z-index:99999;background:rgba(0,0,0,0.85);color:#22c55e;font-family:monospace;font-size:10px;padding:4px 6px;border-radius:4px;pointer-events:none;white-space:pre;line-height:1.4'
-    }, 'scroll debug: waiting…');
-    function updateScrollDebug() {
-      const cs = getComputedStyle(messages);
-      scrollDebug.textContent =
-        `sH:${messages.scrollHeight} cH:${messages.clientHeight} sT:${messages.scrollTop}\n` +
-        `overflow-y:${cs.overflowY} touch-action:${cs.touchAction}\n` +
-        `overscroll:${cs.overscrollBehaviorY || cs.overscrollBehavior}`;
-    }
-    messages.addEventListener('scroll', updateScrollDebug, { passive: true });
-    messages.addEventListener('touchmove', updateScrollDebug, { passive: true });
-    setInterval(updateScrollDebug, 500);
-
     const mainArea = el('div', { class: 'ai-main' }, header, messages, inputBar);
 
     panel.appendChild(sidebarOverlay);
     panel.appendChild(sidebar);
     panel.appendChild(mainArea);
-    panel.appendChild(scrollDebug);
 
     return panel;
   }
