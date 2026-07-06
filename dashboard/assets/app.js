@@ -3988,7 +3988,20 @@ function homeTimeAgo(ts) {
   return fmtDate(ts);
 }
 
-function renderHomeActivityItem(a) {
+// Backs the small spinner on activity-feed session items (Home and each
+// project's own overview page) -- the same signal the AI panel's own
+// sidebar uses, fetched independently here since either page can render
+// before the panel has ever been opened this page load.
+async function fetchActiveJobSessionIds() {
+  try {
+    const jobs = await Api.get('/v1/ai/jobs');
+    return new Set((jobs || []).filter(j => j.session_id != null).map(j => String(j.session_id)));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function renderHomeActivityItem(a, activeJobSessionIds) {
   const ICON = { project_created: '✦', deploy: '🚀', session: '💬' };
   let label, sub = a.project_name || '', href = null, onClick = null;
   if (a.type === 'project_created') {
@@ -4006,12 +4019,14 @@ function renderHomeActivityItem(a) {
   } else {
     label = a.type;
   }
+  const hasActiveJob = a.type === 'session' && activeJobSessionIds && activeJobSessionIds.has(String(a.session_id));
   const row = el('div', { class: 'home-activity-item' + (href || onClick ? ' home-activity-clickable' : '') },
     el('span', { class: 'home-activity-icon' }, ICON[a.type] || '•'),
     el('div', { class: 'home-activity-text' },
       el('div', { class: 'home-activity-label' }, label),
       sub ? el('div', { class: 'home-activity-sub' }, sub) : null
     ),
+    hasActiveJob ? el('span', { class: 'ai-session-spin', title: 'A job is still running in this session' }) : null,
     el('span', { class: 'home-activity-time' }, homeTimeAgo(a.ts))
   );
   if (href) row.addEventListener('click', () => { window.location.hash = href; });
@@ -4038,9 +4053,9 @@ async function renderHome() {
     el('div', { id: 'home-body' }, el('div', { class: 'home-loading text-muted' }, 'Loading your overview…'))
   ]);
 
-  let o;
+  let o, activeJobSessionIds;
   try {
-    o = await Api.get('/v1/overview');
+    [o, activeJobSessionIds] = await Promise.all([Api.get('/v1/overview'), fetchActiveJobSessionIds()]);
   } catch (e) {
     const body = document.getElementById('home-body');
     if (body) { body.innerHTML = ''; body.appendChild(el('div', { class: 'alert alert-error' }, 'Could not load your overview — ' + e.message)); }
@@ -4122,7 +4137,7 @@ async function renderHome() {
       el('span', { class: 'sb-section-label' }, 'Recent activity')
     ));
     const feed = el('div', { class: 'home-activity' });
-    o.activity.forEach(a => feed.appendChild(renderHomeActivityItem(a)));
+    o.activity.forEach(a => feed.appendChild(renderHomeActivityItem(a, activeJobSessionIds)));
     body.appendChild(feed);
   }
 }
@@ -4450,7 +4465,10 @@ async function loadOverviewPane(projectId, container, switchTab) {
   container.innerHTML = '';
   container.appendChild(el('div', { class: 'text-muted' }, 'Loading…'));
   try {
-    const o = await Api.get(`/v1/projects/${projectId}/overview`);
+    const [o, activeJobSessionIds] = await Promise.all([
+      Api.get(`/v1/projects/${projectId}/overview`),
+      fetchActiveJobSessionIds(),
+    ]);
     container.innerHTML = '';
 
     const stat = (val, label) => el('div', { class: 'home-stat' },
@@ -4563,7 +4581,7 @@ async function loadOverviewPane(projectId, container, switchTab) {
     ));
     if (o.activity && o.activity.length) {
       const feed = el('div', { class: 'home-activity' });
-      o.activity.forEach(a => feed.appendChild(renderHomeActivityItem(a)));
+      o.activity.forEach(a => feed.appendChild(renderHomeActivityItem(a, activeJobSessionIds)));
       container.appendChild(feed);
     } else {
       container.appendChild(el('div', { class: 'text-muted', style: 'padding:16px 0' }, 'No activity yet.'));
