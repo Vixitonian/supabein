@@ -1093,6 +1093,16 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   font-size: 13px;
   line-height: 1.55;
   max-width: 90%;
+  /* A flex item's automatic min-height only equals its content size when
+     overflow is visible — the moment a card sets overflow:hidden (the Test
+     Results card does, to clip its rounded corners around a padding:0
+     header), that minimum collapses to 0 and .ai-messages' flex column is
+     free to squeeze it below its content height to fit whatever space is
+     left, silently clipping the bottom (buttons, later stories) with no
+     scrollbar to reveal it. flex-shrink:0 forces every message bubble to
+     keep its full natural height regardless of its own overflow value —
+     the panel scrolls, individual messages never compress. */
+  flex-shrink: 0;
 }
 .ai-msg-user {
   align-self: flex-end;
