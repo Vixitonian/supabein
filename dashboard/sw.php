@@ -4,22 +4,30 @@
 // registration change is needed and every previously-installed worker just
 // picks this up as its next update.
 //
-// CACHE_NAME used to be a hand-maintained string bumped manually whenever a
-// client-visible fix needed to reach already-installed clients — easy to
-// forget (a real deploy shipped exactly that: the "Rows" column landed in
-// app.js, the string constant never got bumped, and the installed worker's
-// cache-first handler kept serving the old cached app.js indefinitely, since
-// its own byte content — the only thing a browser compares to decide there's
-// "an update" — hadn't changed either). Deriving it from the assets' own
-// content hashes instead (shared with index.php's ?v= params via
-// assets-version.php) makes it automatic and impossible to forget: any
-// deploy that changes so much as one byte of a precached/versioned asset
-// changes this file's output, which is exactly what makes a browser see it
-// as a new worker and run the normal install/activate cycle (whose activate
-// handler deletes every cache whose name != CACHE_NAME). Content hashes over
-// mtimes: a deploy mechanism that copies unchanged files with a fresh mtime
-// (or touches a file without changing it) can't cause a false cache-bust or
-// a missed one either way.
+// CACHE_NAME is derived from the assets' own content hashes (shared with
+// index.php's ?v= params via assets-version.php) so this file's own bytes
+// change whenever a deploy changes so much as one byte of app.js/app.css/
+// router.js/manifest.json — which is what makes a browser see it as a new
+// worker and run the install/activate cycle (whose activate handler deletes
+// every cache whose name != CACHE_NAME).
+//
+// This worker deliberately does NOT cache-first (or cache at all) JS/CSS/
+// icons — it used to, and that was the wrong call twice over: a hand-
+// maintained CACHE_NAME string once went un-bumped and pinned clients to a
+// stale app.js indefinitely (fixed by deriving it automatically), and later
+// a real user still saw stale content even with automatic content-hash
+// versioning, because the SW's OWN update-detection is a whole separate
+// asynchronous dance (install → activate → clients.claim → controllerchange
+// → reload) that depends on the browser getting around to checking at all,
+// on cache.addAll succeeding for every precached URL, and generally on a lot
+// of moving parts a simple asset load doesn't need. The versioned ?v= URLs
+// already make plain HTTP caching completely safe on their own (confirmed
+// live: app.css serves Cache-Control: public, max-age=604800 under its
+// hash-keyed URL) — a normal browser cache always fetches a new ?v= URL
+// fresh the instant a deploy changes it, with none of a service worker's
+// extra failure modes. Removing the redundant SW-level cache for these
+// paths removes the entire bug class rather than trying to make its update
+// detection bulletproof a third time.
 require_once __DIR__ . '/assets-version.php';
 
 header('Content-Type: text/javascript; charset=UTF-8');
@@ -39,12 +47,11 @@ $cacheName = 'supabein-v' . $version;
 
 const CACHE_NAME = <?= json_encode($cacheName) ?>;
 
+// Only the shell HTML — the offline navigation fallback below reads this.
+// JS/CSS/icons are never cache-first'd (see the header comment), so
+// precaching them here would just be dead weight nothing ever reads.
 const PRECACHE_ASSETS = [
   '/dashboard/',
-  '/dashboard/assets/app.js',
-  '/dashboard/assets/router.js',
-  '/dashboard/assets/app.css',
-  '/dashboard/manifest.json',
 ];
 
 // Allow the page to tell a waiting worker to activate immediately.
@@ -92,23 +99,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Cache-first for static assets (JS, CSS, icons, fonts)
-  if (
-    url.pathname.startsWith('/dashboard/assets/') ||
-    url.pathname.startsWith('/dashboard/icons/')
-  ) {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        if (cached) return cached;
-        return fetch(request).then((response) => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
-          return response;
-        });
-      })
-    );
-    return;
-  }
+  // JS/CSS/icons under /dashboard/assets/ and /dashboard/icons/ are deliberately
+  // NOT intercepted here — no event.respondWith() means the browser handles
+  // them exactly as it would with no service worker at all, via its normal
+  // HTTP cache honoring the origin's Cache-Control/ETag (see header comment).
 
   // Network-first for dashboard navigation (HTML) — always pick up the latest
   // deploy on the first reload; the HTML carries the ?v= asset versions, so a
