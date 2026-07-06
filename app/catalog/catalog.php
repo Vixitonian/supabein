@@ -469,6 +469,38 @@ class Catalog
         return self::castRows($stmt->fetchAll(), ['id', 'allowed']);
     }
 
+    /**
+     * Close the "logged-in users get LESS access than anonymous visitors" gap:
+     * for each operation where anon is allowed, if authenticated has no policy
+     * row at all yet (never explicitly set, not explicitly denied), add one
+     * mirroring anon's allowed=true with no constraint. A missing policy row
+     * denies by default (see Policy::check()), so a table an AI schema gives
+     * only an anon SELECT policy silently 403s every logged-in read of it —
+     * and the canonical api.js client treats a 403 with a token present as an
+     * invalid session and logs the user out. Live-caught on a generated app:
+     * its home page read a table with exactly this gap, so every login was
+     * immediately followed by an automatic logout.
+     *
+     * Deliberately does NOT touch a row that already exists for authenticated
+     * — an explicit authenticated=false is a real access decision, not a gap,
+     * and is left alone.
+     */
+    public function backfillAuthenticatedAccess(int $tableId): void
+    {
+        $policies = $this->listPolicies($tableId);
+        $hasAuthRow = [];
+        $anonAllowedOps = [];
+        foreach ($policies as $p) {
+            if ($p['api_role'] === 'authenticated') $hasAuthRow[$p['operation']] = true;
+            if ($p['api_role'] === 'anon' && $p['allowed']) $anonAllowedOps[] = $p['operation'];
+        }
+        foreach ($anonAllowedOps as $op) {
+            if (empty($hasAuthRow[$op])) {
+                $this->upsertPolicy($tableId, 'authenticated', $op, true, null);
+            }
+        }
+    }
+
     public function getPolicy(int $tableId, string $apiRole, string $operation): ?array
     {
         $stmt = $this->pdo->prepare(

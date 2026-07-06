@@ -2094,6 +2094,7 @@ function ai_execute_build(array $plan, int $userId): array
                 sb_log('ai_build', 'Policy upsert failed (non-fatal): ' . $e->getMessage(), ['table' => $tableName]);
             }
         }
+        $catalog->backfillAuthenticatedAccess($table['id']);
 
         $partial['tables'][] = ['name' => $tableName, 'columns' => count($columns)];
     }
@@ -2215,6 +2216,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
                     $catalog->upsertPolicy($table['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
                 } catch (\Throwable $e) {}
             }
+            $catalog->backfillAuthenticatedAccess($table['id']);
             $addedTables[] = $tableDef['name'];
         } catch (\Throwable $e) {
             sb_log('ai_edit', 'add_table failed: ' . $e->getMessage(), ['table' => $tableDef['name']]);
@@ -2246,6 +2248,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
         }
     }
 
+    $policyTouchedTableIds = [];
     foreach ($delta['update_policies'] ?? [] as $p) {
         $tblName = $p['table'] ?? '';
         $tbl = $catalog->getTable($projectId, $tblName);
@@ -2253,9 +2256,13 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
         try {
             $catalog->upsertPolicy($tbl['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
             $updatedPolicies[] = $tblName . '.' . $p['api_role'] . '.' . $p['operation'];
+            $policyTouchedTableIds[$tbl['id']] = true;
         } catch (\Throwable $e) {
             sb_log('ai_edit', 'policy update failed: ' . $e->getMessage());
         }
+    }
+    foreach (array_keys($policyTouchedTableIds) as $touchedTableId) {
+        $catalog->backfillAuthenticatedAccess((int)$touchedTableId);
     }
 
     $seeded = [];
