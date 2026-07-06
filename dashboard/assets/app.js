@@ -1068,10 +1068,32 @@ const AiPanel = (() => {
     });
   }
 
+  // data.retry is a function, and functions never survive a round trip
+  // through JSON (persisted to the DB, or just re-loaded from `sessions`) --
+  // any progress card that had already failed before the current page load
+  // (a reload, a fresh panel open, or a server-side repair like the orphan-
+  // job detector marking it failed) comes back with data.retry silently
+  // undefined, so its Retry button never renders even though the card
+  // correctly shows as stopped. Reconstruct it from what IS persisted
+  // (mode + project) right before every render, for every mode that only
+  // needs project context to retry (test, seed) -- cheap enough to do
+  // unconditionally on every render rather than trying to catch every load path.
+  function hydrateProgressRetries(sess) {
+    if (!sess) return;
+    sess.messages.forEach(msg => {
+      if (msg.type !== 'progress' || !msg.data.error || typeof msg.data.retry === 'function') return;
+      const projectId = sess.projectId;
+      if (!projectId) return;
+      if (msg.data.mode === 'test') msg.data.retry = () => runProjectTests(projectId, null, !!msg.data.auto, msg);
+      else if (msg.data.mode === 'seed') msg.data.retry = () => runProjectSeed(projectId, null, msg);
+    });
+  }
+
   function renderMessages() {
     if (!panelEl) return;
     const container = panelEl.querySelector('.ai-messages');
     if (!container) return;
+    hydrateProgressRetries(currentSession());
     // pollJob() calls this on every poll tick (every ~2s) for as long as a
     // job stays live — a test run's agentic story-testing stage alone can run
     // for minutes. Unconditionally snapping to the bottom on every one of
@@ -2159,6 +2181,7 @@ const AiPanel = (() => {
     const progressMsg = existingProgressMsg || makeProgressMsg(TEST_PROGRESS_STAGES, auto ? 'Auto-testing your app' : 'Testing your app', 'test');
     if (existingProgressMsg) resetProgressMsgForRetry(progressMsg);
     else sess.messages.push(progressMsg);
+    progressMsg.data.auto = auto; // lets hydrateProgressRetries() reconstruct retry correctly after a reload
     progressMsg.data.retry = () => runProjectTests(projectId, null, auto, progressMsg);
     operationInProgress = true;
     operationMode = 'test';
