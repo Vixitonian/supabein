@@ -674,6 +674,16 @@ Available tools:
     constraint can still fail at execution time for reasons that aren't visible from the text alone.
     If it comes back not executing cleanly, fix it with update_policies (constraint_sql supports
     referencing other tables in this project by name, same as during a build).
+  curl_site    args: {"target": "site"|"api", "path": string}
+    Makes a REAL, read-only GET request against the project's currently deployed state — either
+    "site" (the deployed frontend, e.g. path "/" or "/index.html") or "api" (the real data API,
+    path is "/<table_name>" or "/<table_name>/<id>", same policies a real visitor gets). Returns
+    {http_status, body, truncated}. Use this to confirm a bug report against reality before trying
+    to fix it — e.g. "table X won't load" is often a real 404/500/policy-denial one request away
+    from confirming, rather than a guess from reading code. LIMITATION: this only ever reaches the
+    server, so it can confirm a static file or API response but NOT what a client-side hash route
+    (e.g. "#/dashboard") renders once the browser's JS runs — don't use it to debug a report that's
+    specifically about what appears after a hash-route navigation.
   validate_frontend args: {}
     Runs the same deterministic checks used after you finish (dead routes, api.* calls against
     tables that don't exist, auth handlers that don't exist, nav links with no matching route) against
@@ -3838,6 +3848,71 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
                 ]];
             }
 
+        // Lets the agent check what's ACTUALLY live right now — the currently
+        // deployed site's real HTTP response, or a real read against the data
+        // API — instead of only reasoning from source text, the same
+        // "check, don't guess" idea behind check_policy above. A bug report
+        // like "table X won't load" is often a live 500/404/policy-denial
+        // that's obvious from one real request and easy to miss just reading
+        // code. GET-only by construction (no write/update/delete target) so
+        // this can never be the thing that mutates real project data as a
+        // side effect of "just checking" — and the URL is always built from
+        // this project's OWN known site/deploy info via Catalog::listSites(),
+        // never from agent-supplied host input, so it can't become an open
+        // SSRF proxy. Only reaches the server: a client-side SPA hash route
+        // (e.g. "#/dashboard") never leaves the browser, so this confirms a
+        // static file or API response is correct but NOT what a given hash
+        // route renders once JS runs — see the tool's own doc string below.
+        case 'curl_site':
+            if ($projectId <= 0) {
+                return ['tool' => 'curl_site', 'error' => 'not available yet — this project has no deployed site until after finish()'];
+            }
+            $curlTarget = (string)($args['target'] ?? 'site');
+            $curlPath   = (string)($args['path'] ?? '/');
+            if (!in_array($curlTarget, ['site', 'api'], true)) {
+                return ['tool' => 'curl_site', 'error' => 'args.target must be "site" or "api"'];
+            }
+            if ($curlPath === '' || $curlPath[0] !== '/') $curlPath = '/' . $curlPath;
+            $curlCatalog = \SupaBein\Catalog::getInstance();
+            $curlSites = $curlCatalog->listSites($projectId);
+            if (!$curlSites) return ['tool' => 'curl_site', 'error' => 'no deployed site found for this project yet'];
+            $curlSite = $curlSites[0];
+            if ($curlSite['staging_deploy_id'] ?? null) {
+                $curlVariant = 'staging';
+            } elseif ($curlSite['current_deploy_id'] ?? null) {
+                $curlVariant = 'current';
+            } else {
+                return ['tool' => 'curl_site', 'error' => 'no deploy found for this site yet'];
+            }
+            $curlBase = rtrim($config['API_BASE_URL'] ?? '', '/');
+            $curlUrl = $curlTarget === 'api'
+                ? $curlBase . '/v1/data/' . $projectId . $curlPath
+                : $curlBase . '/sites/s' . (int)$curlSite['id'] . '/' . $curlVariant . $curlPath;
+            $ch = curl_init($curlUrl);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_CONNECTTIMEOUT => 5,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_MAXREDIRS      => 3,
+            ]);
+            $curlBody = curl_exec($ch);
+            $curlHttpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $curlErr = curl_error($ch);
+            curl_close($ch);
+            if ($curlBody === false) {
+                return ['tool' => 'curl_site', 'result' => ['url' => $curlUrl, 'error' => $curlErr ?: 'request failed']];
+            }
+            return ['tool' => 'curl_site', 'result' => [
+                'url'         => $curlUrl,
+                'http_status' => $curlHttpCode,
+                'body'        => mb_substr($curlBody, 0, 3000),
+                'truncated'   => strlen($curlBody) > 3000,
+                'note'        => $curlTarget === 'site'
+                    ? 'Raw HTML/asset response only — a client-side hash route (#/...) never reaches the server, so this confirms the shell/static files load, not what a hash route renders.'
+                    : 'This hits the real data API under this project\'s real policies (same as an actual visitor), read-only (GET) — a policy denial or 500 here is real, not a guess.',
+            ]];
+
         // Runs the SAME deterministic checks ai_validator_check_project() runs
         // after the agent finishes (dead routes, api.* calls against tables
         // that don't exist, auth handlers that don't exist, etc.) but DURING
@@ -3878,7 +3953,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
 
         default:
-            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, validate_frontend, finish"];
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, curl_site, validate_frontend, finish"];
     }
 }
 
