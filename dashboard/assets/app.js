@@ -1074,18 +1074,37 @@ const AiPanel = (() => {
   // (a reload, a fresh panel open, or a server-side repair like the orphan-
   // job detector marking it failed) comes back with data.retry silently
   // undefined, so its Retry button never renders even though the card
-  // correctly shows as stopped. Reconstruct it from what IS persisted
-  // (mode + project) right before every render, for every mode that only
-  // needs project context to retry (test, seed) -- cheap enough to do
-  // unconditionally on every render rather than trying to catch every load path.
+  // correctly shows as stopped. Reconstruct it from what IS persisted right
+  // before every render, for every mode a failure can actually appear in --
+  // test/seed only need project context; build/edit also need the original
+  // prompt, which streamGenerate already stashes as data.resumePrompt for
+  // exactly this reason (previously only build_schema's own resume path
+  // used it). Cheap enough to do unconditionally on every render rather
+  // than trying to catch every load path individually.
   function hydrateProgressRetries(sess) {
     if (!sess) return;
+    const projectId = sess.projectId;
     sess.messages.forEach(msg => {
       if (msg.type !== 'progress' || !msg.data.error || typeof msg.data.retry === 'function') return;
-      const projectId = sess.projectId;
-      if (!projectId) return;
-      if (msg.data.mode === 'test') msg.data.retry = () => runProjectTests(projectId, null, !!msg.data.auto, msg);
-      else if (msg.data.mode === 'seed') msg.data.retry = () => runProjectSeed(projectId, null, msg);
+      const mode = msg.data.mode;
+      if (mode === 'test' && projectId) {
+        msg.data.retry = () => runProjectTests(projectId, null, !!msg.data.auto, msg);
+      } else if (mode === 'seed' && projectId) {
+        msg.data.retry = () => runProjectSeed(projectId, null, msg);
+      } else if (mode === 'edit_test' && projectId) {
+        // The post-edit auto-test continuation (edit already deployed before
+        // this failed) -- retrying just re-runs the test in place, same as
+        // its own live retry action, not the whole edit.
+        msg.data.retry = () => runEditAutoTest(projectId, msg, sess);
+      } else if (mode === 'edit' && projectId && msg.data.resumePrompt) {
+        // A stashed prompt from before the 2000-char cap (RESOLVE_PROMPT_MAX)
+        // existed can itself be the reason this failed -- truncate defensively
+        // so retrying never resends the exact same oversized prompt into the
+        // exact same rejection.
+        msg.data.retry = () => proceedWithEditStreaming({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), project_id: projectId, validate: true }, sess, msg);
+      } else if (mode === 'build' && msg.data.resumePrompt) {
+        msg.data.retry = () => runBuildWatchOnly({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), validate: true }, sess, msg);
+      }
     });
   }
 
@@ -3581,6 +3600,12 @@ const AiPanel = (() => {
     if (!projectId || !progressMsg || !sess) return;
     const testStage = progressMsg.data.stages.find(s => s.key === 'test');
     if (!testStage) return;
+    // Clear any error/retry left over from a previous failed attempt -- this
+    // function is also used as the retry action for its own failures, and
+    // without this the old error banner and Retry button would sit stacked
+    // right above the freshly-active spinner while the retry is in flight.
+    progressMsg.data.error = null;
+    progressMsg.data.retry = null;
     // Flip to active (spinner) immediately, before the job-creation network
     // round-trip even starts — otherwise the row sits at its plain "pending"
     // (hollow circle, no spinner) look for however long job creation + the
@@ -3620,11 +3645,18 @@ const AiPanel = (() => {
       } else if (!pollState.cancelled) {
         testStage.status = 'error';
         testStage.detail = progressMsg.data.error || 'Test run failed';
+        // pollJob() already set progressMsg.data.error on this same object,
+        // but never a retry action -- unlike every other mode, this one
+        // never wired one up at all (live or otherwise), so the card's
+        // standard error banner rendered with no way forward.
+        progressMsg.data.retry = () => runEditAutoTest(projectId, progressMsg, sess);
       }
     } catch (e) {
       console.error('[AiPanel] edit auto-test failed', e);
       testStage.status = 'error';
       testStage.detail = e.message || 'Test run failed';
+      progressMsg.data.error = progressMsg.data.error || e.message || 'Test run failed';
+      progressMsg.data.retry = () => runEditAutoTest(projectId, progressMsg, sess);
     } finally {
       try { await persistSession(sess); } catch (_) {}
       renderMessages();
