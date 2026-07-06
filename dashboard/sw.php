@@ -11,22 +11,28 @@
 // cache-first handler kept serving the old cached app.js indefinitely, since
 // its own byte content — the only thing a browser compares to decide there's
 // "an update" — hadn't changed either). Deriving it from the assets' own
-// mtimes instead makes it automatic and impossible to forget: any deploy that
-// changes a precached/versioned asset changes this file's output, which is
-// exactly what makes a browser see it as a new worker and run the normal
-// install/activate cycle (whose activate handler deletes every cache whose
-// name != CACHE_NAME).
+// content hashes instead (shared with index.php's ?v= params via
+// assets-version.php) makes it automatic and impossible to forget: any
+// deploy that changes so much as one byte of a precached/versioned asset
+// changes this file's output, which is exactly what makes a browser see it
+// as a new worker and run the normal install/activate cycle (whose activate
+// handler deletes every cache whose name != CACHE_NAME). Content hashes over
+// mtimes: a deploy mechanism that copies unchanged files with a fresh mtime
+// (or touches a file without changing it) can't cause a false cache-bust or
+// a missed one either way.
+require_once __DIR__ . '/assets-version.php';
+
 header('Content-Type: text/javascript; charset=UTF-8');
 header('Cache-Control: no-cache, must-revalidate');
 header('Pragma: no-cache');
 
 $dir = __DIR__ . '/assets/';
-$version = max(
-    @filemtime($dir . 'app.js') ?: 0,
-    @filemtime($dir . 'app.css') ?: 0,
-    @filemtime($dir . 'router.js') ?: 0,
-    @filemtime(__DIR__ . '/manifest.json') ?: 0
-);
+$version = substr(md5(
+    sb_file_hash($dir . 'app.js') .
+    sb_file_hash($dir . 'app.css') .
+    sb_file_hash($dir . 'router.js') .
+    sb_file_hash(__DIR__ . '/manifest.json')
+), 0, 10);
 $cacheName = 'supabein-v' . $version;
 ?>
 'use strict';
