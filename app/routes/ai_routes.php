@@ -4689,6 +4689,42 @@ function ai_infer_stories(object $client, array $schema, string $indexHtml): arr
     return array_values(array_unique($out));
 }
 
+// A test run creates real rows through the live app itself -- the fixed
+// TEST_EMAIL signup, plus whatever data a story's own interactions leave
+// behind (an enrollment, a project application, a mentorship booking,
+// anything a story exercises with agent-invented content that has no fixed,
+// recognizable pattern to match on afterward). None of that goes through the
+// PHP seed-insert path, so project_seed_rows never learns about it and Clear
+// Seed Data has no way to find it. Snapshotting each table's MAX(id) before
+// the run and tracking whatever's newer afterward catches all of it, in any
+// table, regardless of what the row actually looks like.
+function ai_snapshot_table_high_marks(int $projectId, \SupaBein\Catalog $catalog): array
+{
+    $pdo   = \App::get('db');
+    $marks = [];
+    foreach ($catalog->listTables($projectId) as $t) {
+        try {
+            $marks[$t['table_name']] = (int)$pdo->query("SELECT COALESCE(MAX(id), 0) FROM `{$t['physical_name']}`")->fetchColumn();
+        } catch (\Throwable $e) { /* non-fatal -- table may be mid-migration */ }
+    }
+    return $marks;
+}
+
+function ai_track_new_rows_since(int $projectId, \SupaBein\Catalog $catalog, array $beforeMarks): void
+{
+    $pdo = \App::get('db');
+    foreach ($catalog->listTables($projectId) as $t) {
+        $before = $beforeMarks[$t['table_name']] ?? null;
+        if ($before === null) continue; // wasn't there for the "before" snapshot -- nothing to diff against
+        try {
+            $stmt = $pdo->prepare("SELECT id FROM `{$t['physical_name']}` WHERE id > ?");
+            $stmt->execute([$before]);
+            $ids = array_map('intval', $stmt->fetchAll(\PDO::FETCH_COLUMN));
+            if ($ids) ai_track_seed_rows($pdo, $projectId, $t['table_name'], $ids);
+        } catch (\Throwable $e) { /* non-fatal */ }
+    }
+}
+
 function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, ?object $client = null): array
 {
     $project = $catalog->getProjectById($projectId, $userId);
@@ -4696,6 +4732,8 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
 
     $sites = $catalog->listSites($projectId);
     if (!$sites) throw new \RuntimeException('No deployed site found — build the project first');
+
+    $preTestMarks = ai_snapshot_table_high_marks($projectId, $catalog);
 
     $site = $sites[0];
     if ($site['staging_deploy_id'] ?? null) {
@@ -4792,6 +4830,8 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     } catch (\Throwable $e) {
         $report(['stage' => 'validate', 'status' => 'done', 'label' => 'Validation skipped', 'detail' => $e->getMessage()]);
     }
+
+    ai_track_new_rows_since($projectId, $catalog, $preTestMarks);
 
     return array_merge($result, ['target' => $target, 'validation' => $validation]);
 }
