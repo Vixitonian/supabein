@@ -657,6 +657,13 @@ const AiPanel = (() => {
   let currentAbortController = null;
   let activeJobPoll = null; // { cancelled: bool } while a build/edit job is being polled
   let sendBtnEl = null;
+  // Session ids (as strings) with a job the server currently has queued/
+  // running, refreshed periodically from /v1/ai/jobs while the panel is
+  // open -- other sessions in the sidebar have no `messages` loaded locally,
+  // so their live-job state can't be read off an in-memory progress card the
+  // way the current session's can.
+  let sessionsWithActiveJob = new Set();
+  let activeJobRefreshTimer = null;
 
   // Ordered best-to-least capable for software/frontend generation (scale, tier, coding
   // pedigree, context window, and OpenRouter pricing as a capability proxy where relevant).
@@ -1001,6 +1008,22 @@ const AiPanel = (() => {
     return m ? parseInt(m[1]) : null;
   }
 
+  // The current session's own live job state is always readable straight off
+  // its in-memory messages; every other session in the list only gets that
+  // from the periodically-refreshed server-side set.
+  function sessionHasActiveJob(sess) {
+    if (sess.messages && sess.messages.some(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone)) return true;
+    return sessionsWithActiveJob.has(String(sess.id));
+  }
+
+  async function refreshActiveJobSessions() {
+    try {
+      const jobs = await Api.get('/v1/ai/jobs');
+      sessionsWithActiveJob = new Set((jobs || []).filter(j => j.session_id != null).map(j => String(j.session_id)));
+    } catch (e) { /* leave the last-known set in place on a transient failure */ }
+    renderSidebar();
+  }
+
   function renderSidebar() {
     if (!panelEl) return;
     const titleEl = panelEl.querySelector('.ai-header-title');
@@ -1057,13 +1080,16 @@ const AiPanel = (() => {
       });
       document.addEventListener('click', () => menuDrop.classList.add('hidden'), { once: false, capture: false });
 
+      const spinner = sessionHasActiveJob(sess)
+        ? el('span', { class: 'ai-session-spin', title: 'A job is still running in this session' })
+        : null;
       const item = el('div', {
         class: 'ai-session-item' + (sess.id === currentSessionId ? ' active' : ''),
         onClick: () => {
           switchSession(sess.id);
           if (window.innerWidth < 768) toggleSidebar(false);
         }
-      }, el('span', { class: 'ai-session-item-name' }, sess.name), menuDot, menuDrop);
+      }, el('span', { class: 'ai-session-item-name' }, sess.name), spinner, menuDot, menuDrop);
       container.appendChild(item);
     });
   }
@@ -3094,7 +3120,20 @@ const AiPanel = (() => {
       return;
     }
     const status = ev.status === 'start' ? 'active' : ev.status === 'done' ? 'done' : 'active';
-    progressSetStage(msg, ev.stage, status, ev.detail || '');
+    if (msg.data.stages.some(s => s.key === ev.stage)) {
+      progressSetStage(msg, ev.stage, status, ev.detail || '');
+      return;
+    }
+    // This card collapses a job's real sub-stages into one row instead of
+    // tracking each separately (e.g. edit_test's single 'test' row covers the
+    // standalone test job's own script/run/stories/validate events) --
+    // progressSetStage no-ops on a key it doesn't have, which used to mean
+    // every one of these events was silently dropped and the row sat frozen
+    // on whatever detail text it started with (typically "Starting tests…")
+    // for the entire run. Surface the latest detail on whichever stage is
+    // actually active instead of dropping it.
+    const active = msg.data.stages.find(s => s.status === 'active');
+    if (active && ev.detail) active.detail = ev.detail;
   }
 
   function renderProgressCard(msg) {
@@ -3826,6 +3865,12 @@ const AiPanel = (() => {
     // Deliberately NOT auto-focusing the textarea here — that pops the mobile
     // keyboard the instant the panel opens. Focus only when the user taps in.
     panelEl.classList.add('ai-panel-open');
+
+    // Which OTHER sessions have a live job is server-side state this page
+    // load has no other way to know (their messages aren't loaded locally) --
+    // refresh it now and keep it current for as long as the panel stays open.
+    refreshActiveJobSessions();
+    if (!activeJobRefreshTimer) activeJobRefreshTimer = setInterval(refreshActiveJobSessions, 15000);
     getOrCreateBackdrop().classList.add('active');
 
     const autoProject = detectCurrentProject();
@@ -3893,6 +3938,7 @@ const AiPanel = (() => {
     historyPushed = false;
     sidebarVisible = false;
     toggleSidebar(false);
+    if (activeJobRefreshTimer) { clearInterval(activeJobRefreshTimer); activeJobRefreshTimer = null; }
   }
 
   // Let the phone/browser back button close the panel instead of leaving the
