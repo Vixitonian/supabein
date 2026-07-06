@@ -817,7 +817,15 @@ const api = (() => {
     if (!t) return {};
     // Drop our own expired token so we never send a dead one and hit "not found".
     try {
-      const exp = JSON.parse(atob(t.split('.')[1])).exp;
+      // JWTs are base64url (RFC 7519), not plain base64 -- atob() throws on
+      // a payload containing '-' or '_', which this used to just swallow
+      // and silently skip the expiry check for (harmless here since a truly
+      // expired token still gets rejected server-side), but the identical
+      // decode in auth.js's loadUser() has a much worse failure mode -- kept
+      // consistent with that fix rather than leaving two different decodes
+      // of the same token in the same generated app.
+      const b64 = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      const exp = JSON.parse(atob(b64.padEnd(b64.length + (4 - b64.length % 4) % 4, '='))).exp;
       if (exp && Date.now() / 1000 > exp) { goLogin(); return {}; }
     } catch {}
     return { 'Authorization': 'Bearer ' + t };
@@ -935,7 +943,13 @@ const auth = (() => {
     const t = localStorage.getItem('sb:token');
     if (!t) { _resolveReady(null); document.dispatchEvent(new CustomEvent('auth_status_change')); return; }
     try {
-      const payload = JSON.parse(atob(t.split('.')[1]));
+      // JWTs are base64url (RFC 7519), not plain base64 -- a payload
+      // containing '-' or '_' (common; depends only on the base64 bytes
+      // that happen to land there) makes plain atob() throw, which used to
+      // silently wipe a perfectly valid token and leave the user looking
+      // logged out on the very next page load.
+      const b64 = t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      const payload = JSON.parse(atob(b64.padEnd(b64.length + (4 - b64.length % 4) % 4, '=')));
       currentUser = { id: parseInt(payload.sub, 10) };
     } catch { localStorage.removeItem('sb:token'); }
     _resolveReady(currentUser);
