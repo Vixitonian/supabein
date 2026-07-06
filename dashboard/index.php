@@ -8,10 +8,12 @@
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
 
+require_once __DIR__ . '/assets-version.php';
+
 $dir = __DIR__ . '/assets/';
-$css = filemtime($dir . 'app.css');
-$js  = filemtime($dir . 'app.js');
-$rjs = filemtime($dir . 'router.js');
+$css = sb_file_hash($dir . 'app.css');
+$js  = sb_file_hash($dir . 'app.js');
+$rjs = sb_file_hash($dir . 'router.js');
 ?><!DOCTYPE html>
 <html lang="en">
 <head>
