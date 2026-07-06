@@ -195,11 +195,13 @@ class Schema
         $type     = self::validateDataType($col['type']);
         $nullable = (bool)($col['nullable'] ?? true);
         $default  = $col['default'] ?? null;
+        $unique   = (bool)($col['unique'] ?? false);
 
         // PASSWORD is stored as a bcrypt hash in VARCHAR(255)
         $ddlType = ($type === 'PASSWORD') ? 'VARCHAR(255)' : $type;
         $def = self::q($name) . ' ' . $ddlType;
         $def .= $nullable ? ' NULL' : ' NOT NULL';
+        if ($unique) $def .= ' UNIQUE';
 
         if ($default !== null && $default !== '') {
             $default = (string)$default;
