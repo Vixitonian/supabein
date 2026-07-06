@@ -60,6 +60,18 @@ try {
         $catalog->appendJobProgress($jobId, $event);
     };
 
+    // Surfaces it in the job's own result if make_ai_client()'s resilient
+    // FallbackAiClient actually had to switch away from the requested/default
+    // provider mid-run — otherwise a rate-limit recovery that worked
+    // perfectly would be invisible, and the only sign anything happened would
+    // be the job taking a bit longer than usual.
+    $withFallbackInfo = function (array $result) use ($client): array {
+        if ($client instanceof \SupaBein\FallbackAiClient && $client->getFallbackEvents()) {
+            $result['provider_fallback'] = $client->getFallbackEvents();
+        }
+        return $result;
+    };
+
     if ($mode === 'build') {
         $prompt         = $payload['prompt']  ?? '';
         $history        = $payload['history'] ?? [];
@@ -71,7 +83,7 @@ try {
         // job to also deploy and test, giving the whole pipeline one
         // reload-proof progress trail instead of three separately-tracked steps.
         $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId);
-        $catalog->markJobDone($jobId, array_merge(['mode' => 'build'], $result));
+        $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build'], $result)));
 
     } elseif ($mode === 'build_schema') {
         // Review-on build, stage 1: schema + design brief only — the
@@ -81,7 +93,7 @@ try {
         $history        = $payload['history'] ?? [];
         $approvedIntent = $payload['intent']  ?? null;
         $result = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
-        $catalog->markJobDone($jobId, array_merge(['mode' => 'build_schema'], $result));
+        $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build_schema'], $result)));
 
     } elseif ($mode === 'build_frontend') {
         // Review-on build, stage 2: frontend + validate, against the schema
@@ -91,7 +103,7 @@ try {
         $designBrief = $payload['design_brief'] ?? [];
         $validate    = $payload['validate'] ?? true;
         $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate);
-        $catalog->markJobDone($jobId, array_merge(['mode' => 'build_frontend'], $result));
+        $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build_frontend'], $result)));
 
     } elseif ($mode === 'edit') {
         $projectId = (int)($payload['project_id'] ?? 0);
@@ -99,17 +111,17 @@ try {
         $history   = $payload['history'] ?? [];
         $validate  = $payload['validate'] ?? true;
         $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate);
-        $catalog->markJobDone($jobId, array_merge(['mode' => 'edit'], $result));
+        $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'edit'], $result)));
 
     } elseif ($mode === 'test') {
         $projectId = (int)($payload['project_id'] ?? 0);
         $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
-        $catalog->markJobDone($jobId, array_merge(['mode' => 'test'], $result));
+        $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'test'], $result)));
 
     } elseif ($mode === 'seed') {
         $projectId = (int)($payload['project_id'] ?? 0);
         $result = ai_run_project_seed($projectId, $catalog, $db, $client, $report);
-        $catalog->markJobDone($jobId, array_merge(['mode' => 'seed'], $result));
+        $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'seed'], $result)));
 
     } else {
         throw new \RuntimeException('Unknown job mode: ' . $mode);
