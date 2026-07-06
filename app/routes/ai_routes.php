@@ -4237,6 +4237,12 @@ Hard rules:
   failure, not evidence about the app. Never conclude a feature "doesn't work" from an error like
   that — report_story it false with a detail that plainly says the test session was interrupted
   before the story could be verified, not a claim that the feature is broken.
+- That kind of error is scoped to the ONE command that hit it — the harness reconnects a fresh
+  browser session before your very next command runs. It does NOT mean the session is permanently
+  dead for the rest of the run. Never report multiple remaining stories as failed off the back of a
+  single browser-closed error without trying them: still attempt each later story for real (navigate,
+  then snapshot) before deciding it also can't be verified. Most of the time the next attempt just
+  works.
 - If, after genuinely trying (the obvious navigation, a snapshot, maybe one retry) — and ruling out
   the two causes above — a story's target truly isn't findable or doesn't behave as expected,
   report_story it false with a specific, concrete detail (what you looked for, what you saw
