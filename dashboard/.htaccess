@@ -1,18 +1,23 @@
-DirectoryIndex index.php index.html
+DirectoryIndex index.php
 
-# Redirect index.html to index.php so bookmarks keep working
 RewriteEngine On
-RewriteRule ^index\.html$ index.php [R=301,L]
+
+# Serve sw.js from sw.php so its CACHE_NAME can be computed from the assets'
+# own mtimes instead of a hand-maintained string — see sw.php's header comment.
+# Transparent: the service worker stays registered at /dashboard/sw.js, so no
+# client-side registration change is needed for already-installed clients.
+RewriteRule ^sw\.js$ sw.php [L]
 
 # ── PWA control files must always revalidate ─────────────────────────────────
-# sw.js: the browser must see a new service worker promptly, otherwise a bumped
-# CACHE_NAME (which is what clears stale asset caches for installed clients)
-# never activates and users stay pinned to old assets. manifest.json: keeps the
-# installed PWA's name/icons/theme current. Both revalidate on each load (cheap
-# 304 when unchanged). The versioned files in assets/ are untouched — they keep
-# their long immutable cache because their ?v= query string changes on deploy.
+# sw.js/sw.php: the browser must see a new service worker promptly, otherwise
+# a changed CACHE_NAME (which is what clears stale asset caches for installed
+# clients) never activates and users stay pinned to old assets. manifest.json:
+# keeps the installed PWA's name/icons/theme current. Both revalidate on each
+# load (cheap 304 when unchanged). The versioned files in assets/ are
+# untouched — they keep their long immutable cache because their ?v= query
+# string changes on deploy.
 <IfModule mod_headers.c>
-  <FilesMatch "^(sw\.js|manifest\.json)$">
+  <FilesMatch "^(sw\.js|sw\.php|manifest\.json)$">
     Header set Cache-Control "no-cache, must-revalidate"
   </FilesMatch>
 </IfModule>

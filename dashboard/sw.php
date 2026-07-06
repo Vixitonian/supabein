@@ -1,14 +1,37 @@
+<?php
+// Served (via .htaccess rewrite) at the same URL the service worker has
+// always been registered under, /dashboard/sw.js — so no client-side
+// registration change is needed and every previously-installed worker just
+// picks this up as its next update.
+//
+// CACHE_NAME used to be a hand-maintained string bumped manually whenever a
+// client-visible fix needed to reach already-installed clients — easy to
+// forget (a real deploy shipped exactly that: the "Rows" column landed in
+// app.js, the string constant never got bumped, and the installed worker's
+// cache-first handler kept serving the old cached app.js indefinitely, since
+// its own byte content — the only thing a browser compares to decide there's
+// "an update" — hadn't changed either). Deriving it from the assets' own
+// mtimes instead makes it automatic and impossible to forget: any deploy that
+// changes a precached/versioned asset changes this file's output, which is
+// exactly what makes a browser see it as a new worker and run the normal
+// install/activate cycle (whose activate handler deletes every cache whose
+// name != CACHE_NAME).
+header('Content-Type: text/javascript; charset=UTF-8');
+header('Cache-Control: no-cache, must-revalidate');
+header('Pragma: no-cache');
+
+$dir = __DIR__ . '/assets/';
+$version = max(
+    @filemtime($dir . 'app.js') ?: 0,
+    @filemtime($dir . 'app.css') ?: 0,
+    @filemtime($dir . 'router.js') ?: 0,
+    @filemtime(__DIR__ . '/manifest.json') ?: 0
+);
+$cacheName = 'supabein-v' . $version;
+?>
 'use strict';
 
-// Bumping this name is what forces every currently-installed client off its
-// stale cache: the new worker's activate handler deletes every cache whose
-// name !== CACHE_NAME, wiping the old versioned assets a client may be pinned
-// to, and index.php's controllerchange listener then auto-reloads the page.
-// Bump it whenever a client-visible fix isn't reaching users because an older
-// generation's cached assets are being served (the exact symptom that made a
-// deployed CSS scroll fix invisible on mobile — a stale HTML shell handed the
-// cache-first handler an old ?v=, so it kept serving pre-fix CSS/JS).
-const CACHE_NAME = 'supabein-v5';
+const CACHE_NAME = <?= json_encode($cacheName) ?>;
 
 const PRECACHE_ASSETS = [
   '/dashboard/',
