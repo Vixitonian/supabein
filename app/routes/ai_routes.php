@@ -2823,7 +2823,12 @@ async function captureToken(pg) {
   try {
     const raw = await pg.evaluate(() => localStorage.getItem('sb:token'));
     if (!raw) return [null, null];
-    const p = JSON.parse(atob(raw.split('.')[1]));
+    // Same base64url (RFC 7519) fix as the generated app's own auth.js/api.js
+    // -- plain atob() throws on a payload containing '-' or '_', which used
+    // to make this test helper itself unreliable for exactly the tokens most
+    // worth testing.
+    const b64 = raw.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const p = JSON.parse(atob(b64.padEnd(b64.length + (4 - b64.length % 4) % 4, '=')));
     return [raw, parseInt(p.sub, 10)];
   } catch (_) { return [null, null]; }
 }
@@ -2931,6 +2936,21 @@ JSEOF;
         $authBlock .= "  }\n";
         $authBlock .= "  assert('Signup succeeds and user is logged in', loggedIn);\n";
         $authBlock .= "  if (!loggedIn) throw Object.assign(new Error('auth_failed'), { abort: true });\n\n";
+
+        // A prior real bug (a plain atob() on a base64url JWT payload, fixed
+        // in AI_CANONICAL_AUTH_JS's loadUser()) only ever manifested on a
+        // genuine full page reload -- every other story here navigates via
+        // page.goto() to a same-origin hash-only URL, which browsers treat as
+        // in-document SPA navigation and never re-runs loadUser() at all, so
+        // this exact class of bug was invisible to every test in this script
+        // until now. page.reload() forces the real thing: a full script
+        // re-parse against whatever's already sitting in localStorage.
+        $authBlock .= "  log('Story: Session survives a page reload');\n";
+        $authBlock .= "  await page.reload({ waitUntil: 'networkidle' });\n";
+        $authBlock .= "  let stillLoggedInAfterReload = false;\n";
+        $authBlock .= "  try { await waitLoggedIn(page); stillLoggedInAfterReload = true; } catch (_) {}\n";
+        $authBlock .= "  assert('Still logged in after a page reload', stillLoggedInAfterReload,\n";
+        $authBlock .= "    stillLoggedInAfterReload ? '' : 'Reloading the page logged the user out — check the token decode in loadUser()');\n\n";
     } else {
         $authBlock .= "  await page.goto(APP_URL, { waitUntil: 'networkidle' });\n";
         $authBlock .= "  await page.waitForTimeout(1000);\n";
