@@ -4646,26 +4646,34 @@ async function loadTablesPane(projectId, container) {
     } else {
       tableContent = el('table', { class: 'data-table' },
         el('thead', {}, el('tr', {},
-          el('th', {}, 'Name'), el('th', {}, 'Physical Name'), el('th', {}, '')
+          el('th', {}, 'Name'), el('th', { class: 'col-mobile-hide' }, 'Physical Name'), el('th', {}, 'Rows'), el('th', {}, '')
         )),
-        el('tbody', {}, ...tables.map(t =>
-          el('tr', {},
+        el('tbody', {}, ...tables.map(t => {
+          const menuBtn = el('button', { class: 'proj-menu-btn', title: 'Table actions' }, '⋮');
+          const dropdown = el('div', { class: 'dropdown proj-menu-drop hidden' },
+            el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Drop table')
+          );
+          menuBtn.addEventListener('click', e => {
+            e.preventDefault(); e.stopPropagation();
+            document.querySelectorAll('.proj-menu-drop').forEach(d => { if (d !== dropdown) d.classList.add('hidden'); });
+            dropdown.classList.toggle('hidden');
+          });
+          dropdown.querySelector('button').addEventListener('click', async () => {
+            dropdown.classList.add('hidden');
+            if (!confirm(`Drop table "${t.table_name}"?`)) return;
+            try {
+              await Api.delete(`/v1/projects/${projectId}/tables/${t.table_name}`);
+              loadTablesPane(projectId, container);
+            } catch (e) { alert(e.message); }
+          });
+
+          return el('tr', {},
             el('td', {}, el('a', { href: `#/projects/${projectId}/tables/${t.table_name}` }, t.table_name)),
-            el('td', { class: 'text-muted text-sm' }, t.physical_name),
-            el('td', {},
-              el('button', {
-                class: 'btn btn-sm btn-danger',
-                onClick: async () => {
-                  if (!confirm(`Drop table "${t.table_name}"?`)) return;
-                  try {
-                    await Api.delete(`/v1/projects/${projectId}/tables/${t.table_name}`);
-                    loadTablesPane(projectId, container);
-                  } catch (e) { alert(e.message); }
-                }
-              }, 'Drop')
-            )
-          )
-        ))
+            el('td', { class: 'text-muted text-sm col-mobile-hide' }, t.physical_name),
+            el('td', { class: 'text-muted text-sm' }, String(t.row_count ?? 0)),
+            el('td', { style: 'position:relative; text-align:right' }, menuBtn, dropdown)
+          );
+        }))
       );
     }
 
