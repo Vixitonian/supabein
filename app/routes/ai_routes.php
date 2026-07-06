@@ -2034,6 +2034,14 @@ function ai_execute_build(array $plan, int $userId): array
         abort(500, 'Failed to create project: ' . $e->getMessage());
     }
 
+    // The column an app logs in by (email/username/etc., paired with the
+    // PASSWORD column) must be UNIQUE at the DB level -- without it, nothing
+    // stops the same identifier from being registered twice, and login-by-
+    // identifier becomes ambiguous the moment it happens. Detected once
+    // against the whole plan since it's the same table/field for every
+    // table in this build.
+    $authField = ai_detect_auth($plan);
+
     foreach ($plan['tables'] as $tableDef) {
         $tableName = $tableDef['name'];
 
@@ -2045,6 +2053,7 @@ function ai_execute_build(array $plan, int $userId): array
                 'nullable' => (bool)($col['nullable'] ?? true),
                 'default'  => (isset($col['default']) && $col['default'] !== null && $col['default'] !== false)
                                ? (string)$col['default'] : null,
+                'unique'   => $tableName === $authField['table'] && $col['name'] === $authField['field'],
             ];
         }
 
@@ -2173,6 +2182,12 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
         try { \SupaBein\Schema::validateIdentifier($tableDef['name'] ?? ''); }
         catch (\InvalidArgumentException $e) { continue; }
 
+        // Same reasoning as ai_execute_build(): if this new table is the one
+        // introducing auth (a PASSWORD column), its login identifier column
+        // must be UNIQUE. Scoped to just this table's own definition since
+        // that's all ai_detect_auth() needs to find it.
+        $authField = ai_detect_auth(['tables' => [$tableDef]]);
+
         $columns = [];
         foreach ($tableDef['columns'] ?? [] as $col) {
             try {
@@ -2183,6 +2198,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
                     'type'     => \SupaBein\Schema::validateDataType($col['type'] ?? 'TEXT'),
                     'nullable' => (bool)($col['nullable'] ?? true),
                     'default'  => null,
+                    'unique'   => $colName === $authField['field'],
                 ];
             } catch (\InvalidArgumentException $e) { continue; }
         }
