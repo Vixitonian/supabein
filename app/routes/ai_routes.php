@@ -2034,6 +2034,28 @@ function ai_track_seed_rows(\PDO $pdo, int $projectId, string $tableName, array 
     }
 }
 
+// An LLM asked for an image/photo/avatar URL reliably invents a plausible-
+// looking but nonexistent one (live-caught: "https://images.example.com/
+// blog.jpg" — images.example.com is the RFC 2606 reserved domain that is
+// GUARANTEED to never resolve to anything) rather than admit it can't
+// actually know a real photo's address. Anchored on a preceding "_" or
+// start-of-string so a real column like "discovery_notes" (contains "cover"
+// as a raw substring) or "recover_token" never false-positives.
+function ai_is_image_like_column(string $colName): bool
+{
+    return (bool)preg_match('/(^|_)(image|photo|avatar|thumbnail|banner|logo|picture|cover|img)(_url)?$/i', $colName);
+}
+
+// Picsum (picsum.photos) is a real, always-up photo CDN — seeding the URL
+// deterministically from the table name + row identity (not randomly) means
+// re-seeding the same project doesn't churn every image on each run, and two
+// different rows in the same table never collide on the same photo.
+function ai_real_seed_image_url(string $table, $rowKey): string
+{
+    $seed = preg_replace('/[^a-z0-9]+/i', '-', strtolower($table)) . '-' . $rowKey;
+    return 'https://picsum.photos/seed/' . rawurlencode($seed) . '/800/600';
+}
+
 // Shared seed_data-block inserter used by both build (initial seed) and edit
 // (on-demand "seed N fake rows" requests) — inserts rows and tracks their ids.
 // $excludeTables skips tables handled separately (e.g. the auth table, which
@@ -2049,12 +2071,27 @@ function ai_insert_seed_data(\PDO $pdo, \SupaBein\Catalog $catalog, int $project
         $tbl = $catalog->getTable($projectId, (string)$seedTable);
         if (!$tbl) continue;
 
-        $physical = $tbl['physical_name'];
+        $physical  = $tbl['physical_name'];
+        $imageCols = array_values(array_filter(
+            array_column($catalog->listColumns((int)$tbl['id']), 'name'),
+            'ai_is_image_like_column'
+        ));
         $insertedIds = [];
+        $rowIndex = 0;
         foreach (array_slice($rows, 0, 50) as $row) {
             if (!is_array($row) || empty($row)) continue;
             unset($row['id'], $row['created_at']);
             if (empty($row)) continue;
+            $rowIndex++;
+
+            // Never trust whatever the model put here (or left null/absent) —
+            // always a real, working photo, regardless. This is what makes a
+            // broken seeded image structurally impossible rather than merely
+            // less likely: the model's own guess for this field is discarded
+            // unconditionally, not validated or spot-corrected.
+            foreach ($imageCols as $col) {
+                $row[$col] = ai_real_seed_image_url((string)$seedTable, $rowIndex);
+            }
 
             $cols         = array_keys($row);
             $colList      = implode(', ', array_map(fn($c) => "`{$c}`", $cols));
@@ -2073,6 +2110,51 @@ function ai_insert_seed_data(\PDO $pdo, \SupaBein\Catalog $catalog, int $project
         }
     }
     return $seeded;
+}
+
+// Retroactive counterpart to the write-time fix in ai_insert_seed_data() above
+// — that fix only stops a NEW broken image URL from being written, it can't
+// undo one already sitting in the database from before this shipped. Scoped
+// via project_seed_rows (the same table "clear seed data" uses) so this only
+// ever touches rows the platform itself seeded, never a real user's own
+// uploaded/entered data. Returns the number of values actually replaced.
+function ai_heal_seed_image_urls(\PDO $pdo, \SupaBein\Catalog $catalog, int $projectId): int
+{
+    $healed = 0;
+    $tableStmt = $pdo->prepare('SELECT DISTINCT table_name FROM project_seed_rows WHERE project_id = ?');
+    $tableStmt->execute([$projectId]);
+
+    foreach ($tableStmt->fetchAll(\PDO::FETCH_COLUMN) as $tableName) {
+        $tbl = $catalog->getTable($projectId, (string)$tableName);
+        if (!$tbl) continue;
+        $imageCols = array_values(array_filter(
+            array_column($catalog->listColumns((int)$tbl['id']), 'name'),
+            'ai_is_image_like_column'
+        ));
+        if (!$imageCols) continue;
+        $physical = $tbl['physical_name'];
+
+        $rowStmt = $pdo->prepare('SELECT row_id FROM project_seed_rows WHERE project_id = ? AND table_name = ?');
+        $rowStmt->execute([$projectId, $tableName]);
+        foreach ($rowStmt->fetchAll(\PDO::FETCH_COLUMN) as $rowId) {
+            foreach ($imageCols as $col) {
+                try {
+                    $cur = $pdo->prepare("SELECT `{$col}` FROM `{$physical}` WHERE id = ?");
+                    $cur->execute([$rowId]);
+                    $value = $cur->fetchColumn();
+                    if ($value !== false && $value !== null && str_starts_with((string)$value, 'https://picsum.photos/')) {
+                        continue; // already a real, working URL — nothing to heal
+                    }
+                    $pdo->prepare("UPDATE `{$physical}` SET `{$col}` = ? WHERE id = ?")
+                        ->execute([ai_real_seed_image_url((string)$tableName, $rowId), $rowId]);
+                    $healed++;
+                } catch (\Throwable $e) {
+                    sb_log('ai_seed', 'Seed image heal failed (non-fatal): ' . $e->getMessage(), ['table' => $tableName, 'row' => $rowId]);
+                }
+            }
+        }
+    }
+    return $healed;
 }
 
 // A policy's constraint_sql is stored and executed verbatim (QueryBuilder
@@ -4527,6 +4609,16 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
                  'detail' => "Repaired {$healedCount} pre-existing polic" . ($healedCount === 1 ? 'y' : 'ies') . " with broken cross-table references"]);
     }
 
+    // Same self-heal shape as the policy repair above, for seeded image URLs
+    // that predate the write-time fix in ai_insert_seed_data() — a project
+    // seeded before that shipped would otherwise stay stuck with broken
+    // image_url values forever.
+    $healedImages = ai_heal_seed_image_urls(\App::get('db'), $catalog, $projectId);
+    if ($healedImages > 0) {
+        $report(['stage' => 'read', 'status' => 'active', 'label' => 'Reading current schema & files…',
+                 'detail' => "Replaced {$healedImages} broken seeded image URL" . ($healedImages === 1 ? '' : 's') . " with real, working ones"]);
+    }
+
     // Full file set (not the old pre-filtered text blob) — the agent loop
     // below decides for itself what it needs to read via search_code/read_file
     // instead of being handed either everything or a bare listing up front.
@@ -4615,6 +4707,9 @@ Rules:
 - Generate 5-10 realistic rows per eligible table. Cap at 50 rows per table.
 - Omit "id" and "created_at" — they are inserted automatically.
 - Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL).
+- For any image/photo/avatar/thumbnail/banner/logo/cover URL column: omit it or set it to null —
+  never invent a URL. The platform fills in a real, working photo for these automatically; anything
+  you put there yourself is discarded and replaced either way.
 - If no table is eligible for seeding, return "seed_data": {}.
 PROMPT;
 
@@ -4638,6 +4733,9 @@ Rules:
 - Generate 5-10 realistic rows per eligible table. Cap at 50 rows per table.
 - Omit "id" and "created_at" — they are inserted automatically.
 - Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL).
+- For any image/photo/avatar/thumbnail/banner/logo/cover URL column: omit it or set it to null —
+  never invent a URL. The platform fills in a real, working photo for these automatically; anything
+  you put there yourself is discarded and replaced either way.
 - If no table is eligible for seeding, return "seed_data": {}.
 PROMPT;
 
