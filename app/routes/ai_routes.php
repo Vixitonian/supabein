@@ -663,6 +663,16 @@ Available tools:
     so this only applies to paths list_files already showed you.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
+  check_policy args: {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE"}
+    Actually RUNS that policy's constraint_sql against the real database (a harmless, row-count-only
+    dry run — never returns row data) and tells you whether it executes cleanly or errors, with the
+    real database error message if it does. Use this whenever a request describes something breaking
+    for logged-in users specifically (a page erroring, a blank list, "works logged out but not logged
+    in") — that shape of bug is almost always a policy whose constraint_sql doesn't actually work, and
+    reading the constraint_sql text is not enough to know that; a completely reasonable-looking
+    constraint can still fail at execution time for reasons that aren't visible from the text alone.
+    If it comes back not executing cleanly, fix it with update_policies (constraint_sql supports
+    referencing other tables in this project by name, same as during a build).
   finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
     Ends the session. Every key is optional (omit or use [] / {} for "no schema change of this
     kind") — use the SAME shapes as a normal edit delta, documented below. Do NOT repeat frontend
@@ -2050,6 +2060,33 @@ function ai_rewrite_constraint_table_refs(?string $sql, int $projectId, array $l
         );
     }
     return $sql;
+}
+
+// Applies ai_rewrite_constraint_table_refs() retroactively to every existing
+// policy in a project, persisting any change. Closes the gap that fix alone
+// can't: it only prevents a *new* broken constraint_sql from being written,
+// it can't undo one written before it shipped. A project built earlier than
+// this fix stays broken forever unless something goes back and repairs its
+// already-stored policies — every edit is a natural, low-cost point to do
+// that, since the full table list and every policy are already being loaded
+// for the edit anyway. Returns the number of policies actually changed.
+function ai_heal_project_policy_refs(int $projectId, \SupaBein\Catalog $catalog, array $tables): int
+{
+    $logicalNames = array_column($tables, 'name');
+    $healed = 0;
+    foreach ($tables as $t) {
+        $tbl = $catalog->getTable($projectId, $t['name']);
+        if (!$tbl) continue;
+        foreach ($catalog->listPolicies((int)$tbl['id']) as $p) {
+            if (empty($p['constraint_sql'])) continue;
+            $fixed = ai_rewrite_constraint_table_refs($p['constraint_sql'], $projectId, $logicalNames);
+            if ($fixed !== $p['constraint_sql']) {
+                $catalog->upsertPolicy((int)$tbl['id'], $p['api_role'], $p['operation'], (bool)$p['allowed'], $fixed);
+                $healed++;
+            }
+        }
+    }
+    return $healed;
 }
 
 function ai_execute_build(array $plan, int $userId): array
@@ -3600,7 +3637,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
 // regenerate an existing file from general knowledge instead of its real
 // content: exactly the class of bug that dropped a whole feature's worth of
 // working code (note creation/editing) in the file that surfaced this rule.
-function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config): array
+function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config, int $projectId): array
 {
     static $platformPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
 
@@ -3669,6 +3706,47 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
                 'path' => $path, 'bytes' => strlen($content), 'syntax_ok' => $check['ok'], 'syntax_error' => $check['error'],
             ]];
 
+        // Actually runs a policy's stored constraint_sql against the real
+        // database (a harmless, row-count-only dry run — never returns row
+        // data) instead of asking the model to eyeball SQL text and guess
+        // whether it's valid. A constraint referencing a sibling table is
+        // completely normal and, since the platform fix, always resolved to
+        // the right physical table — but this tool exists so the agent can
+        // verify that for itself (or catch some other, not-yet-known-about
+        // constraint bug) instead of taking correctness on faith, the same
+        // way the browser-test-agent verifies a page by actually loading it
+        // rather than reading its source and guessing.
+        case 'check_policy':
+            $tableName = trim((string)($args['table'] ?? ''));
+            $apiRole   = (string)($args['api_role'] ?? '');
+            $operation = strtoupper((string)($args['operation'] ?? ''));
+            if ($tableName === '' || !in_array($apiRole, ['anon', 'authenticated'], true)
+                || !in_array($operation, ['SELECT', 'INSERT', 'UPDATE', 'DELETE'], true)) {
+                return ['tool' => 'check_policy', 'error' => 'args must be {table, api_role: "anon"|"authenticated", operation: "SELECT"|"INSERT"|"UPDATE"|"DELETE"}'];
+            }
+            $catalog = \SupaBein\Catalog::getInstance();
+            $tbl = $catalog->getTable($projectId, $tableName);
+            if (!$tbl) return ['tool' => 'check_policy', 'error' => "no such table: {$tableName}"];
+            $policy = $catalog->getPolicy((int)$tbl['id'], $apiRole, $operation);
+            if (!$policy || !$policy['allowed']) {
+                return ['tool' => 'check_policy', 'result' => ['allowed' => false, 'note' => 'This role/operation is not allowed at all — nothing to test.']];
+            }
+            if (empty($policy['constraint_sql'])) {
+                return ['tool' => 'check_policy', 'result' => ['allowed' => true, 'has_constraint' => false, 'executes_ok' => true]];
+            }
+            $constraint = str_replace(':current_user_id', '0', $policy['constraint_sql']);
+            try {
+                $pdo = \App::get('db');
+                $pdo->query('SELECT COUNT(*) FROM `' . $tbl['physical_name'] . '` WHERE (' . $constraint . ')')->fetchColumn();
+                return ['tool' => 'check_policy', 'result' => ['allowed' => true, 'has_constraint' => true, 'executes_ok' => true]];
+            } catch (\Throwable $e) {
+                return ['tool' => 'check_policy', 'result' => [
+                    'allowed' => true, 'has_constraint' => true, 'executes_ok' => false,
+                    'db_error' => $e->getMessage(),
+                    'constraint_sql' => $policy['constraint_sql'],
+                ]];
+            }
+
         case 'syntax_check':
             if (isset($args['path'])) {
                 $path = $normalizePath((string)$args['path']);
@@ -3686,7 +3764,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
 
         default:
-            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, finish"];
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, finish"];
     }
 }
 
@@ -3719,6 +3797,7 @@ function ai_edit_agent_step_label(string $tool, array $args): string
         'read_file'    => 'Reading ' . ($args['path'] ?? '?') . '…',
         'write_file'   => 'Writing ' . ($args['path'] ?? '?') . '…',
         'syntax_check' => 'Checking syntax' . (isset($args['path']) ? ' of ' . $args['path'] : '') . '…',
+        'check_policy' => 'Testing ' . ($args['table'] ?? '?') . ' ' . ($args['api_role'] ?? '?') . ' ' . ($args['operation'] ?? '?') . '…',
         'finish'       => 'Finishing up…',
         default        => 'Working…',
     };
@@ -3732,7 +3811,7 @@ function ai_edit_agent_step_label(string $tool, array $args): string
 // validate/deploy logic needs no changes at all.
 function ai_run_edit_generation_agentic(
     string $prompt, array $history, array $existingSchema, array $currentFiles,
-    object $client, array $config, callable $report
+    object $client, array $config, callable $report, int $projectId
 ): array {
     $editAgentPrompt = ai_bind_auth_placeholders(AI_EDIT_AGENT_SYSTEM_PROMPT, $existingSchema);
     $schemaCtx       = ai_schema_to_context($existingSchema);
@@ -3814,7 +3893,7 @@ function ai_run_edit_generation_agentic(
             continue;
         }
 
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config));
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId));
     }
 
     if ($finishArgs === null) {
@@ -3914,7 +3993,10 @@ function ai_run_build_frontend_agentic(
             break;
         }
 
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config));
+        // No real project exists yet at this stage of a build — 0 is a safe
+        // placeholder; this agent's own system prompt never advertises
+        // check_policy, so it has no route to actually call it.
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0));
     }
 
     if (!$finished) {
@@ -3934,6 +4016,20 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
 
     $report(['stage' => 'read', 'status' => 'start', 'label' => 'Reading current schema & files…']);
     $existingSchema = ai_schema_from_db($projectId, $catalog);
+
+    // Repair any policy written before ai_rewrite_constraint_table_refs()
+    // existed — that fix only stops a NEW broken cross-table reference from
+    // being written, it can't undo one already stored. Every edit is a
+    // natural, low-cost point to self-heal this, so a project doesn't stay
+    // broken forever just because nobody happened to touch this exact policy
+    // since the platform fix shipped.
+    $healedCount = ai_heal_project_policy_refs($projectId, $catalog, $existingSchema['tables'] ?? []);
+    if ($healedCount > 0) {
+        $existingSchema = ai_schema_from_db($projectId, $catalog);
+        $report(['stage' => 'read', 'status' => 'active', 'label' => 'Reading current schema & files…',
+                 'detail' => "Repaired {$healedCount} pre-existing polic" . ($healedCount === 1 ? 'y' : 'ies') . " with broken cross-table references"]);
+    }
+
     // Full file set (not the old pre-filtered text blob) — the agent loop
     // below decides for itself what it needs to read via search_code/read_file
     // instead of being handed either everything or a bare listing up front.
@@ -3941,7 +4037,7 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     $report(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
 
     $report(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
-    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report);
+    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId);
     $aiTrace   = array_merge($aiTrace, $delta['aiTrace']);
     $editUsage = $delta['usage'];
     unset($delta['aiTrace'], $delta['usage']);
