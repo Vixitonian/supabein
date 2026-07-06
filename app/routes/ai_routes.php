@@ -558,20 +558,27 @@ Return ONLY a single valid JSON object — no markdown fences, no explanation, n
     {
       "name": string,
       "columns": [ {"name": string, "type": string, "nullable": boolean} ],
-      "policies": [ {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean} ]
+      "policies": [ {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean, "constraint_sql": string or null} ]
     }
   ],
   "add_columns": [
     { "table": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ] }
   ],
   "update_policies": [
-    {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean}
+    {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean, "constraint_sql": string or null}
   ],
   "seed_data": {
     "<table_name>": [ { "<col>": <value>, ... } ]
   },
   "frontend": { "files": [ {"path": string, "content": string} ] }
 }
+
+- policy.constraint_sql: WHERE-style expression or null; use ":current_user_id" for the logged-in
+  user's ID. Do NOT use "auth.uid()" — it is not supported. You may reference OTHER tables in this
+  project by their name exactly as given in "Exact schema" (e.g. "id IN (SELECT project_id FROM
+  project_assignments WHERE learner_user_id = :current_user_id)") — the platform resolves those
+  names to the real underlying tables for you. Omit constraint_sql (or use null) for a policy that
+  should apply to every row with no per-row restriction.
 
 The "frontend" key is OPTIONAL.
 - OMIT "frontend" for a pure schema change (add column, change policy).
@@ -679,13 +686,17 @@ that was easiest to satisfy first.
 Schema delta shapes for "finish" (identical to a normal edit delta — see full rules below for
 column types, identifier rules, and when seed_data applies):
 {
-  "add_tables": [ {"name": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ], "policies": [ {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean} ] } ],
+  "add_tables": [ {"name": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ], "policies": [ {"api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean, "constraint_sql": string or null} ] } ],
   "add_columns": [ { "table": string, "columns": [ {"name": string, "type": string, "nullable": boolean} ] } ],
-  "update_policies": [ {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean} ],
+  "update_policies": [ {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE", "allowed": boolean, "constraint_sql": string or null} ],
   "seed_data": { "<table_name>": [ { "<col>": <value>, ... } ] }
 }
 - Do NOT include tables/columns that already exist. Do NOT drop or rename — additions and policy
   changes only. NEVER include "id" or "created_at" as columns.
+- policy.constraint_sql: WHERE-style expression or null; use ":current_user_id" for the logged-in
+  user's ID (never "auth.uid()"). You may reference other tables in this project by name (e.g. "id IN
+  (SELECT project_id FROM project_assignments WHERE learner_user_id = :current_user_id)") — the
+  platform resolves those to the real underlying tables. Omit/null for no per-row restriction.
 - seed_data: only for an EXPLICIT seed/sample-data request; never seed auth/users tables or rows
   owned by :current_user_id; omit "id"/"created_at"; 5-10 rows by default, cap 50/table.
 
@@ -2011,6 +2022,36 @@ function ai_insert_seed_data(\PDO $pdo, \SupaBein\Catalog $catalog, int $project
     return $seeded;
 }
 
+// A policy's constraint_sql is stored and executed verbatim (QueryBuilder
+// just interpolates it into the WHERE clause — see app/core/query_builder.php
+// and Policy::resolveConstraint, which only substitutes :current_user_id).
+// The AI only ever knows tables by their LOGICAL name, so a completely normal
+// row-level-security pattern — "visible to the user who owns the related
+// program" — comes back as a subquery like
+// "id IN (SELECT project_id FROM project_assignments WHERE ...)", written
+// against the logical name. The real MySQL table is project-prefixed
+// (p{id}_project_assignments), so that subquery 500s the instant it runs.
+// Live-caught: a generated app's /projects, /enrollments, and
+// /project_applications pages all 500'd this exact way. Rewriting any
+// "FROM <logical>" / "JOIN <logical>" reference in the stored SQL to the real
+// physical name, once, at write time, means every future read of this policy
+// executes correctly forever — no per-request rewriting needed.
+function ai_rewrite_constraint_table_refs(?string $sql, int $projectId, array $logicalNames): ?string
+{
+    if ($sql === null || $sql === '') return $sql;
+    foreach ($logicalNames as $name) {
+        $name = (string)$name;
+        if ($name === '') continue;
+        $physical = 'p' . $projectId . '_' . strtolower($name);
+        $sql = preg_replace(
+            '/\b(FROM|JOIN)\s+' . preg_quote($name, '/') . '\b/i',
+            '$1 `' . $physical . '`',
+            $sql
+        );
+    }
+    return $sql;
+}
+
 function ai_execute_build(array $plan, int $userId): array
 {
     $config  = \App::get('config');
@@ -2041,6 +2082,10 @@ function ai_execute_build(array $plan, int $userId): array
     // against the whole plan since it's the same table/field for every
     // table in this build.
     $authField = ai_detect_auth($plan);
+
+    // See ai_rewrite_constraint_table_refs() — this build's own table names
+    // are the full set any policy in it could plausibly reference.
+    $allTableNames = array_column($plan['tables'], 'name');
 
     foreach ($plan['tables'] as $tableDef) {
         $tableName = $tableDef['name'];
@@ -2088,7 +2133,7 @@ function ai_execute_build(array $plan, int $userId): array
                     $policy['api_role'],
                     strtoupper($policy['operation']),
                     (bool)$policy['allowed'],
-                    $policy['constraint_sql'] ?? null
+                    ai_rewrite_constraint_table_refs($policy['constraint_sql'] ?? null, $projectId, $allTableNames)
                 );
             } catch (\Throwable $e) {
                 sb_log('ai_build', 'Policy upsert failed (non-fatal): ' . $e->getMessage(), ['table' => $tableName]);
@@ -2179,6 +2224,14 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
     $addedColumns    = [];
     $updatedPolicies = [];
 
+    // See ai_rewrite_constraint_table_refs() — a policy added or changed by
+    // this edit can reference any table already in the project OR one being
+    // added in this same delta.
+    $allTableNames = array_column($catalog->listTables($projectId), 'table_name');
+    foreach ($delta['add_tables'] ?? [] as $t) {
+        if (!empty($t['name'])) $allTableNames[] = (string)$t['name'];
+    }
+
     foreach ($delta['add_tables'] ?? [] as $tableDef) {
         try { \SupaBein\Schema::validateIdentifier($tableDef['name'] ?? ''); }
         catch (\InvalidArgumentException $e) { continue; }
@@ -2213,7 +2266,13 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
             }
             foreach ($tableDef['policies'] ?? [] as $p) {
                 try {
-                    $catalog->upsertPolicy($table['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
+                    $catalog->upsertPolicy(
+                        $table['id'],
+                        $p['api_role'],
+                        strtoupper($p['operation']),
+                        (bool)$p['allowed'],
+                        ai_rewrite_constraint_table_refs($p['constraint_sql'] ?? null, $projectId, $allTableNames)
+                    );
                 } catch (\Throwable $e) {}
             }
             $catalog->backfillAuthenticatedAccess($table['id']);
@@ -2254,7 +2313,13 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
         $tbl = $catalog->getTable($projectId, $tblName);
         if (!$tbl) continue;
         try {
-            $catalog->upsertPolicy($tbl['id'], $p['api_role'], strtoupper($p['operation']), (bool)$p['allowed'], null);
+            $catalog->upsertPolicy(
+                $tbl['id'],
+                $p['api_role'],
+                strtoupper($p['operation']),
+                (bool)$p['allowed'],
+                ai_rewrite_constraint_table_refs($p['constraint_sql'] ?? null, $projectId, $allTableNames)
+            );
             $updatedPolicies[] = $tblName . '.' . $p['api_role'] . '.' . $p['operation'];
             $policyTouchedTableIds[$tbl['id']] = true;
         } catch (\Throwable $e) {
