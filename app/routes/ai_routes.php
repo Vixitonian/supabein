@@ -683,7 +683,16 @@ Available tools:
     from confirming, rather than a guess from reading code. LIMITATION: this only ever reaches the
     server, so it can confirm a static file or API response but NOT what a client-side hash route
     (e.g. "#/dashboard") renders once the browser's JS runs — don't use it to debug a report that's
-    specifically about what appears after a hash-route navigation.
+    specifically about what appears after a hash-route navigation. Use fetch_page below for that.
+  fetch_page   args: {"path": string}
+    Actually loads the deployed app in a real headless browser, navigates to this hash route (e.g.
+    "/dashboard" — same as a user visiting "#/dashboard"), waits for it to render, and returns
+    {url, http_status, bodyText, elements, console_errors} — the RENDERED text/visible buttons/links
+    after the app's own JS ran, plus any real console errors. This is what curl_site above cannot do:
+    use fetch_page whenever a report is about what a user actually SEES on a given page/route ("404
+    after login", "page is blank", "button doesn't show up") rather than a raw file/API response.
+    Costs real time (spins up a real browser) — reach for curl_site first for anything it can answer,
+    and use fetch_page only for reports specifically about rendered page content.
   validate_frontend args: {}
     Runs the same deterministic checks used after you finish (dead routes, api.* calls against
     tables that don't exist, auth handlers that don't exist, nav links with no matching route) against
@@ -3532,6 +3541,156 @@ function ai_playwright_test_run(string $script, array $config): array
     ];
 }
 
+// One-shot Playwright script for the edit-agent's fetch_page tool: connect,
+// navigate to a hash route (handling the SPA's client-side routing the way a
+// real visitor's browser does — curl_site categorically cannot), snapshot the
+// RENDERED page (post-JS text + visible interactive elements) and any console
+// errors, then exit. Deliberately not the persistent bidirectional protocol
+// ai_browser_agent_spawn() uses for the browser-test-agent (multi-turn
+// click/fill interaction) — a single navigate+look needs none of that
+// complexity, just a script that runs once and prints one result line.
+function ai_fetch_page_script_generate(string $appUrl, string $token, string $path, bool $hasAuth): string
+{
+    $loginBlock = $hasAuth ? <<<'JSEOF'
+    try {
+      await page.goto(APP_URL + '#/signup', { waitUntil: 'networkidle', timeout: 15000 });
+      await page.waitForTimeout(500);
+      const idField = await page.$('#auth-form #auth-identifier');
+      if (idField) {
+        await page.fill('#auth-form #auth-identifier', TEST_EMAIL);
+        await page.fill('#auth-form #auth-password', TEST_PASS);
+        await page.click('#auth-form button[type="submit"]');
+        await page.waitForFunction(
+          () => { const el = document.querySelector('#nav-logout'); return el && !el.classList.contains('hidden'); },
+          { timeout: 15000 }
+        ).catch(() => {});
+      }
+    } catch (_) {}
+JSEOF
+        : '';
+
+    $script = <<<'JSEOF'
+import { chromium } from 'playwright-core';
+
+const TOKEN = '__TOKEN__';
+const APP_URL = '__APP_URL__';
+const TARGET_PATH = '__PATH__';
+const TEST_EMAIL = `pw-fetch-${Date.now()}@testmail.dev`;
+const TEST_PASS = 'TestPass123!';
+
+function sendResult(obj) {
+  process.stdout.write('@@FETCH_RESULT@@' + JSON.stringify(obj) + '\n');
+}
+
+(async () => {
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
+    const page = await browser.newPage();
+    page.setDefaultTimeout(15000);
+    const consoleErrors = [];
+    page.on('pageerror', (e) => consoleErrors.push(String((e && e.message) || e)));
+    page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
+
+__LOGIN_BLOCK__
+
+    const cleanPath = TARGET_PATH.replace(/^#?\/?/, '/');
+    const resp = await page.goto(APP_URL + '#' + cleanPath, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => null);
+    await page.waitForTimeout(700);
+
+    const candidates = await page.$$('button, a, input, select, textarea, [role="button"]');
+    const elements = [];
+    for (const h of candidates) {
+      let visible = false;
+      try { visible = await h.isVisible(); } catch (_) { visible = false; }
+      if (!visible) continue;
+      try {
+        const info = await h.evaluate(el => ({
+          tag: el.tagName.toLowerCase(),
+          text: (el.innerText || el.value || el.placeholder || '').trim().slice(0, 80),
+        }));
+        elements.push(info);
+      } catch (_) {}
+      if (elements.length >= 40) break;
+    }
+
+    let bodyText = '';
+    try { bodyText = await page.evaluate(() => document.body.innerText); } catch (_) {}
+
+    sendResult({
+      ok: true,
+      url: page.url(),
+      http_status: resp ? resp.status() : null,
+      bodyText: bodyText.slice(0, 1500),
+      elements,
+      console_errors: consoleErrors.slice(0, 10),
+    });
+  } catch (e) {
+    sendResult({ ok: false, error: String((e && e.message) || e) });
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+})();
+JSEOF;
+
+    return str_replace(
+        ['__TOKEN__', '__APP_URL__', '__PATH__', '__LOGIN_BLOCK__'],
+        [$token, $appUrl, addslashes($path), $loginBlock],
+        $script
+    );
+}
+
+// Blocking one-shot runner for ai_fetch_page_script_generate()'s script —
+// same proc_open mechanics as ai_playwright_test_run() (write to a temp .mjs
+// file next to node_modules/ so ESM bare-specifier resolution finds
+// 'playwright-core', run it, collect stdout/stderr) but parses the
+// '@@FETCH_RESULT@@' marker this script emits instead of the test runner's
+// '__STORIES_JSON__' one — kept as its own function rather than sharing code
+// with ai_playwright_test_run() since the two return shapes and markers
+// don't otherwise overlap.
+function ai_fetch_page_run(string $script, array $config): array
+{
+    $nodeBin     = $config['NODE_BIN']           ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
+    $nodeModules = $config['PLAYWRIGHT_MODULES'] ?? '/home/dxinethn/playwright-test/node_modules';
+    $playwrightDir = rtrim(dirname($nodeModules), '/');
+    $tmpFile       = $playwrightDir . '/sb_fetch_' . getmypid() . '_' . time() . '.mjs';
+
+    file_put_contents($tmpFile, $script);
+
+    $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+    $env = array_merge(getenv() ?: [], [
+        'HOME' => dirname($playwrightDir),
+        'PATH' => '/usr/local/bin:/usr/bin:/bin',
+    ]);
+
+    $process = proc_open(
+        escapeshellarg($nodeBin) . ' ' . escapeshellarg($tmpFile),
+        $descriptors,
+        $pipes,
+        $playwrightDir,
+        $env
+    );
+
+    if (!is_resource($process)) {
+        @unlink($tmpFile);
+        return ['ok' => false, 'error' => 'Failed to spawn Node process'];
+    }
+
+    fclose($pipes[0]);
+    $stdout = stream_get_contents($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    proc_close($process);
+    @unlink($tmpFile);
+
+    if (preg_match('/@@FETCH_RESULT@@(.+)$/m', $stdout . "\n" . $stderr, $m)) {
+        $decoded = json_decode($m[1], true);
+        if (is_array($decoded)) return $decoded;
+    }
+    return ['ok' => false, 'error' => trim(substr($stderr, 0, 500)) ?: 'no result produced'];
+}
+
 // ─── Job-backed generation ───────────────────────────────────────────────────
 // Shared by the /v1/ai/build/job and /v1/ai/edit/job routes and the background
 // worker (app/workers/ai_worker.php) — one implementation so the two never
@@ -3913,6 +4072,41 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
                     : 'This hits the real data API under this project\'s real policies (same as an actual visitor), read-only (GET) — a policy denial or 500 here is real, not a guess.',
             ]];
 
+        // Closes exactly the gap curl_site's own note above admits to: a real,
+        // rendered look at a client-side hash route after the app's own JS has
+        // run — the thing a report like "Dashboard 404" or "page is blank
+        // after login" actually needs, and the thing this session's human
+        // diagnoses of those exact bugs used a real browser for. Uses the same
+        // Browserless-driven Playwright connection the browser-test-agent
+        // already has, just a single one-shot navigate+snapshot instead of a
+        // persistent multi-turn click/fill session — read-only, no state
+        // mutation beyond whatever the app's own login flow does.
+        case 'fetch_page':
+            if ($projectId <= 0) {
+                return ['tool' => 'fetch_page', 'error' => 'not available yet — this project has no deployed site until after finish()'];
+            }
+            $fetchToken = $config['BROWSERLESS_TOKEN'] ?? '';
+            if (!$fetchToken) {
+                return ['tool' => 'fetch_page', 'error' => 'Browserless not configured on this server — this tool is unavailable'];
+            }
+            $fetchPath = (string)($args['path'] ?? '/');
+            $fetchCatalog = \SupaBein\Catalog::getInstance();
+            $fetchSites = $fetchCatalog->listSites($projectId);
+            if (!$fetchSites) return ['tool' => 'fetch_page', 'error' => 'no deployed site found for this project yet'];
+            $fetchSite = $fetchSites[0];
+            if ($fetchSite['staging_deploy_id'] ?? null) {
+                $fetchVariant = 'staging';
+            } elseif ($fetchSite['current_deploy_id'] ?? null) {
+                $fetchVariant = 'current';
+            } else {
+                return ['tool' => 'fetch_page', 'error' => 'no deploy found for this site yet'];
+            }
+            $fetchAppUrl = rtrim($config['API_BASE_URL'] ?? '', '/') . '/sites/s' . (int)$fetchSite['id'] . '/' . $fetchVariant . '/';
+            $fetchAuthInfo = ai_detect_auth($schema);
+            $fetchScript = ai_fetch_page_script_generate($fetchAppUrl, $fetchToken, $fetchPath, !empty($fetchAuthInfo['table']));
+            $fetchResult = ai_fetch_page_run($fetchScript, $config);
+            return ['tool' => 'fetch_page', 'result' => $fetchResult];
+
         // Runs the SAME deterministic checks ai_validator_check_project() runs
         // after the agent finishes (dead routes, api.* calls against tables
         // that don't exist, auth handlers that don't exist, etc.) but DURING
@@ -3953,7 +4147,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
 
         default:
-            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, curl_site, validate_frontend, finish"];
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, curl_site, fetch_page, validate_frontend, finish"];
     }
 }
 
@@ -4046,10 +4240,13 @@ function ai_edit_agent_step_label(string $tool, array $args): string
 // returns the same delta shape ai_run_edit_generation()'s old single-shot call
 // produced: ['add_tables','add_columns','update_policies','seed_data',
 // 'frontend'=>['files'=>[...]], 'aiTrace'=>[...]] — so the caller's downstream
-// validate/deploy logic needs no changes at all.
+// validate/deploy logic needs no changes at all. Also always includes
+// 'incomplete' (bool), and when true, 'resume_state'/'turns_used' — the
+// turn-budget-exhausted case a follow-up request can pass back in via
+// $resumeState to continue this exact session instead of starting over.
 function ai_run_edit_generation_agentic(
     string $prompt, array $history, array $existingSchema, array $currentFiles,
-    object $client, array $config, callable $report, int $projectId
+    object $client, array $config, callable $report, int $projectId, ?array $resumeState = null
 ): array {
     $editAgentPrompt = ai_bind_auth_placeholders(AI_EDIT_AGENT_SYSTEM_PROMPT, $existingSchema);
     $schemaCtx       = ai_schema_to_context($existingSchema);
@@ -4058,8 +4255,16 @@ function ai_run_edit_generation_agentic(
     foreach ($currentFiles as $f) {
         if (isset($f['path'])) $byPath[$f['path']] = (string)($f['content'] ?? '');
     }
-    $changedFiles = [];
-    $readPaths    = [];
+    // A resumed run's staged writes were already deployed to staging by the
+    // /v1/ai/apply call that followed the PREVIOUS (turn-budget-exhausted)
+    // run — see the incomplete/resume_state block below — so $byPath (re-read
+    // from disk by the caller) already reflects them too. Seeding
+    // $changedFiles/$readPaths from the saved state rather than leaving them
+    // empty is what makes this a genuine continuation: those paths are
+    // correctly treated as "already changed/read this session", not files a
+    // fresh write_file would be blocked on re-reading first.
+    $changedFiles = $resumeState['changed_files'] ?? [];
+    $readPaths    = $resumeState['read_paths'] ?? [];
     $aiTrace      = [];
     $finishArgs   = null;
     // Aggregated across every turn — a loop of up to AI_EDIT_AGENT_MAX_TURNS
@@ -4067,10 +4272,23 @@ function ai_run_edit_generation_agentic(
     // wildly undercount the real cost of the edit.
     $totalUsage = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
 
-    $turnMsg = "Exact schema:\n{$schemaCtx}\n\nFile listing (" . count($byPath) . " files): "
-             . implode(', ', array_keys($byPath)) . "\n\nRequest: {$prompt}\n\n"
-             . 'Respond with your first tool action.';
-    $loopHistory = $history;
+    if ($resumeState) {
+        // Continuing a run that hit its turn budget without ever calling
+        // finish() — reuse its full tool-call trace (not just the chat
+        // history) and the exact tool result it was about to act on, so the
+        // model picks up where it left off instead of re-discovering
+        // everything it already read/searched/wrote from turn 1 again.
+        $loopHistory = $resumeState['loop_history'] ?? $history;
+        $turnMsg = (string)($resumeState['next_turn_msg'] ?? '')
+                 . "\n\n(You previously ran out of turns partway through this exact request. You now have a "
+                 . 'fresh ' . AI_EDIT_AGENT_MAX_TURNS . ' turns — do NOT restart or redo anything shown above, '
+                 . 'pick up exactly where you left off and call finish() once the original request is fully done.)';
+    } else {
+        $turnMsg = "Exact schema:\n{$schemaCtx}\n\nFile listing (" . count($byPath) . " files): "
+                 . implode(', ', array_keys($byPath)) . "\n\nRequest: {$prompt}\n\n"
+                 . 'Respond with your first tool action.';
+        $loopHistory = $history;
+    }
     $recentCalls = [];
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
@@ -4145,10 +4363,18 @@ function ai_run_edit_generation_agentic(
         $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId, $existingSchema));
     }
 
+    $incomplete = false;
     if ($finishArgs === null) {
         // Turn budget exhausted without a validated finish — force-finish with
         // whatever's staged rather than hang or hard-fail the whole job; empty
-        // schema-change arrays always pass validation.
+        // schema-change arrays always pass validation. Also capture enough of
+        // the in-progress agent state (its own tool-call trace and the tool
+        // result it hadn't acted on yet — not just the files it happened to
+        // have written) that a follow-up request can genuinely CONTINUE this
+        // same session with a fresh turn budget, instead of the only other
+        // option being to discard all of it and start over from turn 1 with
+        // no memory of what was already read, searched, or decided.
+        $incomplete = true;
         $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
             'detail' => 'Turn limit reached — finishing with what was staged']);
         $finishArgs = ['add_tables' => [], 'add_columns' => [], 'update_policies' => [], 'seed_data' => []];
@@ -4161,6 +4387,16 @@ function ai_run_edit_generation_agentic(
     )];
     $delta['aiTrace'] = $aiTrace;
     $delta['usage']   = $totalUsage;
+    $delta['incomplete'] = $incomplete;
+    if ($incomplete) {
+        $delta['resume_state'] = [
+            'loop_history'  => $loopHistory,
+            'changed_files' => $changedFiles,
+            'read_paths'    => $readPaths,
+            'next_turn_msg' => $turnMsg,
+        ];
+        $delta['turns_used'] = AI_EDIT_AGENT_MAX_TURNS;
+    }
     return $delta;
 }
 
@@ -4271,7 +4507,7 @@ function ai_run_build_frontend_agentic(
     return ['files' => $files, 'aiTrace' => $aiTrace, 'usage' => $totalUsage];
 }
 
-function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true): array
+function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true, ?array $resumeState = null): array
 {
     $aiTrace = [];
 
@@ -4298,10 +4534,17 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     $report(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
 
     $report(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
-    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId);
-    $aiTrace   = array_merge($aiTrace, $delta['aiTrace']);
-    $editUsage = $delta['usage'];
-    unset($delta['aiTrace'], $delta['usage']);
+    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId, $resumeState);
+    $aiTrace     = array_merge($aiTrace, $delta['aiTrace']);
+    $editUsage   = $delta['usage'];
+    $incomplete  = $delta['incomplete'] ?? false;
+    $resumeOut   = $delta['resume_state'] ?? null;
+    $turnsUsed   = $delta['turns_used'] ?? null;
+    // Hoisted to the top level of this function's return (like 'validation'
+    // below) rather than left inside $editPlan — this is agent-loop metadata
+    // about the run itself, not part of the schema/frontend delta that
+    // ai_execute_edit()/ai_deploy_files() actually apply.
+    unset($delta['aiTrace'], $delta['usage'], $delta['incomplete'], $delta['resume_state'], $delta['turns_used']);
 
     $report(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready', 'detail' => (count($delta['add_tables'] ?? []) + count($delta['add_columns'] ?? []) + count($delta['update_policies'] ?? [])) . ' schema change(s), ' . count($delta['frontend']['files'] ?? []) . ' file(s)']);
 
@@ -4347,7 +4590,16 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
 
     $editPlan = array_merge($delta, ['project_id' => $projectId]);
 
-    return ['plan' => $editPlan, 'summary' => $summary, 'usage' => $editUsage, 'aiTrace' => $aiTrace, 'validation' => $validation];
+    return [
+        'plan'         => $editPlan,
+        'summary'      => $summary,
+        'usage'        => $editUsage,
+        'aiTrace'      => $aiTrace,
+        'validation'   => $validation,
+        'incomplete'   => $incomplete,
+        'resume_state' => $resumeOut,
+        'turns_used'   => $turnsUsed,
+    ];
 }
 
 const AI_SEED_PROMPT = <<<'PROMPT'
@@ -6158,13 +6410,21 @@ PROMPT;
 
         $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
 
+        // Continuing a previous edit that ran out of turns before finishing —
+        // the worker resolves this to that job's own saved resume_state
+        // (scoped to this same user, same as any other job lookup), never
+        // trusting anything about the prior run's content from the request
+        // body itself.
+        $resumeJobId = isset($req['body']['resume_job_id']) ? (int)$req['body']['resume_job_id'] : 0;
+
         $payload = [
-            'prompt'     => $prompt,
-            'project_id' => $projectId,
-            'history'    => $history,
-            'provider'   => $req['body']['provider'] ?? null,
-            'model'      => $req['body']['model'] ?? null,
-            'validate'   => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            'prompt'        => $prompt,
+            'project_id'    => $projectId,
+            'history'       => $history,
+            'provider'      => $req['body']['provider'] ?? null,
+            'model'         => $req['body']['model'] ?? null,
+            'validate'      => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            'resume_job_id' => $resumeJobId ?: null,
         ];
         $job = $catalog->createJob($userId, $sessionId, 'edit', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);

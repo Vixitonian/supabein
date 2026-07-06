@@ -110,7 +110,20 @@ try {
         $prompt    = $payload['prompt']  ?? '';
         $history   = $payload['history'] ?? [];
         $validate  = $payload['validate'] ?? true;
-        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate);
+
+        // Continuing a previous edit job that hit its turn budget without
+        // finishing — getJobById scopes by user_id, so this can only ever
+        // resolve to a job this same user owns, never another user's.
+        $resumeState = null;
+        $resumeJobId = (int)($payload['resume_job_id'] ?? 0);
+        if ($resumeJobId > 0) {
+            $priorJob = $catalog->getJobById($resumeJobId, $userId);
+            if ($priorJob && $priorJob['mode'] === 'edit' && is_array($priorJob['result'] ?? null)) {
+                $resumeState = $priorJob['result']['resume_state'] ?? null;
+            }
+        }
+
+        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate, $resumeState);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'edit'], $result)));
 
     } elseif ($mode === 'test') {

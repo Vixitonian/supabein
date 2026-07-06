@@ -1526,8 +1526,42 @@ const AiPanel = (() => {
       // result card offers View Staging + Publish to Live. Pass the progress
       // card through so the post-deploy auto-test folds into its 'test'
       // stage instead of spawning a separate card.
-      onComplete: (ev, pMsg) => applyPlan(ev.plan, 'edit', null, ev.validation, pMsg),
+      onComplete: async (ev, pMsg) => {
+        await applyPlan(ev.plan, 'edit', null, ev.validation, pMsg);
+        // The agent ran out of turns before calling finish() — whatever it
+        // had staged was still applied above (same as a normal edit), but
+        // the request may not be fully done. Offer to continue the SAME
+        // agent session (its full tool-call trace, not a fresh restart)
+        // rather than silently treating a partial result as complete.
+        if (ev.incomplete) {
+          await addMessage(currentSessionId, { role: 'ai', type: 'resume', content: '', data: {
+            jobId: pMsg?.data?.jobId, projectId: ev.plan?.project_id, prompt: body.prompt, turnsUsed: ev.turns_used,
+          } });
+        }
+      },
     }, existingProgressMsg, (msg) => proceedWithEditStreaming(body, sess, msg));
+  }
+
+  async function continueEditJob(jobId, projectId, prompt, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const sess = currentSession();
+      await proceedWithEditStreaming({ prompt, project_id: projectId, validate: true, resume_job_id: jobId }, sess);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function renderResumeCard(msg) {
+    const { jobId, projectId, prompt, turnsUsed } = msg.data || {};
+    const card = el('div', { class: 'ai-msg ai-msg-ai', style: 'padding:12px 14px' },
+      el('div', { style: 'font-size:0.8rem;color:var(--text-muted);margin-bottom:8px' },
+        `Used all ${turnsUsed || 'its'} turns before finishing this request — some of it may still be incomplete.`),
+      el('button', { class: 'btn btn-ai btn-sm' }, '▶ Continue this edit')
+    );
+    const btn = card.querySelector('button');
+    btn.addEventListener('click', () => continueEditJob(jobId, projectId, prompt, btn));
+    return card;
   }
 
   // ── Review-on build pipeline: schema+design, then a confirm card, then
@@ -1849,7 +1883,15 @@ const AiPanel = (() => {
           error: ev.error || null, screenshot: ev.screenshot || null, validation: ev.validation || [],
         }}); }
       : operationMode === 'edit'
-      ? (ev) => applyPlan(ev.plan, 'edit', null, ev.validation, progressMsg)
+      ? async (ev) => {
+          await applyPlan(ev.plan, 'edit', null, ev.validation, progressMsg);
+          if (ev.incomplete) {
+            await addMessage(currentSessionId, { role: 'ai', type: 'resume', content: '', data: {
+              jobId: progressMsg.data.jobId, projectId: ev.plan?.project_id,
+              prompt: progressMsg.data.resumePrompt, turnsUsed: ev.turns_used,
+            } });
+          }
+        }
       : operationMode === 'edit_test'
       // Resuming mid-auto-test (the edit itself already applied before the
       // reload) — just finish the test stage in place, same as
@@ -2592,6 +2634,7 @@ const AiPanel = (() => {
     if (msg.type === 'recover') return renderRecoveryCard(msg);
     if (msg.type === 'plan') return renderPlanCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
+    if (msg.type === 'resume') return renderResumeCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
     if (msg.type === 'edit-review') return renderEditReviewInlineCard(msg);
     if (msg.type === 'error') {
