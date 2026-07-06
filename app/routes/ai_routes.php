@@ -7,6 +7,7 @@ require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
 require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';
 require_once SUPABEIN_ROOT . '/app/core/anthropic_client.php';
+require_once SUPABEIN_ROOT . '/app/core/fallback_ai_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 require_once SUPABEIN_ROOT . '/app/core/ai_validator.php';
 
@@ -715,7 +716,15 @@ PROMPT;
 
 const AI_EDIT_AGENT_SYSTEM_PROMPT = AI_EDIT_AGENT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
 
-const AI_EDIT_AGENT_MAX_TURNS = 12;
+// Live-caught at 12: a genuine bug-diagnosis request (job 126, project 30)
+// burned the entire budget just reading frontend files — including getting
+// stuck re-reading the same file for several turns in a row — and ran out
+// before it ever reached the actual fix. Now that FallbackAiClient means a
+// long-running job surviving a mid-run rate limit no longer risks failing
+// outright, there's much less downside to giving the agent real room to
+// investigate, use check_policy, and still write the fix, rather than
+// racing a tight clock on every single request.
+const AI_EDIT_AGENT_MAX_TURNS = 60;
 
 // ── Build frontend agent: same ReAct-style loop as the edit agent above, but
 // starting from zero files (a fresh build, not a modification against an
@@ -770,7 +779,7 @@ PROMPT;
 
 const AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT = AI_BUILD_FRONTEND_AGENT_SYSTEM_HEADER . "\n\n" . AI_FRONTEND_RULES;
 
-const AI_BUILD_FRONTEND_AGENT_MAX_TURNS = 20; // a full build writes more files than a targeted edit
+const AI_BUILD_FRONTEND_AGENT_MAX_TURNS = 60; // a full build writes more files than a targeted edit
 
 // ─── Platform-provided boilerplate (never AI-authored) ──────────────────────
 // core/router.js and core/api.js are the two files every "route not found" /
@@ -2545,7 +2554,13 @@ const AI_ALLOWED_MODELS = [
     ],
 ];
 
-function make_ai_client(array $config, ?string $provider, ?string $model): object
+// Builds exactly one raw provider client for one specific (provider, model).
+// Only ever called (a) directly, for the simple single-provider case, or
+// (b) from FallbackAiClient against candidates ai_build_fallback_chain()
+// already filtered to providers with a configured key — never speculatively
+// against an unconfigured one, since abort() below is a hard, uncatchable
+// process exit (: never), not a throwable a try/catch could react to.
+function ai_make_single_client(array $config, ?string $provider, ?string $model): object
 {
     $provider = in_array($provider, AI_ALLOWED_PROVIDERS, true)
         ? $provider
@@ -2581,6 +2596,67 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
     $allowed = AI_ALLOWED_MODELS['gemini'];
     $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
     return new \SupaBein\GeminiClient($key, $model);
+}
+
+function ai_provider_configured(array $config, string $provider): bool
+{
+    return match ($provider) {
+        'openrouter' => !empty($config['OPENROUTER_API_KEY']),
+        'nvidia'     => !empty($config['NVIDIA_API_KEY']),
+        'anthropic'  => !empty($config['ANTHROPIC_API_KEY']),
+        'gemini'     => !empty($config['GEMINI_API_KEY']),
+        default      => false,
+    };
+}
+
+// Builds the ordered list of (provider, model) candidates a FallbackAiClient
+// will try in turn: the caller's explicit request first (if valid and
+// configured), then every other combination this server actually has a key
+// for, tier by tier across AI_ALLOWED_MODELS' existing best-to-least-capable
+// per-provider ordering — so a rate-limited flagship degrades to the next-
+// best option in ANY provider before dropping to any provider's weakest
+// model. Never includes a provider with no configured key (see
+// ai_make_single_client()'s doc comment for why that matters here).
+function ai_build_fallback_chain(array $config, ?string $preferredProvider, ?string $preferredModel): array
+{
+    $chain = [];
+    $seen  = [];
+    $add = function (string $provider, string $model) use (&$chain, &$seen, $config): void {
+        if (!ai_provider_configured($config, $provider)) return;
+        $key = $provider . ':' . $model;
+        if (isset($seen[$key])) return;
+        $seen[$key] = true;
+        $chain[] = ['provider' => $provider, 'model' => $model];
+    };
+
+    if ($preferredProvider !== null && in_array($preferredProvider, AI_ALLOWED_PROVIDERS, true)) {
+        $models = AI_ALLOWED_MODELS[$preferredProvider] ?? [];
+        $model  = ($preferredModel !== null && in_array($preferredModel, $models, true)) ? $preferredModel : ($models[0] ?? null);
+        if ($model !== null) $add($preferredProvider, $model);
+    }
+
+    $maxTier = max(array_map('count', AI_ALLOWED_MODELS));
+    for ($tier = 0; $tier < $maxTier; $tier++) {
+        foreach (AI_ALLOWED_PROVIDERS as $provider) {
+            $models = AI_ALLOWED_MODELS[$provider] ?? [];
+            if (isset($models[$tier])) $add($provider, $models[$tier]);
+        }
+    }
+
+    return $chain;
+}
+
+// New public entry point — every existing caller of make_ai_client() gets
+// automatic cross-provider/cross-model fallback for free, with no changes of
+// their own, since FallbackAiClient exposes the exact same generateJson /
+// generateJsonWithHistory / getLastUsage surface every raw client already did.
+function make_ai_client(array $config, ?string $provider, ?string $model): object
+{
+    $chain = ai_build_fallback_chain($config, $provider, $model);
+    if (!$chain) {
+        abort(503, 'No AI provider is configured on this server');
+    }
+    return new \SupaBein\FallbackAiClient($config, $chain);
 }
 
 // ─── Design brief (pass 1.5) ─────────────────────────────────────────────────
@@ -4413,7 +4489,7 @@ Hard rules:
 - Work through the given stories in order, one at a time.
 PROMPT;
 
-const AI_BROWSER_TEST_AGENT_MAX_TURNS = 60;
+const AI_BROWSER_TEST_AGENT_MAX_TURNS = 120;
 const AI_BROWSER_TEST_AGENT_TURN_TIMEOUT_SEC = 20;
 
 // Builds the persistent Node/Playwright process the agent loop drives one
