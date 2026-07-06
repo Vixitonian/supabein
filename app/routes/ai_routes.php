@@ -4545,7 +4545,28 @@ function ai_run_browser_test_agent(
     $aiTrace  = [];
     $finished = false;
 
+    // The whole run's turn budget is shared across every story with no per-
+    // story limit, so a story the agent gets stuck on (e.g. a broken login
+    // loop) can burn the entire budget and leave every later story completely
+    // untested -- "turn budget exhausted before this story could be tested"
+    // for story after story, even though most of them were never actually
+    // attempted. Splitting the budget evenly guarantees every story gets a
+    // real attempt: once a story's own share runs out, it's marked failed and
+    // the agent is explicitly told to move on, instead of silently consuming
+    // turns that were meant for stories still waiting.
+    $perStoryBudget    = max(4, (int)floor(AI_BROWSER_TEST_AGENT_MAX_TURNS / max(1, count($stories))));
+    $turnsAtLastReport = 0;
+
     for ($turn = 1; $turn <= AI_BROWSER_TEST_AGENT_MAX_TURNS; $turn++) {
+        if (count($recorded) < count($stories) && ($turn - $turnsAtLastReport) > $perStoryBudget) {
+            $stuckStory = $stories[count($recorded)];
+            $recorded[] = ['label' => $stuckStory, 'passed' => false,
+                'detail' => "Exceeded its share of the run's turn budget ({$perStoryBudget} turns) — moved on so later stories still get tested"];
+            $turnsAtLastReport = $turn;
+            $turnMsg = json_encode(['tool' => 'system', 'note' =>
+                "\"{$stuckStory}\" took too long and was marked failed to protect the remaining stories' turn budget. Move on to the next untested story now."]);
+            continue;
+        }
         $_t0 = microtime(true);
         try {
             $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
@@ -4581,6 +4602,7 @@ function ai_run_browser_test_agent(
                 'passed' => (bool)($args['passed'] ?? false),
                 'detail' => (string)($args['detail'] ?? ''),
             ];
+            $turnsAtLastReport = $turn;
             $turnMsg = json_encode(['tool' => 'report_story', 'result' => ['ok' => true, 'recorded' => count($recorded), 'of' => count($stories)]]);
             continue;
         }
