@@ -170,6 +170,30 @@ function register_project_routes(\SupaBein\Router $router): void
 
         $pdo->prepare('DELETE FROM project_seed_rows WHERE project_id = ?')->execute([$projectId]);
 
+        // Every test run signs up a fresh account to genuinely exercise signup
+        // (ai_playwright_test_generate's TEST_EMAIL, ai_run_browser_test_agent's
+        // own TEST_EMAIL) instead of reusing one that already exists -- these
+        // go through the app's own live signup endpoint, not the PHP seed-insert
+        // path, so project_seed_rows never learns about them and every test run
+        // left a permanent, un-removable row behind. Both use a fixed,
+        // recognizable prefix specifically so they can be swept up here safely
+        // (a real user's email can never collide with it).
+        $schema  = ai_schema_from_db($projectId, $catalog);
+        $auth    = ai_detect_auth($schema);
+        if ($auth['table']) {
+            $tbl = $catalog->getTable($projectId, $auth['table']);
+            if ($tbl) {
+                $idField = $auth['field'] ?? 'email';
+                try {
+                    $stmt = $pdo->prepare("DELETE FROM `{$tbl['physical_name']}` WHERE `{$idField}` LIKE 'pw-a-%@testmail.dev' OR `{$idField}` LIKE 'pw-agent-%@testmail.dev'");
+                    $stmt->execute();
+                    if ($stmt->rowCount() > 0) $deleted[$auth['table']] = ($deleted[$auth['table']] ?? 0) + $stmt->rowCount();
+                } catch (\Throwable $e) {
+                    sb_log('ai_seed', 'Test-run account cleanup failed (non-fatal): ' . $e->getMessage());
+                }
+            }
+        }
+
         json_out(['deleted' => $deleted]);
     }, ['auth_middleware']);
 
