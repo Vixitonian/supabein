@@ -3676,11 +3676,38 @@ const AiPanel = (() => {
       closeBtn
     );
 
+    // TEMPORARY diagnostic — a mobile device reported the message list as
+    // completely unscrollable even after ruling out data loss, render
+    // exceptions, oversized content, and stale caching (all verified
+    // server-side). This surfaces the one thing that can't be checked
+    // remotely: what the browser's own layout engine thinks .ai-messages'
+    // scroll metrics actually are. scrollHeight <= clientHeight would mean a
+    // genuine layout/measurement bug (nothing to scroll, from the browser's
+    // point of view); scrollHeight > clientHeight with scrollTop never
+    // moving would mean something is capturing/blocking the touch gesture
+    // instead. Remove once we have a screenshot of this from the affected
+    // device. Deliberately renders only on top of the AI panel, not anywhere
+    // else in the app.
+    const scrollDebug = el('div', {
+      style: 'position:fixed;top:4px;left:4px;z-index:99999;background:rgba(0,0,0,0.85);color:#22c55e;font-family:monospace;font-size:10px;padding:4px 6px;border-radius:4px;pointer-events:none;white-space:pre;line-height:1.4'
+    }, 'scroll debug: waiting…');
+    function updateScrollDebug() {
+      const cs = getComputedStyle(messages);
+      scrollDebug.textContent =
+        `sH:${messages.scrollHeight} cH:${messages.clientHeight} sT:${messages.scrollTop}\n` +
+        `overflow-y:${cs.overflowY} touch-action:${cs.touchAction}\n` +
+        `overscroll:${cs.overscrollBehaviorY || cs.overscrollBehavior}`;
+    }
+    messages.addEventListener('scroll', updateScrollDebug, { passive: true });
+    messages.addEventListener('touchmove', updateScrollDebug, { passive: true });
+    setInterval(updateScrollDebug, 500);
+
     const mainArea = el('div', { class: 'ai-main' }, header, messages, inputBar);
 
     panel.appendChild(sidebarOverlay);
     panel.appendChild(sidebar);
     panel.appendChild(mainArea);
+    panel.appendChild(scrollDebug);
 
     return panel;
   }
