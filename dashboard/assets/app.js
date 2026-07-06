@@ -2188,6 +2188,15 @@ const AiPanel = (() => {
     }
   }
 
+  // Every AI-call endpoint hard-rejects prompts over 2000 chars (422). A run
+  // with several failing stories that each carry a verbose detail string —
+  // exactly what a real broken app produces — easily builds a prompt past
+  // that limit, so "Resolve" would silently 422 with no fix attempted at all.
+  const RESOLVE_PROMPT_MAX = 1900; // stay under the backend's 2000-char cap with margin
+  function truncateText(s, max) {
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
+  }
+
   // Turns a failing test+validation result into an edit-mode prompt asking
   // the AI to fix exactly those problems — reuses the normal edit pipeline
   // (schema-aware generation, self-heal retry, validate, deploy) instead of
@@ -2195,21 +2204,29 @@ const AiPanel = (() => {
   function buildResolvePrompt(data) {
     const parts = [];
     if (data.error && !TEST_INFRA_ERRORS.includes(data.error)) {
-      parts.push('The test run itself failed with this error:\n' + data.error);
+      parts.push('The test run itself failed with this error:\n' + truncateText(data.error, 300));
     }
     const failedStories = (data.stories || []).filter(s => !s.passed);
     if (failedStories.length) {
       parts.push('Fix these failing test stories:\n' + failedStories.map(s =>
-        `- ${s.label}` + (s.detail ? `: ${s.detail}` : '')).join('\n'));
+        `- ${s.label}` + (s.detail ? `: ${truncateText(s.detail, 200)}` : '')).join('\n'));
     }
     const issues = (data.validation || []).filter(f => f.severity === 'error' || f.severity === 'warning');
     if (issues.length) {
       parts.push('Fix these validation issues:\n' + issues.map(f =>
-        `- [${f.severity}] ${f.message}` + (f.explanation ? ` — ${f.explanation}` : '')).join('\n'));
+        `- [${f.severity}] ${f.message}` + (f.explanation ? ` — ${truncateText(f.explanation, 150)}` : '')).join('\n'));
     }
     if (!parts.length) return '';
-    return 'Automated testing and validation found problems with this app.\n\n' + parts.join('\n\n')
-      + '\n\nFix all of the above without changing anything else.';
+    const suffix = '\n\nFix all of the above without changing anything else.';
+    let prompt = 'Automated testing and validation found problems with this app.\n\n' + parts.join('\n\n') + suffix;
+    // Per-field truncation above still isn't a hard guarantee (e.g. many
+    // failing stories each under the cap can still add up) — this is the
+    // backstop that makes the 2000-char limit impossible to exceed.
+    if (prompt.length > RESOLVE_PROMPT_MAX) {
+      const budget = RESOLVE_PROMPT_MAX - suffix.length - 20;
+      prompt = prompt.slice(0, budget) + '\n[...truncated]' + suffix;
+    }
+    return prompt;
   }
 
   async function resolveIssues(data, btn) {
