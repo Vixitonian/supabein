@@ -674,6 +674,14 @@ Available tools:
     constraint can still fail at execution time for reasons that aren't visible from the text alone.
     If it comes back not executing cleanly, fix it with update_policies (constraint_sql supports
     referencing other tables in this project by name, same as during a build).
+  validate_frontend args: {}
+    Runs the same deterministic checks used after you finish (dead routes, api.* calls against
+    tables that don't exist, auth handlers that don't exist, nav links with no matching route) against
+    whatever you've write_file'd so far — but NOW, so you can see and fix a mistake yourself instead
+    of shipping it. Only reflects the schema as it exists right now: any add_tables/add_columns you
+    plan to include in your own finish() aren't real yet, so a file that assumes one of those already
+    exists will still show a false positive here — that's expected. Worth calling once before finish()
+    on any non-trivial change, especially one touching routes or a table you didn't just add yourself.
   finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
     Ends the session. Every key is optional (omit or use [] / {} for "no schema change of this
     kind") — use the SAME shapes as a normal edit delta, documented below. Do NOT repeat frontend
@@ -760,6 +768,13 @@ Available tools:
     and lose the first feature's tag/route in the process.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
+  validate_frontend args: {}
+    Runs deterministic checks (dead routes, api.* calls against tables that don't exist in the
+    schema, auth handlers that don't exist, nav links with no matching route) against everything
+    you've write_file'd so far. Worth calling once you have index.html and at least one feature wired
+    up, and again right before finish — catches exactly the kind of mistake ("route registered but
+    nothing links to it", "typo'd a table name in an api.list call") that's invisible just re-reading
+    your own code, the same way running a test catches things proofreading doesn't.
   finish       args: {}
     Ends the session once the app is fully functional — real API calls, real CRUD, real auth flows
     where auth exists, and no dangling references (every <script src> you wrote corresponds to a
@@ -3713,7 +3728,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
 // regenerate an existing file from general knowledge instead of its real
 // content: exactly the class of bug that dropped a whole feature's worth of
 // working code (note creation/editing) in the file that surfaced this rule.
-function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config, int $projectId): array
+function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config, int $projectId, array $schema = []): array
 {
     static $platformPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
 
@@ -3823,6 +3838,29 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
                 ]];
             }
 
+        // Runs the SAME deterministic checks ai_validator_check_project() runs
+        // after the agent finishes (dead routes, api.* calls against tables
+        // that don't exist, auth handlers that don't exist, etc.) but DURING
+        // the loop, against whatever's actually been written so far — so a
+        // mistake gets caught and fixed before finish(), instead of shipping
+        // and only surfacing in a post-hoc report a human has to notice and
+        // act on. Only reflects the schema as it exists right now: any
+        // add_tables/add_columns this same edit plans to include in finish()
+        // aren't real yet, so a file that assumes one of those already exists
+        // will still show a false positive here — that's expected, not a bug.
+        case 'validate_frontend':
+            $merged = $byPath;
+            foreach ($changedFiles as $p => $c) $merged[$p] = $c;
+            $files = array_map(fn($p) => ['path' => $p, 'content' => $merged[$p]], array_keys($merged));
+            $findings = ai_validator_check_project($schema, $files);
+            $errors = array_values(array_filter($findings, fn($f) => $f['severity'] === 'error'));
+            return ['tool' => 'validate_frontend', 'result' => [
+                'error_count' => count($errors),
+                'errors'      => array_slice($errors, 0, 10),
+                'note'        => 'Reflects only the schema as it exists right now — any add_tables/add_columns '
+                                . 'you plan to include in finish() are not accounted for yet.',
+            ]];
+
         case 'syntax_check':
             if (isset($args['path'])) {
                 $path = $normalizePath((string)$args['path']);
@@ -3840,7 +3878,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
 
         default:
-            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, finish"];
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, validate_frontend, finish"];
     }
 }
 
@@ -3863,6 +3901,55 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
         if (str_contains($msg, $needle)) return true;
     }
     return false;
+}
+
+// General stuck-loop detector shared by every agent turn loop below. Two
+// live-caught bugs this session — an edit agent re-reading the same
+// unchanged file ~9 turns in a row, and a test agent re-attempting login
+// over and over off one wrong hypothesis — turned out to be the same
+// underlying gap wearing different clothes: nothing noticed "the last few
+// tool calls are byte-identical and nothing is changing." Rather than patch
+// each new instance of this pattern with its own one-off prompt rule
+// forever, this catches the whole class: if the exact same (tool, args)
+// repeats $threshold times in a row, the call is skipped (no point actually
+// re-running something that will just return what it already did) and the
+// caller gets a forcing nudge back instead, telling the model plainly that
+// repeating this exact action isn't working and to do something else.
+// $recentCalls is the loop's own rolling window, passed by reference so it
+// persists turn to turn; resets naturally the moment a different action
+// breaks the streak.
+function ai_agent_detect_stuck_repeat(array &$recentCalls, string $tool, array $args, int $threshold = 3): bool
+{
+    $signature = $tool . ':' . json_encode($args);
+    $recentCalls[] = $signature;
+    if (count($recentCalls) > $threshold) {
+        array_shift($recentCalls);
+    }
+    if (count($recentCalls) < $threshold) {
+        return false;
+    }
+    $stuck = count(array_unique($recentCalls)) === 1;
+    if ($stuck) {
+        $recentCalls = []; // give the next, different action a clean window
+    }
+    return $stuck;
+}
+
+// Turn budgets across the three agent loops now run 60-120 turns (up from
+// 12-60), and every turn appends two messages to $loopHistory with no cap —
+// resent in full on every single subsequent call. Left unbounded, a long-
+// running session's token cost (and latency) grows roughly with the square
+// of its turn count. The model only ever needs recent context to keep making
+// progress on the CURRENT step; nothing about turn 3 is still relevant by
+// turn 50. Keeping the most recent messages and dropping the rest bounds
+// this without meaningfully hurting the model's ability to continue.
+const AI_AGENT_HISTORY_WINDOW_MESSAGES = 30; // ~15 turns of (user, model) pairs
+
+function ai_agent_trim_history(array $history): array
+{
+    return count($history) > AI_AGENT_HISTORY_WINDOW_MESSAGES
+        ? array_slice($history, -AI_AGENT_HISTORY_WINDOW_MESSAGES)
+        : $history;
 }
 
 function ai_edit_agent_step_label(string $tool, array $args): string
@@ -3909,6 +3996,7 @@ function ai_run_edit_generation_agentic(
              . implode(', ', array_keys($byPath)) . "\n\nRequest: {$prompt}\n\n"
              . 'Respond with your first tool action.';
     $loopHistory = $history;
+    $recentCalls = [];
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -3951,6 +4039,7 @@ function ai_run_edit_generation_agentic(
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+        $loopHistory   = ai_agent_trim_history($loopHistory);
 
         if ($tool === 'finish') {
             $candidateDelta = [
@@ -3969,7 +4058,16 @@ function ai_run_edit_generation_agentic(
             continue;
         }
 
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId));
+        if (ai_agent_detect_stuck_repeat($recentCalls, $tool, $args)) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                'You have called this exact action with these exact arguments several times in a row with no ' .
+                'different result to show for it. Repeating it again will not work either — try a genuinely ' .
+                'different action (a different file, a different search, or finish with whatever is actually ' .
+                'ready) instead of this one.']);
+            continue;
+        }
+
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId, $existingSchema));
     }
 
     if ($finishArgs === null) {
@@ -4015,6 +4113,7 @@ function ai_run_build_frontend_agentic(
              . "Exact validated schema — use ONLY these column names in JS:\n{$schemaCtx}\n\n"
              . 'Respond with your first tool action.';
     $loopHistory = [];
+    $recentCalls = [];
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -4054,6 +4153,7 @@ function ai_run_build_frontend_agentic(
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+        $loopHistory   = ai_agent_trim_history($loopHistory);
 
         if ($tool === 'finish') {
             if (empty($changedFiles)) {
@@ -4069,10 +4169,20 @@ function ai_run_build_frontend_agentic(
             break;
         }
 
+        if (ai_agent_detect_stuck_repeat($recentCalls, $tool, $args)) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                'You have called this exact action with these exact arguments several times in a row with no ' .
+                'different result to show for it. Repeating it again will not work either — try a genuinely ' .
+                'different action (a different file, a different search, or finish with whatever is actually ' .
+                'ready) instead of this one.']);
+            continue;
+        }
+
         // No real project exists yet at this stage of a build — 0 is a safe
         // placeholder; this agent's own system prompt never advertises
-        // check_policy, so it has no route to actually call it.
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0));
+        // check_policy, so it has no route to actually call it. validate_frontend
+        // works fine here though — it only needs the schema plan, not a live DB.
+        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan));
     }
 
     if (!$finished) {
@@ -4824,20 +4934,30 @@ function ai_run_browser_test_agent(
     $recorded = [];
     $aiTrace  = [];
     $finished = false;
+    $recentCalls = [];
 
     // The whole run's turn budget is shared across every story with no per-
     // story limit, so a story the agent gets stuck on (e.g. a broken login
     // loop) can burn the entire budget and leave every later story completely
     // untested -- "turn budget exhausted before this story could be tested"
     // for story after story, even though most of them were never actually
-    // attempted. Splitting the budget evenly guarantees every story gets a
-    // real attempt: once a story's own share runs out, it's marked failed and
-    // the agent is explicitly told to move on, instead of silently consuming
-    // turns that were meant for stories still waiting.
-    $perStoryBudget    = max(4, (int)floor(AI_BROWSER_TEST_AGENT_MAX_TURNS / max(1, count($stories))));
+    // attempted. A per-story ceiling guarantees every story gets a real
+    // attempt: once a story's own share runs out, it's marked failed and the
+    // agent is explicitly told to move on, instead of silently consuming
+    // turns meant for stories still waiting.
+    //
+    // Recomputed every check (not fixed once upfront) from whatever turns and
+    // stories are ACTUALLY left at that moment: a story that finishes well
+    // under its share leaves the remaining turns to divide across fewer
+    // remaining stories, so later ones automatically get more room instead of
+    // a flat allotment that treats "logout button is present" the same as
+    // "schedule a mentorship session".
     $turnsAtLastReport = 0;
 
     for ($turn = 1; $turn <= AI_BROWSER_TEST_AGENT_MAX_TURNS; $turn++) {
+        $storiesLeft    = count($stories) - count($recorded);
+        $turnsLeft      = AI_BROWSER_TEST_AGENT_MAX_TURNS - $turn + 1;
+        $perStoryBudget = max(4, (int)floor($turnsLeft / max(1, $storiesLeft)));
         if (count($recorded) < count($stories) && ($turn - $turnsAtLastReport) > $perStoryBudget) {
             $stuckStory = $stories[count($recorded)];
             $recorded[] = ['label' => $stuckStory, 'passed' => false,
@@ -4875,6 +4995,7 @@ function ai_run_browser_test_agent(
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+        $loopHistory   = ai_agent_trim_history($loopHistory);
 
         if ($tool === 'report_story') {
             $label = (string)($args['label'] ?? 'Untitled story');
@@ -4912,6 +5033,15 @@ function ai_run_browser_test_agent(
             }
             $finished = true;
             break;
+        }
+
+        if (ai_agent_detect_stuck_repeat($recentCalls, $tool, $args)) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                'You have called this exact action with these exact arguments several times in a row with no ' .
+                'different result to show for it. Repeating it again will not work either — try a genuinely ' .
+                'different action, or if this story truly cannot be verified, report_story it false with what ' .
+                'you actually observed.']);
+            continue;
         }
 
         $result = ai_browser_agent_send($handles, ['tool' => $tool, 'args' => $args]);
