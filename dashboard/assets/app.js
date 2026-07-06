@@ -5033,23 +5033,35 @@ async function renderTables({ id }) {
       el('thead', {}, el('tr', {},
         el('th', {}, 'Name'), el('th', { class: 'col-mobile-hide' }, 'Physical Name'), el('th', {}, 'Rows'), el('th', {}, '')
       )),
-      el('tbody', {}, ...tables.map(t =>
-        el('tr', {},
+      el('tbody', {}, ...tables.map(t => {
+        const menuBtn = el('button', { class: 'proj-menu-btn', title: 'Table actions' }, '⋮');
+        // Combines .dropdown (visuals: background/border/shadow) with
+        // .proj-menu-drop (position + the global click-outside-closes-it
+        // listener already wired at the bottom of this file) so this needs
+        // no listener of its own beyond the toggle below — avoids adding a
+        // fresh document-level listener per row every time this list renders.
+        const dropdown = el('div', { class: 'dropdown proj-menu-drop hidden' },
+          el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Drop table')
+        );
+        menuBtn.addEventListener('click', e => {
+          e.preventDefault(); e.stopPropagation();
+          document.querySelectorAll('.proj-menu-drop').forEach(d => { if (d !== dropdown) d.classList.add('hidden'); });
+          dropdown.classList.toggle('hidden');
+        });
+        dropdown.querySelector('button').addEventListener('click', async () => {
+          dropdown.classList.add('hidden');
+          if (!confirm(`Drop table "${t.table_name}"?`)) return;
+          await Api.delete(`/v1/projects/${id}/tables/${t.table_name}`);
+          renderTables({ id });
+        });
+
+        return el('tr', {},
           el('td', {}, el('a', { href: `#/projects/${id}/tables/${t.table_name}` }, t.table_name)),
           el('td', { class: 'text-muted text-sm col-mobile-hide' }, t.physical_name),
           el('td', { class: 'text-muted text-sm' }, String(t.row_count ?? 0)),
-          el('td', {},
-            el('button', {
-              class: 'btn btn-sm btn-danger',
-              onClick: async () => {
-                if (!confirm(`Drop table "${t.table_name}"?`)) return;
-                await Api.delete(`/v1/projects/${id}/tables/${t.table_name}`);
-                renderTables({ id });
-              }
-            }, 'Drop')
-          )
-        )
-      ))
+          el('td', { style: 'position:relative; text-align:right' }, menuBtn, dropdown)
+        );
+      }))
     );
 
     list.innerHTML = '';
