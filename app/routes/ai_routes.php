@@ -844,7 +844,6 @@ const AI_BUILD_FRONTEND_AGENT_MAX_TURNS = 60; // a full build writes more files 
 const AI_CANONICAL_ROUTER_JS = <<<'JS'
 const router = (() => {
   const routes = {};
-  const appDiv = document.getElementById('app');
   const defineRoute = (path, handler) => { routes[path] = handler; };
   const navigate = (path) => { window.location.hash = path; };
 
@@ -868,12 +867,16 @@ const router = (() => {
   };
 
   const onHashChange = async () => {
+    // Looked up fresh on every call, not cached at module-load time: this
+    // script tag commonly loads in <head>, before <main id="app"> exists in
+    // the DOM, which would permanently null out a module-scope reference.
+    const appDiv = document.getElementById('app');
+    if (!appDiv) return;
     // Empty hash (first load, or "#") means the home route, never 404.
     const path = window.location.hash.replace(/^#/, '') || '/';
     const match = matchRoute(path);
     const handler = match ? match.handler : (routes['/404'] ||
       (() => { appDiv.innerHTML = '<h1 class="text-2xl text-red-400 p-8">404 - Not Found</h1>'; }));
-    if (!appDiv) return;
     appDiv.innerHTML = '<p class="text-gray-400 animate-pulse text-center p-8">Loading...</p>';
     try { await handler(match ? match.params : {}); }
     catch (error) {
