@@ -2961,6 +2961,31 @@ function ai_attachment_instruction_note(): string
         . 'generic placeholders. Do not describe the attachments back to the user; just build to match them.';
 }
 
+/**
+ * Validates `attachments` from a job-creating route body and re-encodes it
+ * into the plain-JSON shape a job's LONGTEXT payload column can hold (the
+ * raw decoded bytes ai_validate_attachments() returns aren't JSON-safe).
+ * The worker reverses this via ai_job_payload_refs() right before it
+ * actually needs the attachments.
+ */
+function ai_validate_attachments_for_job($raw): array
+{
+    return array_map(
+        fn($a) => ['filename' => $a['filename'], 'mime_type' => $a['mime_type'], 'data_base64' => base64_encode($a['bytes'])],
+        ai_validate_attachments($raw)
+    );
+}
+
+/** Reverses ai_validate_attachments_for_job() and runs ai_prepare_attachments_for_ai() on the result — call once per job in the worker. */
+function ai_job_payload_refs(array $payload): array
+{
+    $attachments = array_map(
+        fn($a) => ['filename' => $a['filename'] ?? '', 'mime_type' => $a['mime_type'] ?? '', 'bytes' => base64_decode($a['data_base64'] ?? '')],
+        $payload['attachments'] ?? []
+    );
+    return ai_prepare_attachments_for_ai($attachments);
+}
+
 // ─── Design brief (pass 1.5) ─────────────────────────────────────────────────
 
 const AI_DESIGN_BRIEF_PROMPT = <<<'PROMPT'
@@ -5983,6 +6008,12 @@ function register_ai_routes(\SupaBein\Router $router): void
             abort(422, 'prompt is required and must be under 2000 characters');
         }
 
+        // Reference files (logo to match, sample document/screenshot to build
+        // from, etc.) — see ai_prepare_attachments_for_ai()'s doc comment.
+        $refs = ai_prepare_attachments_for_ai(ai_validate_attachments($req['body']['attachments'] ?? null));
+        $hasRefs = !empty($refs['attachments']) || $refs['context'] !== '';
+        $attachmentNote = $hasRefs ? ai_attachment_instruction_note() : '';
+
         // Optional human-review controls (both default off → current behaviour unchanged):
         //   review:true  → generate + cap the intent, return it, build NOTHING (caller edits it)
         //   intent:{...}  → an approved/edited intent; lock it into the schema pass and build
@@ -5999,7 +6030,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         if ($review && !$approvedIntent) {
             sb_log('ai_build', 'Review requested: generating intent only', ['user_id' => $userId]);
             try {
-                $intent = ai_generate_intent($gemini, $prompt);
+                $intent = ai_generate_intent($gemini, $prompt, [], $refs);
             } catch (\RuntimeException $e) {
                 ai_abort_error('intent', $e->getMessage());
             }
@@ -6012,12 +6043,13 @@ function register_ai_routes(\SupaBein\Router $router): void
         if ($approvedIntent) {
             $schemaUserMsg = $prompt . "\n\n" . ai_intent_to_context($approvedIntent);
         }
+        if ($refs['context'] !== '') $schemaUserMsg .= "\n\n" . $refs['context'];
 
         sb_log('ai_build', 'Calling AI (pass 1: schema)', ['user_id' => $userId, 'provider' => $provider, 'model' => $model, 'locked_intent' => (bool)$approvedIntent]);
 
         // Pass 1 — schema only (one self-correcting retry on validation failure)
         try {
-            $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $schemaUserMsg);
+            $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT . $attachmentNote, $schemaUserMsg, $refs['attachments']);
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             sb_log('ai_build', 'AI error (pass 1): ' . $msg, ['user_id' => $userId]);
@@ -6034,7 +6066,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                 $retryPrompt = $schemaUserMsg
                     . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
                     . "\nReturn a corrected schema that fixes exactly this problem.";
-                $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT, $retryPrompt);
+                $schemaPlan = $gemini->generateJson(AI_BUILD_SCHEMA_PROMPT . $attachmentNote, $retryPrompt, $refs['attachments']);
                 $schemaPlan['frontend'] = ['files' => []];
                 $schemaPlan = ai_sanitize_plan($schemaPlan);
                 $validationError = ai_validate_plan($schemaPlan);
@@ -6049,7 +6081,7 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         // Pass 1.5 — design brief (best-effort)
         sb_log('ai_build', 'Calling AI (pass 1.5: design brief)', ['user_id' => $userId]);
-        $brief    = ai_generate_design_brief($gemini, $prompt, $schemaPlan);
+        $brief    = ai_generate_design_brief($gemini, $prompt, $schemaPlan, $refs);
         $briefCtx = ai_brief_to_context($brief);
 
         // Pass 2 — frontend with exact (post-sanitize) column names + bound auth.js
@@ -6057,9 +6089,10 @@ function register_ai_routes(\SupaBein\Router $router): void
         $frontendMsg = "App description: {$prompt}\n\n"
                      . ($briefCtx ? "{$briefCtx}\n\n" : '')
                      . "Exact validated schema — use ONLY these column names in JS:\n"
-                     . ai_schema_to_context($schemaPlan);
+                     . ai_schema_to_context($schemaPlan)
+                     . ($refs['context'] !== '' ? "\n\n{$refs['context']}" : '');
         try {
-            $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
+            $frontendResult = $gemini->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan) . $attachmentNote, $frontendMsg, $refs['attachments']);
         } catch (\RuntimeException $e) {
             $msg = $e->getMessage();
             sb_log('ai_build', 'AI error (pass 2): ' . $msg, ['user_id' => $userId]);
@@ -6142,13 +6175,20 @@ function register_ai_routes(\SupaBein\Router $router): void
         }
         $schemaContext = $schemaLines ? implode("\n", $schemaLines) : '  (no tables yet)';
 
+        // Reference files (a screenshot of the change wanted, a document to
+        // pull new copy from, etc.) — see ai_prepare_attachments_for_ai().
+        $refs = ai_prepare_attachments_for_ai(ai_validate_attachments($req['body']['attachments'] ?? null));
+        $hasRefs = !empty($refs['attachments']) || $refs['context'] !== '';
+
         $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
+        if ($refs['context'] !== '') $userMessage .= "\n\n" . $refs['context'];
 
         $gemini = make_ai_client($config, $req['body']['provider'] ?? null, $req['body']['model'] ?? null);
         $existingSchema   = ai_schema_from_db($projectId, $catalog);
-        $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema);
+        $editSystemPrompt = ai_bind_auth_placeholders(AI_EDIT_SYSTEM_PROMPT, $existingSchema)
+                          . ($hasRefs ? ai_attachment_instruction_note() : '');
         try {
-            $delta = $gemini->generateJson($editSystemPrompt, $userMessage);
+            $delta = $gemini->generateJson($editSystemPrompt, $userMessage, $refs['attachments']);
 
             // Validate the delta; one self-correcting retry with the reason fed back.
             $deltaError = ai_validate_delta($delta, $existingSchema);
@@ -6157,7 +6197,7 @@ function register_ai_routes(\SupaBein\Router $router): void
                 $retryMsg = $userMessage
                     . "\n\nYour previous response was rejected for this reason:\n  " . $deltaError
                     . "\nReturn a corrected JSON delta that fixes exactly this problem and nothing else.";
-                $delta = $gemini->generateJson($editSystemPrompt, $retryMsg);
+                $delta = $gemini->generateJson($editSystemPrompt, $retryMsg, $refs['attachments']);
                 $deltaError = ai_validate_delta($delta, $existingSchema);
                 if ($deltaError) abort(422, 'AI returned an invalid edit: ' . $deltaError);
             }
@@ -6629,12 +6669,13 @@ PROMPT;
         $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
 
         $payload = [
-            'prompt'   => $prompt,
-            'history'  => $history,
-            'intent'   => $intent,
-            'provider' => $req['body']['provider'] ?? null,
-            'model'    => $req['body']['model'] ?? null,
-            'validate' => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            'prompt'      => $prompt,
+            'history'     => $history,
+            'intent'      => $intent,
+            'provider'    => $req['body']['provider'] ?? null,
+            'model'       => $req['body']['model'] ?? null,
+            'validate'    => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            'attachments' => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
@@ -6667,11 +6708,12 @@ PROMPT;
         $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
 
         $payload = [
-            'prompt'   => $prompt,
-            'history'  => $history,
-            'intent'   => $intent,
-            'provider' => $req['body']['provider'] ?? null,
-            'model'    => $req['body']['model'] ?? null,
+            'prompt'      => $prompt,
+            'history'     => $history,
+            'intent'      => $intent,
+            'provider'    => $req['body']['provider'] ?? null,
+            'model'       => $req['body']['model'] ?? null,
+            'attachments' => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build_schema', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
@@ -6702,6 +6744,11 @@ PROMPT;
             'provider'     => $req['body']['provider'] ?? null,
             'model'        => $req['body']['model'] ?? null,
             'validate'     => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            // Review-on's stage 1 (build-schema/job) already saw these — the
+            // caller resends them here (a fresh HTTP request, no server-side
+            // memory of stage 1) if it wants stage 2's frontend generation to
+            // see them too.
+            'attachments'  => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build_frontend', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
@@ -6748,6 +6795,7 @@ PROMPT;
             'model'         => $req['body']['model'] ?? null,
             'validate'      => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
             'resume_job_id' => $resumeJobId ?: null,
+            'attachments'   => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
         ];
         $job = $catalog->createJob($userId, $sessionId, 'edit', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
