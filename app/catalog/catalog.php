@@ -852,7 +852,21 @@ class Catalog
         if (!$row) return null;
         $row['progress'] = $row['progress'] !== null ? (json_decode($row['progress'], true) ?? []) : [];
         if ($row['result'] !== null) {
-            $row['result'] = json_decode($row['result'], true);
+            $decoded = json_decode($row['result'], true);
+            // markJobDone() now caps what it writes so this shouldn't happen
+            // going forward, but a row already corrupted by a fetch-side
+            // truncation (see markJobDone()'s JOB_RESULT_BYTE_CAP) before
+            // that fix existed would otherwise silently look like a 'done'
+            // job with an empty result — surfacing here as a clear failure
+            // instead of leaving a caller (an edit's /v1/ai/apply, a resume
+            // lookup) to act on a plan/state that's actually missing pieces.
+            if ($decoded === null && $row['result'] !== 'null') {
+                $row['status'] = 'failed';
+                $row['error']  = 'This job\'s result was corrupted (exceeded the storage size limit) — please retry.';
+                $row['result'] = null;
+            } else {
+                $row['result'] = $decoded;
+            }
         }
         return self::castRow($row, ['id', 'user_id', 'session_id', 'pid']);
     }
@@ -891,10 +905,37 @@ class Catalog
                   ->execute([json_encode($events, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $jobId]);
     }
 
+    // This connection's real round-trip packet ceiling is confirmed at
+    // exactly 1,048,576 bytes (same limit MESSAGES_BYTE_CAP above works
+    // around for ai_sessions.messages) — a `result` this large doesn't just
+    // risk failing to WRITE cleanly, a later READ (job polling, an edit's
+    // /v1/ai/jobs/:id response) silently truncates it mid-string instead of
+    // erroring. json_decode() on the truncated JSON then returns null, so a
+    // job that completed successfully looks like it produced no result at
+    // all. Live-caught: three separate completed jobs already corrupted this
+    // way, one surfacing as "plan.project_id is required for edit mode" once
+    // the frontend tried to apply a plan that had actually been silently
+    // reduced to nothing. aiTrace (the full system-prompt-plus-history record
+    // of every agent turn) is what balloons a long run past this — trim its
+    // OLDEST entries first, since it's diagnostic record-keeping, not
+    // anything the deploy pipeline itself reads.
+    private const JOB_RESULT_BYTE_CAP = 900000;
+
     public function markJobDone(int $jobId, array $result): void
     {
+        $encoded = json_encode($result, JSON_UNESCAPED_UNICODE);
+        if (strlen($encoded) > self::JOB_RESULT_BYTE_CAP && !empty($result['aiTrace']) && is_array($result['aiTrace'])) {
+            while (strlen($encoded) > self::JOB_RESULT_BYTE_CAP && count($result['aiTrace']) > 0) {
+                array_shift($result['aiTrace']);
+                $encoded = json_encode($result, JSON_UNESCAPED_UNICODE);
+            }
+            if (!$result['aiTrace']) {
+                $result['aiTrace'] = [['note' => 'Trace omitted — the full result exceeded this job\'s storage limit.']];
+                $encoded = json_encode($result, JSON_UNESCAPED_UNICODE);
+            }
+        }
         $this->pdo->prepare("UPDATE ai_jobs SET status = 'done', result = ? WHERE id = ?")
-                   ->execute([json_encode($result, JSON_UNESCAPED_UNICODE), $jobId]);
+                   ->execute([$encoded, $jobId]);
     }
 
     public function markJobFailed(int $jobId, string $error): void
