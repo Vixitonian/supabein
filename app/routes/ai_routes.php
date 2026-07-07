@@ -1736,18 +1736,27 @@ function ai_validate_intent(array $intent): ?string
 /**
  * Run the intent pass (pass 0) with one self-correcting retry, then cap deterministically.
  */
-function ai_generate_intent(object $client, string $prompt, array $history = []): array
+/**
+ * @param array $refs Reference material from uploaded attachments, shaped
+ *   ['attachments' => [{media_type, data_base64}, ...], 'context' => string]
+ *   — see ai_prepare_attachments_for_ai(). Defaults to none.
+ */
+function ai_generate_intent(object $client, string $prompt, array $history = [], array $refs = []): array
 {
-    $call = static function (string $user) use ($client, $history) {
+    $attachments = $refs['attachments'] ?? [];
+    $promptWithCtx = $prompt . (($refs['context'] ?? '') !== '' ? "\n\n" . $refs['context'] : '');
+    $systemPrompt = AI_INTENT_PROMPT . ($attachments || !empty($refs['context']) ? ai_attachment_instruction_note() : '');
+
+    $call = static function (string $user) use ($client, $history, $attachments, $systemPrompt) {
         return $history
-            ? $client->generateJsonWithHistory(AI_INTENT_PROMPT, $history, $user)
-            : $client->generateJson(AI_INTENT_PROMPT, $user);
+            ? $client->generateJsonWithHistory($systemPrompt, $history, $user, $attachments)
+            : $client->generateJson($systemPrompt, $user, $attachments);
     };
 
-    $intent = $call($prompt);
+    $intent = $call($promptWithCtx);
     $err = ai_validate_intent($intent);
     if ($err) {
-        $intent = $call($prompt . "\n\nYour previous response was rejected: " . $err . "\nReturn ONLY the JSON structure specified, obeying the hard limits.");
+        $intent = $call($promptWithCtx . "\n\nYour previous response was rejected: " . $err . "\nReturn ONLY the JSON structure specified, obeying the hard limits.");
         $err = ai_validate_intent($intent);
         if ($err) {
             // Last-resort fallback
@@ -2775,6 +2784,183 @@ function make_ai_client(array $config, ?string $provider, ?string $model): objec
     return new \SupaBein\FallbackAiClient($config, $chain);
 }
 
+// ─── Reference file attachments (build/edit prompts) ─────────────────────────
+// Lets a build/edit request carry real reference material (a logo to match
+// exactly, a sample document/screenshot to build a schema or UI from)
+// instead of relying entirely on the AI inventing plausible-looking
+// placeholders from a text description alone.
+
+// Binary types sent to the AI as true multimodal attachments (images/PDF —
+// see ai_prepare_attachments_for_ai()); a .docx is unpacked server-side
+// since no provider accepts it directly. Everything in
+// AI_ATTACHMENT_TEXT_MIME is plain-text-ish and needs no extraction at all —
+// its bytes ARE the content, just decoded and dropped straight into the
+// prompt as context.
+const AI_ATTACHMENT_BINARY_MIME = [
+    'image/png', 'image/jpeg', 'image/webp', 'image/gif',
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+];
+const AI_ATTACHMENT_TEXT_MIME = [
+    'text/plain', 'text/markdown', 'text/html', 'text/csv', 'application/json',
+];
+const AI_ATTACHMENT_ALLOWED_MIME = [...AI_ATTACHMENT_BINARY_MIME, ...AI_ATTACHMENT_TEXT_MIME];
+
+const AI_ATTACHMENT_MAX_COUNT       = 8;
+const AI_ATTACHMENT_MAX_BYTES_EACH  = 15 * 1024 * 1024; // 15MB per file
+const AI_ATTACHMENT_MAX_BYTES_TOTAL = 40 * 1024 * 1024; // 40MB combined
+const AI_ATTACHMENT_TEXT_CHARS_CAP  = 12000; // per text/plain-ish file, in the prompt itself
+
+/**
+ * Validates and decodes the `attachments` field of an /v1/ai/build or
+ * /v1/ai/edit request body:
+ *   attachments: [{ filename, mime_type, data_base64 }, ...]
+ * Aborts with 422 on anything invalid rather than silently dropping a file
+ * the caller thinks was included.
+ *
+ * @return array<int, array{filename:string, mime_type:string, bytes:string}>
+ */
+function ai_validate_attachments($raw): array
+{
+    if ($raw === null || $raw === []) return [];
+    if (!is_array($raw)) abort(422, 'attachments must be an array');
+    if (count($raw) > AI_ATTACHMENT_MAX_COUNT) {
+        abort(422, 'Too many attachments (max ' . AI_ATTACHMENT_MAX_COUNT . ')');
+    }
+
+    $out = [];
+    $totalBytes = 0;
+    foreach (array_values($raw) as $i => $item) {
+        if (!is_array($item)) abort(422, "attachments[$i] must be an object");
+        $mime = (string)($item['mime_type'] ?? '');
+        $b64  = (string)($item['data_base64'] ?? '');
+        $name = trim((string)($item['filename'] ?? '')) ?: "attachment-$i";
+        if (!in_array($mime, AI_ATTACHMENT_ALLOWED_MIME, true)) {
+            abort(422, "attachments[$i] (\"$name\"): unsupported file type \"$mime\" — allowed: PNG/JPEG/WEBP/GIF images, "
+                . 'PDF, .docx, or plain text (txt/markdown/html/csv/json)');
+        }
+        $bytes = base64_decode($b64, true);
+        if ($bytes === false || $bytes === '') {
+            abort(422, "attachments[$i] (\"$name\"): data_base64 is missing or not valid base64");
+        }
+        if (strlen($bytes) > AI_ATTACHMENT_MAX_BYTES_EACH) {
+            abort(422, "attachments[$i] (\"$name\") exceeds the " . (AI_ATTACHMENT_MAX_BYTES_EACH / 1024 / 1024) . 'MB per-file limit');
+        }
+        $totalBytes += strlen($bytes);
+        if ($totalBytes > AI_ATTACHMENT_MAX_BYTES_TOTAL) {
+            abort(422, 'Attachments exceed the ' . (AI_ATTACHMENT_MAX_BYTES_TOTAL / 1024 / 1024) . 'MB combined limit');
+        }
+        $out[] = ['filename' => $name, 'mime_type' => $mime, 'bytes' => $bytes];
+    }
+    return $out;
+}
+
+/**
+ * Unpacks a .docx (it's a zip archive) to pull out its embedded media
+ * (logos, watermarks, photos — word/media/*) as images, and its visible
+ * paragraph text (word/document.xml's <w:t> runs) as plain text. Word text
+ * boxes (<w:txbxContent>) aren't specially walked — some real-world letter
+ * templates carry their actual body copy inside one, which this can't see
+ * any more than the schema/frontend prompts could reason about full OOXML
+ * layout either way — but the embedded images (the part that actually
+ * matters most for visual fidelity: logos, watermarks, letterhead art) are
+ * always plain files in the zip regardless of whether they're referenced
+ * from a text box or the main document body, so those are never missed.
+ *
+ * @return array{images: array<int, array{media_type:string, data_base64:string}>, text: string}
+ */
+function ai_extract_docx(string $bytes, string $filename): array
+{
+    $tmp = tempnam(sys_get_temp_dir(), 'sb_docx_');
+    file_put_contents($tmp, $bytes);
+
+    $images = [];
+    $text   = '';
+    $zip = new \ZipArchive();
+    if ($zip->open($tmp) === true) {
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $entry = $zip->getNameIndex($i);
+            if ($entry === false || count($images) >= 6) continue;
+            if (!preg_match('#^word/media/[^/]+\.(png|jpe?g|gif|webp)$#i', $entry, $m)) continue;
+            $data = $zip->getFromIndex($i);
+            if ($data === false) continue;
+            $mime = match (strtolower($m[1])) {
+                'png'          => 'image/png',
+                'jpg', 'jpeg'  => 'image/jpeg',
+                'gif'          => 'image/gif',
+                'webp'         => 'image/webp',
+                default        => null,
+            };
+            if ($mime === null) continue;
+            $images[] = ['media_type' => $mime, 'data_base64' => base64_encode($data)];
+        }
+        $docXml = $zip->getFromName('word/document.xml');
+        if ($docXml !== false && preg_match_all('/<w:t[^>]*>([^<]*)<\/w:t>/', $docXml, $m)) {
+            $text = trim(implode(' ', array_map(
+                fn($s) => html_entity_decode($s, ENT_QUOTES | ENT_XML1),
+                $m[1]
+            )));
+            $text = mb_substr($text, 0, AI_ATTACHMENT_TEXT_CHARS_CAP);
+        }
+        $zip->close();
+    }
+    @unlink($tmp);
+
+    return ['images' => $images, 'text' => $text];
+}
+
+/**
+ * Turns validated request attachments into what the AI clients can actually
+ * consume:
+ *   - images/PDF pass straight through as multimodal attachments
+ *   - .docx has no direct multimodal API support anywhere, so it's unpacked
+ *     instead (see ai_extract_docx())
+ *   - plain-text-ish files (txt/markdown/html/csv/json) need no extraction
+ *     at all — their bytes ARE the content, decoded as UTF-8 and dropped
+ *     straight into the prompt as context, capped per-file so one huge
+ *     upload can't blow out the whole prompt
+ *
+ * @param array<int, array{filename:string, mime_type:string, bytes:string}> $validated
+ * @return array{attachments: array<int, array{media_type:string, data_base64:string}>, context: string}
+ */
+function ai_prepare_attachments_for_ai(array $validated): array
+{
+    $attachments  = [];
+    $contextParts = [];
+
+    foreach ($validated as $item) {
+        if ($item['mime_type'] === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+            $extracted = ai_extract_docx($item['bytes'], $item['filename']);
+            foreach ($extracted['images'] as $img) $attachments[] = $img;
+            if ($extracted['text'] !== '') {
+                $contextParts[] = "--- Text extracted from \"{$item['filename']}\" ---\n" . $extracted['text'];
+            }
+        } elseif (in_array($item['mime_type'], AI_ATTACHMENT_TEXT_MIME, true)) {
+            $text = mb_substr(
+                mb_convert_encoding($item['bytes'], 'UTF-8', 'UTF-8, ISO-8859-1'),
+                0,
+                AI_ATTACHMENT_TEXT_CHARS_CAP
+            );
+            if (trim($text) !== '') {
+                $contextParts[] = "--- Contents of \"{$item['filename']}\" ({$item['mime_type']}) ---\n" . $text;
+            }
+        } else {
+            $attachments[] = ['media_type' => $item['mime_type'], 'data_base64' => base64_encode($item['bytes'])];
+        }
+    }
+
+    return ['attachments' => $attachments, 'context' => implode("\n\n", $contextParts)];
+}
+
+/** Appended to a system prompt only when the request actually carries attachments. */
+function ai_attachment_instruction_note(): string
+{
+    return "\n\nATTACHMENTS: One or more reference files were uploaded with this request (attached as images/"
+        . 'documents, and/or extracted as text below). Extract concrete details from them — exact colors, '
+        . 'logos, layout, field names, exact wording — and use those details directly instead of inventing '
+        . 'generic placeholders. Do not describe the attachments back to the user; just build to match them.';
+}
+
 // ─── Design brief (pass 1.5) ─────────────────────────────────────────────────
 
 const AI_DESIGN_BRIEF_PROMPT = <<<'PROMPT'
@@ -2821,12 +3007,16 @@ function ai_abort_error(string $stage, string $msg): never
     abort(502, 'AI error', ['stage' => $stage, 'code' => ai_classify_error($msg), 'raw' => $msg]);
 }
 
-function ai_generate_design_brief(object $client, string $prompt, array $schemaPlan): array
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_generate_design_brief(object $client, string $prompt, array $schemaPlan, array $refs = []): array
 {
+    $attachments = $refs['attachments'] ?? [];
     $schemaCtx = ai_schema_to_context($schemaPlan);
-    $userMsg   = "App description: {$prompt}\n\nSchema:\n{$schemaCtx}";
+    $userMsg   = "App description: {$prompt}\n\nSchema:\n{$schemaCtx}"
+               . (!empty($refs['context']) ? "\n\n" . $refs['context'] : '');
+    $systemPrompt = AI_DESIGN_BRIEF_PROMPT . ($attachments || !empty($refs['context']) ? ai_attachment_instruction_note() : '');
     try {
-        $brief = $client->generateJson(AI_DESIGN_BRIEF_PROMPT, $userMsg);
+        $brief = $client->generateJson($systemPrompt, $userMsg, $attachments);
     } catch (\Throwable) {
         return [];
     }
@@ -3786,7 +3976,8 @@ function ai_fetch_page_run(string $script, array $config): array
 // single job. The "confirm each stage" (Review on) flow instead calls
 // ai_run_build_schema_design() and ai_run_build_frontend() as two separate
 // jobs, with a user confirmation in between.
-function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true): array
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true, array $refs = []): array
 {
     $aiTrace = [];
 
@@ -3798,7 +3989,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     if ($approvedIntent === null) {
         $report(['stage' => 'requirements', 'status' => 'start', 'label' => 'Understanding your requirements…']);
         $_t0 = microtime(true);
-        $approvedIntent = ai_generate_intent($client, $prompt, $history);
+        $approvedIntent = ai_generate_intent($client, $prompt, $history, $refs);
         $aiTrace[] = ['stage' => 'intent', 'system' => AI_INTENT_PROMPT, 'history' => $history, 'user_msg' => $prompt, 'response' => $approvedIntent, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
         $actorNames = array_filter(array_map(fn($a) => is_array($a) ? ($a['name'] ?? '') : (string)$a, $approvedIntent['actors'] ?? []));
         $storyCount = array_sum(array_map(fn($a) => is_array($a) ? count($a['stories'] ?? []) : 0, $approvedIntent['actors'] ?? []));
@@ -3806,8 +3997,8 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
                  'detail' => count($actorNames) . ' actor(s): ' . implode(', ', $actorNames) . ' — ' . $storyCount . ' user stor' . ($storyCount === 1 ? 'y' : 'ies')]);
     }
 
-    $schemaResult   = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
-    $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate);
+    $schemaResult   = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report, $refs);
+    $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate, $refs);
 
     return [
         'plan'       => $frontendResult['plan'],
@@ -3828,9 +4019,10 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
 // forever while a completely different, older code path took over instead).
 // Doing deploy+test inside the same job gives them the same resumability
 // as generation for free.
-function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId): array
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId, array $refs = []): array
 {
-    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate);
+    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate, $refs);
 
     $report(['stage' => 'deploy', 'status' => 'start', 'label' => 'Deploying to staging…']);
     $applyResult = ai_execute_build($genResult['plan'], $userId);
@@ -3869,9 +4061,13 @@ function ai_run_build_and_deploy(string $prompt, array $history, ?array $approve
 // "Review" build flow can pause here and let the user confirm the schema and
 // design before any frontend code gets written — the "watch only" (Review
 // off) flow just calls this immediately followed by ai_run_build_frontend().
-function ai_run_build_schema_design(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report): array
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_build_schema_design(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, array $refs = []): array
 {
     $aiTrace = [];
+    $attachments = $refs['attachments'] ?? [];
+    $hasRefs = $attachments || !empty($refs['context']);
+    $schemaSystemPrompt = AI_BUILD_SCHEMA_PROMPT . ($hasRefs ? ai_attachment_instruction_note() : '');
 
     $lockedName = trim((string)($approvedIntent['project_name'] ?? ''));
 
@@ -3883,9 +4079,10 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
     if ($lockedName !== '') {
         $schemaUserMsg .= "\n\nLocked project name — use EXACTLY this as \"project_name\" in your JSON output: {$lockedName}";
     }
+    if (!empty($refs['context'])) $schemaUserMsg .= "\n\n" . $refs['context'];
     $_t0 = microtime(true);
-    $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
-    $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
+    $schemaPlan = $client->generateJsonWithHistory($schemaSystemPrompt, $history, $schemaUserMsg, $attachments);
+    $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => $schemaSystemPrompt, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     $schemaPlan['frontend'] = ['files' => []];
     $schemaPlan = ai_sanitize_plan($schemaPlan);
     if ($lockedName !== '') $schemaPlan['project_name'] = $lockedName;
@@ -3897,8 +4094,8 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
             . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
             . "\nReturn a corrected schema that fixes exactly this problem.";
         $_t0 = microtime(true);
-        $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
-        $aiTrace[] = ['stage' => 'schema_retry', 'system' => AI_BUILD_SCHEMA_PROMPT, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
+        $schemaPlan = $client->generateJsonWithHistory($schemaSystemPrompt, $history, $retryPrompt, $attachments);
+        $aiTrace[] = ['stage' => 'schema_retry', 'system' => $schemaSystemPrompt, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
         $schemaPlan['frontend'] = ['files' => []];
         $schemaPlan = ai_sanitize_plan($schemaPlan);
         if ($lockedName !== '') $schemaPlan['project_name'] = $lockedName;
@@ -3911,7 +4108,7 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
     // ── Stage 2: design brief (best-effort) ───────────────────────────────
     $report(['stage' => 'design', 'status' => 'start', 'label' => 'Choosing a visual design…']);
     $_t0   = microtime(true);
-    $brief = ai_generate_design_brief($client, $prompt, $schemaPlan);
+    $brief = ai_generate_design_brief($client, $prompt, $schemaPlan, $refs);
     if (!empty($brief)) {
         $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     }
@@ -3924,7 +4121,8 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
 // schema and design brief, then deterministic validation. Split out so the
 // "Review" build flow can run this as its own job, after the user has
 // confirmed the schema/design in the previous stage.
-function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true): array
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true, array $refs = []): array
 {
     // ── Stage 3: frontend — agentic tool-calling loop (search/read/write/
     // syntax-check), same machinery the edit agent uses, instead of a single
@@ -3933,7 +4131,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     // wrote earlier before extending it, instead of hoping a one-shot
     // multi-file JSON blob comes back internally consistent.
     $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
-    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report);
+    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report, $refs);
     $aiTrace   = $frontendResult['aiTrace'];
     $feUsage   = $frontendResult['usage'];
 
@@ -4326,11 +4524,14 @@ function ai_edit_agent_step_label(string $tool, array $args): string
 // 'incomplete' (bool), and when true, 'resume_state'/'turns_used' — the
 // turn-budget-exhausted case a follow-up request can pass back in via
 // $resumeState to continue this exact session instead of starting over.
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
 function ai_run_edit_generation_agentic(
     string $prompt, array $history, array $existingSchema, array $currentFiles,
-    object $client, array $config, callable $report, int $projectId, ?array $resumeState = null
+    object $client, array $config, callable $report, int $projectId, ?array $resumeState = null, array $refs = []
 ): array {
-    $editAgentPrompt = ai_bind_auth_placeholders(AI_EDIT_AGENT_SYSTEM_PROMPT, $existingSchema);
+    $hasRefs         = !empty($refs['attachments']) || !empty($refs['context']);
+    $editAgentPrompt = ai_bind_auth_placeholders(AI_EDIT_AGENT_SYSTEM_PROMPT, $existingSchema)
+                     . ($hasRefs ? ai_attachment_instruction_note() : '');
     $schemaCtx       = ai_schema_to_context($existingSchema);
 
     $byPath = [];
@@ -4368,6 +4569,7 @@ function ai_run_edit_generation_agentic(
     } else {
         $turnMsg = "Exact schema:\n{$schemaCtx}\n\nFile listing (" . count($byPath) . " files): "
                  . implode(', ', array_keys($byPath)) . "\n\nRequest: {$prompt}\n\n"
+                 . (!empty($refs['context']) ? "{$refs['context']}\n\n" : '')
                  . 'Respond with your first tool action.';
         $loopHistory = $history;
     }
@@ -4376,7 +4578,10 @@ function ai_run_edit_generation_agentic(
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
         try {
-            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg);
+            // Same one-time-only attach as the frontend build agent — see its
+            // matching comment in ai_run_build_frontend_agentic().
+            $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
+            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg, $turnAttachments);
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
                 throw new \RuntimeException('AI provider error during edit generation: ' . $e->getMessage());
@@ -4487,11 +4692,14 @@ function ai_run_edit_generation_agentic(
 // agent above, starting from zero files. Returns ['files'=>[...], 'aiTrace'=>[...],
 // 'usage'=>[...]] — the exact shape ai_run_build_frontend()'s old single-shot
 // $frontendResult had, so the surgical swap there needs no other changes.
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
 function ai_run_build_frontend_agentic(
-    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report
+    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, array $refs = []
 ): array {
     $briefCtx    = ai_brief_to_context($designBrief);
-    $agentPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT, $schemaPlan);
+    $hasRefs     = !empty($refs['attachments']) || !empty($refs['context']);
+    $agentPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT, $schemaPlan)
+                 . ($hasRefs ? ai_attachment_instruction_note() : '');
     $schemaCtx   = ai_schema_to_context($schemaPlan);
 
     $byPath       = []; // a fresh build starts with nothing on disk
@@ -4504,6 +4712,7 @@ function ai_run_build_frontend_agentic(
     $turnMsg = "App description: {$prompt}\n\n"
              . ($briefCtx ? "{$briefCtx}\n\n" : '')
              . "Exact validated schema — use ONLY these column names in JS:\n{$schemaCtx}\n\n"
+             . (!empty($refs['context']) ? "{$refs['context']}\n\n" : '')
              . 'Respond with your first tool action.';
     $loopHistory = [];
     $recentCalls = [];
@@ -4511,7 +4720,13 @@ function ai_run_build_frontend_agentic(
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
         try {
-            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
+            // Reference images/PDFs only need to be seen once — attaching
+            // them to every turn of a loop that can run dozens of tool calls
+            // would multiply the token cost of the request for no benefit,
+            // since the model already has whatever it extracted from them in
+            // its own running context after turn 1.
+            $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
+            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg, $turnAttachments);
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
                 throw new \RuntimeException('AI provider error during frontend generation: ' . $e->getMessage());
@@ -4589,7 +4804,8 @@ function ai_run_build_frontend_agentic(
     return ['files' => $files, 'aiTrace' => $aiTrace, 'usage' => $totalUsage];
 }
 
-function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true, ?array $resumeState = null): array
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true, ?array $resumeState = null, array $refs = []): array
 {
     $aiTrace = [];
 
@@ -4626,7 +4842,7 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     $report(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
 
     $report(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
-    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId, $resumeState);
+    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId, $resumeState, $refs);
     $aiTrace     = array_merge($aiTrace, $delta['aiTrace']);
     $editUsage   = $delta['usage'];
     $incomplete  = $delta['incomplete'] ?? false;
