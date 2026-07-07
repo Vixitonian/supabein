@@ -916,7 +916,7 @@ const api = (() => {
   const list   = async (table)         => unwrap(await req(base(table)));
   const get    = async (table, id)     => req(`${base(table)}/${id}`);
   const create = async (table, data)   => req(base(table), { method: 'POST',   body: JSON.stringify(data) });
-  const update = async (table, id, d)  => req(`${base(table)}/${id}`, { method: 'PUT', body: JSON.stringify(d) });
+  const update = async (table, id, d)  => req(`${base(table)}/${id}`, { method: 'PATCH', body: JSON.stringify(d) });
   const remove = async (table, id)     => req(`${base(table)}/${id}`, { method: 'DELETE' });
   return { list, get, create, update, remove };
 })();
