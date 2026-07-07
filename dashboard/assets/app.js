@@ -1825,11 +1825,18 @@ const AiPanel = (() => {
       if (hadNewEvents && sess) persistSession(sess).catch(() => {});
 
       if (job.status === 'done') {
+        // A background/foreground cycle can leave two pollJob loops racing
+        // the same jobId (see resumeActiveJobIfAny) — whichever gets here
+        // first wins and flips jobDone; the loser must not also dispatch
+        // onComplete, or the caller ends up applying/rendering the same
+        // finished job twice (e.g. two "Here's my plan" cards).
+        if (progressMsg.data.jobDone) return null;
         progressMsg.data.jobDone = true;
         attachTraceToStages(progressMsg, job.result?.aiTrace);
         return { stage: 'complete', ...job.result };
       }
       if (job.status === 'failed' || job.status === 'cancelled') {
+        if (progressMsg.data.jobDone) return null;
         progressMsg.data.jobDone = true;
         const active = progressMsg.data.stages.find(s => s.status === 'active');
         if (active) active.status = 'error';
