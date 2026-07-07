@@ -32,19 +32,29 @@ class GeminiClient
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJson(string $systemPrompt, string $userPrompt): array
+    /**
+     * @param array<int, array{media_type:string, data_base64:string}> $attachments
+     *   Reference images/PDFs to ground the response in — e.g. a logo to match
+     *   exactly, or a sample document to build a schema/UI from, rather than
+     *   inventing plausible-looking placeholders. Gemini accepts both image/*
+     *   and application/pdf as inlineData.
+     */
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
     {
-        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt);
+        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments);
     }
 
     /**
      * Send a multi-turn conversation and return parsed JSON.
      *
      * $history is an array of ['role' => 'user'|'model', 'text' => string].
+     * $attachments (only ever attached to the final/current user turn, never
+     * to history — see generateJson()'s doc comment) are inlineData parts:
+     * ['media_type' => 'image/png'|'application/pdf'|..., 'data_base64' => string].
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
     {
         $url  = sprintf(self::ENDPOINT, urlencode($this->model));
         $url .= '?key=' . urlencode($this->apiKey);
@@ -54,7 +64,12 @@ class GeminiClient
             if (!isset($turn['role'], $turn['text'])) continue;
             $contents[] = ['role' => $turn['role'], 'parts' => [['text' => $turn['text']]]];
         }
-        $contents[] = ['role' => 'user', 'parts' => [['text' => $userPrompt]]];
+        $userParts = [['text' => $userPrompt]];
+        foreach ($attachments as $att) {
+            if (!isset($att['media_type'], $att['data_base64'])) continue;
+            $userParts[] = ['inlineData' => ['mimeType' => $att['media_type'], 'data' => $att['data_base64']]];
+        }
+        $contents[] = ['role' => 'user', 'parts' => $userParts];
 
         $payload = json_encode([
             'systemInstruction' => ['parts' => [['text' => $systemPrompt]]],

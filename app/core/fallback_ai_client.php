@@ -76,14 +76,14 @@ class FallbackAiClient
         return method_exists($this->client, 'getLastRawText') ? $this->client->getLastRawText() : '';
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt): array
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
     {
-        return $this->call(fn(object $c): array => $c->generateJson($systemPrompt, $userPrompt));
+        return $this->call(fn(object $c): array => $c->generateJson($systemPrompt, $userPrompt, $attachments));
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
     {
-        return $this->call(fn(object $c): array => $c->generateJsonWithHistory($systemPrompt, $history, $userPrompt));
+        return $this->call(fn(object $c): array => $c->generateJsonWithHistory($systemPrompt, $history, $userPrompt, $attachments));
     }
 
     private function call(\Closure $invoke): array

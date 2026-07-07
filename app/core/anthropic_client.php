@@ -40,9 +40,16 @@ class AnthropicClient
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJson(string $systemPrompt, string $userPrompt): array
+    /**
+     * @param array<int, array{media_type:string, data_base64:string}> $attachments
+     *   Reference images/PDFs to ground the response in — e.g. a logo to
+     *   match exactly, or a sample document to build a schema/UI from,
+     *   rather than inventing plausible-looking placeholders. Claude accepts
+     *   images as 'image' blocks and PDFs natively as 'document' blocks.
+     */
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
     {
-        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt);
+        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments);
     }
 
     /**
@@ -50,10 +57,12 @@ class AnthropicClient
      *
      * $history is an array of ['role' => 'user'|'model', 'text' => string].
      * Anthropic uses 'assistant' rather than 'model' for the model's turns.
+     * $attachments (only ever attached to the final/current user turn, never
+     * to history) are ['media_type' => ..., 'data_base64' => ...] pairs.
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
     {
         $messages = [];
         foreach ($history as $turn) {
@@ -61,7 +70,19 @@ class AnthropicClient
             $role = $turn['role'] === 'model' ? 'assistant' : $turn['role'];
             $messages[] = ['role' => $role, 'content' => $turn['text']];
         }
-        $messages[] = ['role' => 'user', 'content' => $userPrompt];
+        if ($attachments) {
+            $content = [];
+            foreach ($attachments as $att) {
+                if (!isset($att['media_type'], $att['data_base64'])) continue;
+                $content[] = $att['media_type'] === 'application/pdf'
+                    ? ['type' => 'document', 'source' => ['type' => 'base64', 'media_type' => 'application/pdf', 'data' => $att['data_base64']]]
+                    : ['type' => 'image', 'source' => ['type' => 'base64', 'media_type' => $att['media_type'], 'data' => $att['data_base64']]];
+            }
+            $content[] = ['type' => 'text', 'text' => $userPrompt];
+            $messages[] = ['role' => 'user', 'content' => $content];
+        } else {
+            $messages[] = ['role' => 'user', 'content' => $userPrompt];
+        }
 
         $probeKey  = 'anthropic:' . $this->model;
         $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);

@@ -36,15 +36,23 @@ class OpenRouterClient
         return $this->lastRawText;
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt): array
+    /**
+     * @param array<int, array{media_type:string, data_base64:string}> $attachments
+     *   Reference images to ground the response in. Only image/* is sent —
+     *   OpenRouter fans out to many different underlying models and not all
+     *   of them support document/PDF input via the OpenAI-compatible schema,
+     *   so a PDF attachment is silently dropped here rather than risking a
+     *   hard failure on what's meant to be a resilient fallback path.
+     */
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
-            ['role' => 'user',   'content' => $userPrompt],
+            ['role' => 'user',   'content' => self::userContent($userPrompt, $attachments)],
         ]);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {
@@ -55,8 +63,21 @@ class OpenRouterClient
                 'content' => $turn['text'],
             ];
         }
-        $messages[] = ['role' => 'user', 'content' => $userPrompt];
+        $messages[] = ['role' => 'user', 'content' => self::userContent($userPrompt, $attachments)];
         return $this->call($messages);
+    }
+
+    /** @return string|array Plain text when there's nothing to attach, else OpenAI-style content parts. */
+    private static function userContent(string $userPrompt, array $attachments)
+    {
+        $images = array_values(array_filter($attachments, fn($a) => isset($a['media_type'], $a['data_base64']) && str_starts_with($a['media_type'], 'image/')));
+        if (!$images) return $userPrompt;
+
+        $content = [['type' => 'text', 'text' => $userPrompt]];
+        foreach ($images as $att) {
+            $content[] = ['type' => 'image_url', 'image_url' => ['url' => 'data:' . $att['media_type'] . ';base64,' . $att['data_base64']]];
+        }
+        return $content;
     }
 
     private function call(array $messages): array
