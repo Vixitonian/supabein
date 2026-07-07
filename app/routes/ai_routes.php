@@ -4590,6 +4590,16 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
     foreach (['insufficient credit', 'add credit', 'add 10 credits', 'quota exceeded', 'exceeded your current quota', 'invalid api key', 'unauthorized'] as $needle) {
         if (str_contains($msg, $needle)) return true;
     }
+    // Live-caught: attaching an image to a build/edit request can land on a
+    // text-only model deep in the OpenRouter/NVIDIA fallback chain (not
+    // every model of the several dozen routed through OPENROUTER's tiers
+    // supports vision), which rejects the request outright instead of just
+    // ignoring the image — e.g. OpenRouter's "No endpoints found that
+    // support image input". Without this, the whole job hard-fails instead
+    // of moving on to the next candidate the same way a rate limit does.
+    foreach (['support image input', 'support images', 'does not support vision', 'multimodal messages are not supported', 'image_url is not supported'] as $needle) {
+        if (str_contains($msg, $needle)) return true;
+    }
     return false;
 }
 
