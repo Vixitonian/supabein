@@ -2371,7 +2371,15 @@ const AiPanel = (() => {
     if (data.error && !TEST_INFRA_ERRORS.includes(data.error)) {
       parts.push('The test run itself failed with this error:\n' + truncateText(data.error, 300));
     }
-    const failedStories = (data.stories || []).filter(s => !s.passed);
+    // A story the test agent never actually got to (ran out of its turn
+    // share) is NOT evidence of a bug — it's an inconclusive result. Live-
+    // caught: bundling those in with real failures under "fix these" sent
+    // the edit agent hunting for bugs in features nothing had ever shown
+    // broken, burning its entire turn budget and fixing nothing. Only a
+    // story the test agent actually observed failing belongs in front of
+    // the edit agent as something to fix.
+    const failedStories  = (data.stories || []).filter(s => !s.passed && !s.skipped);
+    const skippedStories = (data.stories || []).filter(s => !s.passed && s.skipped);
     if (failedStories.length) {
       parts.push('Fix these failing test stories:\n' + failedStories.map(s =>
         `- ${s.label}` + (s.detail ? `: ${truncateText(s.detail, 200)}` : '')).join('\n'));
@@ -2380,6 +2388,16 @@ const AiPanel = (() => {
     if (issues.length) {
       parts.push('Fix these validation issues:\n' + issues.map(f =>
         `- [${f.severity}] ${f.message}` + (f.explanation ? ` — ${truncateText(f.explanation, 150)}` : '')).join('\n'));
+    }
+    // Skipped stories aren't something to fix — if that's ALL there is (no
+    // confirmed failures, no validation issues), there's nothing for the edit
+    // agent to actually do, so don't fire a pointless edit request just to
+    // tell it "don't guess." Only tack the skipped note onto a prompt that
+    // already has real, actionable content.
+    if (parts.length && skippedStories.length) {
+      parts.push('These stories were never actually tested (the test run ran out of turns before reaching '
+        + 'them) — do NOT guess at fixing them, they are not confirmed broken:\n'
+        + skippedStories.map(s => `- ${s.label}`).join('\n'));
     }
     if (!parts.length) return '';
     const suffix = '\n\nFix all of the above without changing anything else.';
@@ -2465,20 +2483,25 @@ const AiPanel = (() => {
     if (stories.length) {
       const list = el('div', { style: 'padding:10px 14px;display:flex;flex-direction:column;gap:4px' });
       stories.forEach(s => {
-        const icon  = s.passed ? '✓' : '✗';
-        const color = s.passed ? '#22c55e' : 'var(--danger)';
+        // A skipped story (ran out of turn budget, never actually observed
+        // either way) is visually distinct from a real, confirmed failure —
+        // amber "?" vs red "✗" — so a glance at this card can't mistake
+        // "untested" for "broken", the exact conflation that sent an earlier
+        // Resolve run hunting for bugs that were never shown to exist.
+        const icon  = s.passed ? '✓' : s.skipped ? '?' : '✗';
+        const color = s.passed ? '#22c55e' : s.skipped ? '#f59e0b' : 'var(--danger)';
         if (!s.passed && s.detail) {
           const det = el('details', { style: 'font-size:0.8rem' });
-          det.appendChild(el('summary', { style: `display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;padding:1px 0;color:var(--danger)` },
-            el('span', { style: 'color:var(--danger);font-weight:700;flex-shrink:0' }, '✗'),
+          det.appendChild(el('summary', { style: `display:flex;align-items:baseline;gap:8px;cursor:pointer;list-style:none;padding:1px 0;color:${color}` },
+            el('span', { style: `color:${color};font-weight:700;flex-shrink:0` }, icon),
             el('span', {}, s.label)
           ));
-          det.appendChild(el('div', { style: 'margin:4px 0 4px 18px;font-size:0.72rem;color:var(--text-muted);background:rgba(239,68,68,0.06);padding:6px 8px;border-radius:4px;border-left:2px solid var(--danger);white-space:pre-wrap;word-break:break-all' }, s.detail));
+          det.appendChild(el('div', { style: `margin:4px 0 4px 18px;font-size:0.72rem;color:var(--text-muted);background:rgba(239,68,68,0.06);padding:6px 8px;border-radius:4px;border-left:2px solid ${color};white-space:pre-wrap;word-break:break-all` }, s.detail));
           list.appendChild(det);
         } else {
           list.appendChild(el('div', { style: 'display:flex;align-items:baseline;gap:8px;font-size:0.8rem' },
             el('span', { style: `color:${color};font-weight:700;flex-shrink:0` }, icon),
-            el('span', { style: `color:${s.passed ? 'var(--text)' : 'var(--danger)'}` }, s.label)
+            el('span', { style: `color:${s.passed ? 'var(--text)' : color}` }, s.label)
           ));
         }
       });
@@ -2513,7 +2536,11 @@ const AiPanel = (() => {
         renderValidationExplainer(), renderValidationList(validation)));
     }
 
-    const hasIssues = failed > 0 || (!!error && !TEST_INFRA_ERRORS.includes(error)) || validation.some(f => f.severity === 'error' || f.severity === 'warning');
+    // A skipped story alone isn't something Resolve can act on — only count
+    // it toward showing the button if at least one story is a CONFIRMED
+    // failure (never skipped), same distinction buildResolvePrompt() makes.
+    const hasConfirmedFailure = stories.some(s => !s.passed && !s.skipped);
+    const hasIssues = hasConfirmedFailure || (!!error && !TEST_INFRA_ERRORS.includes(error)) || validation.some(f => f.severity === 'error' || f.severity === 'warning');
     const cardActions = el('div', { style: 'padding:10px 14px;display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--border)' });
     const downloadBtn = el('button', { class: 'btn btn-secondary btn-sm' }, '⭳ Download JSON');
     downloadBtn.addEventListener('click', () => downloadJson(`sb-report-${msg.id || Date.now()}.json`,

@@ -5385,7 +5385,16 @@ function ai_run_browser_test_agent(
         $perStoryBudget = max(4, (int)floor($turnsLeft / max(1, $storiesLeft)));
         if (count($recorded) < count($stories) && ($turn - $turnsAtLastReport) > $perStoryBudget) {
             $stuckStory = $stories[count($recorded)];
-            $recorded[] = ['label' => $stuckStory, 'passed' => false,
+            // 'skipped' (never actually observed either way) is a materially
+            // different signal than a real, observed failure — conflating the
+            // two as one flat 'passed: false' bucket is what let a Resolve
+            // run burn its entire turn budget hunting for bugs in features
+            // that were never actually shown broken, live-caught fixing
+            // nothing for project 30. 'passed' stays false so every existing
+            // consumer (pass/fail counts, dashboard summaries) keeps working
+            // unchanged; 'skipped' is purely additive for anything that wants
+            // to tell the two apart.
+            $recorded[] = ['label' => $stuckStory, 'passed' => false, 'skipped' => true,
                 'detail' => "Exceeded its share of the run's turn budget ({$perStoryBudget} turns) — moved on so later stories still get tested"];
             $turnsAtLastReport = $turn;
             $turnMsg = json_encode(['tool' => 'system', 'note' =>
@@ -5481,7 +5490,7 @@ function ai_run_browser_test_agent(
             $alreadyCovered = false;
             foreach ($reportedLabels as $rl) if (str_contains($rl, $s) || str_contains($s, $rl)) { $alreadyCovered = true; break; }
             if (!$alreadyCovered) {
-                $recorded[] = ['label' => $s, 'passed' => false, 'detail' => 'Turn budget exhausted before this story could be tested'];
+                $recorded[] = ['label' => $s, 'passed' => false, 'skipped' => true, 'detail' => 'Turn budget exhausted before this story could be tested'];
             }
         }
     }
