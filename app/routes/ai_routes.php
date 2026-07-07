@@ -98,12 +98,27 @@ Rules:
   relation) rather than the bare minimum implied by a short request.
 
 AUTHENTICATION (read carefully — this is the most common design failure):
-- If the app stores or scopes data per user — anything involving "my", accounts, profiles,
-  carts, orders, posts-by-author, ownership, roles, or login — you MUST include exactly ONE
-  users table that has a column of type PASSWORD (e.g. {"name":"email","type":"VARCHAR(255)"}
-  plus {"name":"password","type":"PASSWORD"}). Without a PASSWORD column the platform cannot
-  issue a login token, so :current_user_id is always empty and every owner-scoped table is
-  permanently inaccessible.
+- Auth exists to keep DIFFERENT people's data apart from each other — it is not a tax on the
+  word "my". Add a users table with login ONLY when the description signals that multiple
+  distinct people will use the app and each needs their OWN private data that others can't see
+  or edit — e.g. "so my team can each track their own tasks", "customers can sign up and view
+  their orders", "let users create accounts", "each member has a private journal", "restrict
+  this to logged-in users". A single owner using a personal tool is NOT that signal by itself —
+  "track my widgets", "a to-do list for me", "log my workouts" normally mean exactly one
+  "owner" actor and nobody else ever using this deployment, so there's nothing to protect data
+  FROM: use anon policies, wide open, same as a public tool.
+- Adding login/signup to a single-actor app is a hard failure, not a safe default: it commits
+  the frontend build to auth forms/routes that add pure friction (there's only ever one person
+  using this deployment either way, logged in or not), and if the frontend generation pass
+  doesn't fully build them out, the entire app is broken behind a login it never needed.
+- If genuinely unsure whether multiple people are really involved, prefer NO auth. It's a cheap
+  edit to add later if it turns out several people do need separated accounts; a wrongly-added
+  login is a fully broken app the instant the frontend doesn't finish building it.
+- When auth IS actually warranted (multiple real actors, or an explicit privacy/login request),
+  include exactly ONE users table that has a column of type PASSWORD (e.g.
+  {"name":"email","type":"VARCHAR(255)"} plus {"name":"password","type":"PASSWORD"}). Without a
+  PASSWORD column the platform cannot issue a login token, so :current_user_id is always empty
+  and every owner-scoped table is permanently inaccessible.
 - The users table MUST include "anon INSERT allowed" in its policies. Signup calls POST /data/:pid/users
   without a token (the user is not yet authenticated), so anon INSERT must be allowed or every
   registration attempt will return 403 Forbidden. Example minimal policy set for users:
@@ -2912,21 +2927,43 @@ function ai_extract_docx(string $bytes, string $filename): array
 /**
  * Turns validated request attachments into what the AI clients can actually
  * consume:
- *   - images/PDF pass straight through as multimodal attachments
+ *   - images/PDF pass straight through as multimodal attachments (so the AI
+ *     can SEE them — match colors, read a layout, etc.)
+ *   - a directly-uploaded image is ALSO persisted as a real project asset
+ *     (see below) so it can be used as-is (a logo, a photo) rather than
+ *     just looked at for inspiration
  *   - .docx has no direct multimodal API support anywhere, so it's unpacked
- *     instead (see ai_extract_docx())
+ *     instead (see ai_extract_docx()) — its embedded images are treated as
+ *     reference material only, not uploaded as standalone assets, since an
+ *     image buried inside a reference document is rarely "the logo" itself
  *   - plain-text-ish files (txt/markdown/html/csv/json) need no extraction
  *     at all — their bytes ARE the content, decoded as UTF-8 and dropped
  *     straight into the prompt as context, capped per-file so one huge
  *     upload can't blow out the whole prompt
  *
+ * Persisting an uploaded image as a real asset needs a project to store it
+ * under. For an edit, $projectId is already known, so it's uploaded
+ * immediately and the AI is told its real URL. For a fresh build, no
+ * project exists yet — the file is staged in the returned 'pending_assets'
+ * list instead, and the AI is told the URL it WILL have (using the same
+ * __SB_PID__ placeholder ai_deploy_files() already substitutes into every
+ * deployed file), so the caller can actually write the bytes once
+ * ai_execute_build() creates the real project (see ai_run_build_and_deploy()).
+ *
  * @param array<int, array{filename:string, mime_type:string, bytes:string}> $validated
- * @return array{attachments: array<int, array{media_type:string, data_base64:string}>, context: string}
+ * @return array{
+ *   attachments: array<int, array{media_type:string, data_base64:string}>,
+ *   context: string,
+ *   pending_assets: array<int, array{filename:string, bytes:string}>
+ * }
  */
-function ai_prepare_attachments_for_ai(array $validated): array
+function ai_prepare_attachments_for_ai(array $validated, ?int $projectId = null): array
 {
-    $attachments  = [];
-    $contextParts = [];
+    $attachments    = [];
+    $contextParts   = [];
+    $pendingAssets  = [];
+    $usedNames      = [];
+    $assetLines     = [];
 
     foreach ($validated as $item) {
         if ($item['mime_type'] === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
@@ -2935,7 +2972,10 @@ function ai_prepare_attachments_for_ai(array $validated): array
             if ($extracted['text'] !== '') {
                 $contextParts[] = "--- Text extracted from \"{$item['filename']}\" ---\n" . $extracted['text'];
             }
-        } elseif (in_array($item['mime_type'], AI_ATTACHMENT_TEXT_MIME, true)) {
+            continue;
+        }
+
+        if (in_array($item['mime_type'], AI_ATTACHMENT_TEXT_MIME, true)) {
             $text = mb_substr(
                 mb_convert_encoding($item['bytes'], 'UTF-8', 'UTF-8, ISO-8859-1'),
                 0,
@@ -2944,12 +2984,80 @@ function ai_prepare_attachments_for_ai(array $validated): array
             if (trim($text) !== '') {
                 $contextParts[] = "--- Contents of \"{$item['filename']}\" ({$item['mime_type']}) ---\n" . $text;
             }
-        } else {
-            $attachments[] = ['media_type' => $item['mime_type'], 'data_base64' => base64_encode($item['bytes'])];
+            continue;
+        }
+
+        $attachments[] = ['media_type' => $item['mime_type'], 'data_base64' => base64_encode($item['bytes'])];
+
+        if (str_starts_with($item['mime_type'], 'image/')) {
+            $assetName = ai_dedupe_asset_filename($item['filename'], $item['mime_type'], $usedNames);
+            if ($projectId !== null) {
+                $stored = \SupaBein\Storage::putBytes($projectId, 'assets', $assetName, $item['bytes']);
+                $assetLines[] = "- \"{$item['filename']}\" is now stored at: {$stored['url']}";
+            } else {
+                $pendingAssets[] = ['filename' => $assetName, 'bytes' => $item['bytes']];
+                $assetLines[] = "- \"{$item['filename']}\" WILL be stored at: /api/v1/storage/__SB_PID__/assets/{$assetName} "
+                    . '(write that exact literal path — including __SB_PID__ verbatim — into your generated code; '
+                    . 'it is substituted with the real project ID automatically at deploy time)';
+            }
         }
     }
 
-    return ['attachments' => $attachments, 'context' => implode("\n\n", $contextParts)];
+    if ($assetLines) {
+        $contextParts[] = "--- Uploaded image files (real, working assets — not just visual reference) ---\n"
+            . implode("\n", $assetLines)
+            . "\nIf the request implies using one of these directly (e.g. \"use this as the logo\"), reference "
+            . 'its exact URL above in your generated code (an <img> src, a CSS background-image, etc.) instead '
+            . 'of inventing a placeholder image or a different source.';
+    }
+
+    return ['attachments' => $attachments, 'context' => implode("\n\n", $contextParts), 'pending_assets' => $pendingAssets];
+}
+
+/** Sanitizes an original filename into a safe, collision-free asset filename within one request's scope. */
+function ai_dedupe_asset_filename(string $originalFilename, string $mimeType, array &$usedNames): string
+{
+    $ext = match ($mimeType) {
+        'image/png'  => 'png',
+        'image/jpeg' => 'jpg',
+        'image/webp' => 'webp',
+        'image/gif'  => 'gif',
+        default      => 'bin',
+    };
+    $base = strtolower(pathinfo($originalFilename, PATHINFO_FILENAME));
+    $base = trim(preg_replace('/[^a-z0-9_-]+/', '-', $base) ?? '', '-');
+    if ($base === '') $base = 'asset';
+
+    $name = "{$base}.{$ext}";
+    $i = 2;
+    while (isset($usedNames[$name])) {
+        $name = "{$base}-{$i}.{$ext}";
+        $i++;
+    }
+    $usedNames[$name] = true;
+    return $name;
+}
+
+/**
+ * Writes out the images ai_prepare_attachments_for_ai() staged as
+ * 'pending_assets' (uploaded before a project existed) now that a real
+ * project ID is available — see the doc comment on ai_prepare_attachments_for_ai().
+ *
+ * @param array<int, array{filename:string, bytes:string}> $pendingAssets
+ */
+function ai_upload_pending_assets(array $pendingAssets, int $projectId): void
+{
+    foreach ($pendingAssets as $asset) {
+        try {
+            \SupaBein\Storage::putBytes($projectId, 'assets', $asset['filename'], $asset['bytes']);
+        } catch (\Throwable $e) {
+            // Best-effort — a failed asset write shouldn't fail the whole
+            // build/apply when the schema, tables, and rest of the frontend
+            // already deployed successfully. The generated code's __SB_PID__
+            // URL just 404s for this one file if this happens.
+            sb_log('ai_build', 'Pending asset upload failed: ' . $e->getMessage(), ['project_id' => $projectId, 'filename' => $asset['filename']]);
+        }
+    }
 }
 
 /** Appended to a system prompt only when the request actually carries attachments. */
@@ -2977,13 +3085,13 @@ function ai_validate_attachments_for_job($raw): array
 }
 
 /** Reverses ai_validate_attachments_for_job() and runs ai_prepare_attachments_for_ai() on the result — call once per job in the worker. */
-function ai_job_payload_refs(array $payload): array
+function ai_job_payload_refs(array $payload, ?int $projectId = null): array
 {
     $attachments = array_map(
         fn($a) => ['filename' => $a['filename'] ?? '', 'mime_type' => $a['mime_type'] ?? '', 'bytes' => base64_decode($a['data_base64'] ?? '')],
         $payload['attachments'] ?? []
     );
-    return ai_prepare_attachments_for_ai($attachments);
+    return ai_prepare_attachments_for_ai($attachments, $projectId);
 }
 
 // ─── Design brief (pass 1.5) ─────────────────────────────────────────────────
@@ -4051,6 +4159,14 @@ function ai_run_build_and_deploy(string $prompt, array $history, ?array $approve
 
     $report(['stage' => 'deploy', 'status' => 'start', 'label' => 'Deploying to staging…']);
     $applyResult = ai_execute_build($genResult['plan'], $userId);
+    // Uploaded reference images (e.g. "use this as the logo") were staged as
+    // 'pending_assets' during generation, before a project existed to store
+    // them under — write the actual bytes now that ai_execute_build() has
+    // created one, so the __SB_PID__-placeholder URLs already baked into the
+    // generated frontend resolve to real files the moment it's viewed.
+    if (!empty($refs['pending_assets']) && !empty($applyResult['project']['id'])) {
+        ai_upload_pending_assets($refs['pending_assets'], (int)$applyResult['project']['id']);
+    }
     $report(['stage' => 'deploy', 'status' => 'done', 'label' => 'Deployed',
              'detail' => $applyResult['staging'] ? 'Deployed to staging' : ($applyResult['site'] ? 'Site created — no frontend deployed' : 'No site created')]);
 
@@ -6108,6 +6224,9 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         // ── 4-7. Execute build ────────────────────────────────────────────────
         $result = ai_execute_build($plan, $userId);
+        if (!empty($refs['pending_assets']) && !empty($result['project']['id'])) {
+            ai_upload_pending_assets($refs['pending_assets'], (int)$result['project']['id']);
+        }
         json_out($result, 201);
 
     }, ['auth_middleware']);
@@ -6177,7 +6296,9 @@ function register_ai_routes(\SupaBein\Router $router): void
 
         // Reference files (a screenshot of the change wanted, a document to
         // pull new copy from, etc.) — see ai_prepare_attachments_for_ai().
-        $refs = ai_prepare_attachments_for_ai(ai_validate_attachments($req['body']['attachments'] ?? null));
+        // $projectId already exists here, so an uploaded image is uploaded
+        // to real storage immediately and the AI gets its real URL.
+        $refs = ai_prepare_attachments_for_ai(ai_validate_attachments($req['body']['attachments'] ?? null), $projectId);
         $hasRefs = !empty($refs['attachments']) || $refs['context'] !== '';
 
         $userMessage = "Current schema:\n" . $schemaContext . "\n\nRequested change: " . $prompt;
@@ -6864,6 +6985,17 @@ PROMPT;
             if ($validationError) abort(422, 'Invalid plan: ' . $validationError);
 
             $result = ai_execute_build($plan, $userId);
+            // Review-on's stage 1/2 jobs ran before any project existed, so
+            // the generated frontend (if it references an uploaded logo/
+            // image at all) uses the __SB_PID__-placeholder path — the
+            // project now exists, so upload straight to it with the SAME
+            // deterministic filename ai_dedupe_asset_filename() would have
+            // produced during generation (same attachments, same order in
+            // → same name out). The caller resends the same `attachments`
+            // it sent to build-schema/job for this to have anything to upload.
+            if (!empty($result['project']['id'])) {
+                ai_prepare_attachments_for_ai(ai_validate_attachments($req['body']['attachments'] ?? null), (int)$result['project']['id']);
+            }
             json_out($result, 201);
 
         } elseif ($mode === 'edit') {

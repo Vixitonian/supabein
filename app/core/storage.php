@@ -45,6 +45,40 @@ class Storage
 
     // ── Upload ────────────────────────────────────────────────────────────────
 
+    /**
+     * Writes raw bytes directly into a project's bucket — for backend code
+     * that already has file content in memory (e.g. an AI build/edit request
+     * attachment meant to become a real project asset) rather than a live
+     * PHP multipart upload. Reuses the same validation/limits as upload().
+     *
+     * @return array{name:string, bucket:string, size:int, url:string}
+     */
+    public static function putBytes(int $projectId, string $bucket, string $filename, string $bytes): array
+    {
+        $bucket   = self::validBucket($bucket);
+        $filename = self::validFilename($filename);
+        if (strlen($bytes) > self::MAX_FILE_SIZE) {
+            abort(413, 'File exceeds the 50 MB limit');
+        }
+
+        $dir = self::bucketDir($projectId, $bucket);
+        if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
+            abort(500, 'Could not create storage directory');
+        }
+
+        $dest = $dir . '/' . $filename;
+        if (file_put_contents($dest, $bytes) === false) {
+            abort(500, 'Failed to save file');
+        }
+
+        return [
+            'name'   => $filename,
+            'bucket' => $bucket,
+            'size'   => strlen($bytes),
+            'url'    => self::publicUrl($projectId, $bucket, $filename),
+        ];
+    }
+
     public static function upload(array $req): void
     {
         $projectId = (int)$req['params']['project_id'];
