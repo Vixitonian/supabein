@@ -31,7 +31,17 @@ class NvidiaClient
         return $this->lastRawText;
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt): array
+    /**
+     * @param array $attachments Accepted only for interface parity with the
+     *   other provider clients (FallbackAiClient calls generateJson() the
+     *   same way regardless of which candidate is currently active) — the
+     *   NIM-hosted text models this client talks to have no vision input, so
+     *   attachments are silently ignored rather than erroring. That's a
+     *   deliberate degrade: this class is typically reached deep in the
+     *   fallback chain after better options have failed, and dropping an
+     *   image there is preferable to failing the whole request outright.
+     */
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
@@ -39,7 +49,7 @@ class NvidiaClient
         ]);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {

@@ -77,12 +77,13 @@ try {
         $history        = $payload['history'] ?? [];
         $approvedIntent = $payload['intent']  ?? null;
         $validate       = $payload['validate'] ?? true;
+        $refs           = ai_job_payload_refs($payload);
         // The '/v1/ai/build/job' route is only ever used by the Review-off
         // ("watch only") flow now — Review-on uses the separate
         // build_schema/build_frontend jobs below — so it's safe for this one
         // job to also deploy and test, giving the whole pipeline one
         // reload-proof progress trail instead of three separately-tracked steps.
-        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId);
+        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId, $refs);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build'], $result)));
 
     } elseif ($mode === 'build_schema') {
@@ -92,7 +93,8 @@ try {
         $prompt         = $payload['prompt']  ?? '';
         $history        = $payload['history'] ?? [];
         $approvedIntent = $payload['intent']  ?? null;
-        $result = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report);
+        $refs           = ai_job_payload_refs($payload);
+        $result = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report, $refs);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build_schema'], $result)));
 
     } elseif ($mode === 'build_frontend') {
@@ -102,7 +104,8 @@ try {
         $schemaPlan  = $payload['schema']       ?? [];
         $designBrief = $payload['design_brief'] ?? [];
         $validate    = $payload['validate'] ?? true;
-        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate);
+        $refs        = ai_job_payload_refs($payload);
+        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate, $refs);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build_frontend'], $result)));
 
     } elseif ($mode === 'edit') {
@@ -110,6 +113,7 @@ try {
         $prompt    = $payload['prompt']  ?? '';
         $history   = $payload['history'] ?? [];
         $validate  = $payload['validate'] ?? true;
+        $refs      = ai_job_payload_refs($payload);
 
         // Continuing a previous edit job that hit its turn budget without
         // finishing — getJobById scopes by user_id, so this can only ever
@@ -123,7 +127,7 @@ try {
             }
         }
 
-        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate, $resumeState);
+        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate, $resumeState, $refs);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'edit'], $result)));
 
     } elseif ($mode === 'test') {
