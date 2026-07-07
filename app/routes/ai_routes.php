@@ -6707,7 +6707,21 @@ PROMPT;
         $sess = $catalog->getAiSession($sessionId, $userId);
         if (!$sess) abort(404, 'Session not found');
         $newName     = $name ?: $sess['name'];
-        $newMessages = is_array($messages) ? $messages : $sess['messages'];
+        $newMessages = $sess['messages'];
+        if (is_array($messages)) {
+            // Every save here is a full-array overwrite, not an append — so a
+            // client racing an OLDER, shorter in-memory copy against a save
+            // that already landed (a background tab resuming after being
+            // suspended mid-job, a stray retry, two tabs open on the same
+            // session) would otherwise silently erase every card the newer
+            // save had already added, with no error anywhere. Live-caught: an
+            // edit's deploy and a 20-minute auto-test both completed
+            // successfully, but the session's chat history never recorded any
+            // of it past the apply call — the richest history a client has
+            // ever sent for this session should win, not whichever save
+            // happens to land last.
+            $newMessages = count($messages) >= count($sess['messages']) ? $messages : $sess['messages'];
+        }
         $catalog->updateAiSession($sessionId, $userId, $newName, $newMessages);
         // Attach the session to the project a completed build just created —
         // only ever moves a session FROM unassigned TO a project, never away.
