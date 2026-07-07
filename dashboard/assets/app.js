@@ -1693,37 +1693,56 @@ const AiPanel = (() => {
       stages: BUILD_SCHEMA_STAGES,
       mode: 'build_schema',
       title: 'Designing your app',
-      onComplete: (ev) => showSchemaDesignReviewCard(ev.schema, ev.design_brief, body),
+      // Persisted as a real message (not appended straight to the DOM) —
+      // streamGenerate's own finally block calls renderMessages() right
+      // after onComplete returns, which rebuilds .ai-messages from
+      // sess.messages alone; a card that was only ever appended directly
+      // (the old approach here) doesn't survive that rebuild and vanishes
+      // before anyone can click it. Same pattern renderPlanCard already uses.
+      onComplete: async (ev) => {
+        await addMessage(sess.id, { role: 'ai', type: 'schema-design', content: '',
+          data: { schema: ev.schema, design_brief: ev.design_brief, body }, settled: false });
+        renderMessages();
+      },
     }, existingProgressMsg, (msg) => runBuildSchemaDesignStage(body, sess, msg));
   }
 
-  function renderSchemaDesignCard(schema, designBrief, onConfirm, onCancel) {
+  function renderSchemaDesignReviewCard(msg) {
+    const { schema, design_brief: designBrief, body } = msg.data;
     const tables = schema?.tables || [];
     const designLine = [designBrief?.personality, designBrief?.accent_color].filter(Boolean).join(' · ') || 'default theme';
 
-    return el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' },
+    const card = el('div', { class: 'ai-msg ai-msg-ai ai-intent-card' + (msg.settled ? ' ai-plan-settled' : '') },
       el('div', { class: 'ai-intent-header' }, 'Schema & Design — review before generating frontend'),
       el('div', { class: 'ai-plan-section' }, el('strong', {}, schema?.project_name || 'Untitled project')),
       el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, `Tables (${tables.length})`),
       ...tables.map(t => el('div', { class: 'ai-plan-item' }, `${t.name} (${(t.columns || []).length} col${(t.columns || []).length !== 1 ? 's' : ''})`)),
-      el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, 'Design: ' + designLine),
-      el('div', { class: 'ai-intent-actions', style: 'margin-top:14px' },
-        el('button', { class: 'btn btn-secondary btn-sm', onClick: onCancel }, 'Cancel'),
-        el('button', { class: 'btn btn-ai btn-sm', onClick: onConfirm }, 'Confirm → Generate Frontend')
-      )
+      el('div', { class: 'ai-plan-section', style: 'margin-top:10px' }, 'Design: ' + designLine)
     );
-  }
 
-  function showSchemaDesignReviewCard(schema, designBrief, body) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const card = renderSchemaDesignCard(
-      schema, designBrief,
-      async () => { card.remove(); await runBuildFrontendStage(schema, designBrief, body); },
-      () => { card.remove(); renderMessages(); }
-    );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
+    if (!msg.settled) {
+      const actionsDiv = el('div', { class: 'ai-intent-actions', style: 'margin-top:14px' });
+      const cancelBtn = el('button', { class: 'btn btn-secondary btn-sm', onClick: () => {
+        msg.settled = true;
+        msg.cancelled = true;
+        saveSessions();
+        card.classList.add('ai-plan-settled');
+        renderMessages();
+      }}, 'Cancel');
+      const confirmBtn = el('button', { class: 'btn btn-ai btn-sm', onClick: async () => {
+        msg.settled = true;
+        saveSessions();
+        actionsDiv.innerHTML = '';
+        actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Generating frontend…'));
+        card.classList.add('ai-plan-settled');
+        await runBuildFrontendStage(schema, designBrief, body);
+      }}, 'Confirm → Generate Frontend');
+      actionsDiv.appendChild(cancelBtn);
+      actionsDiv.appendChild(confirmBtn);
+      card.appendChild(actionsDiv);
+    }
+
+    return card;
   }
 
   async function runBuildFrontendStage(schema, designBrief, body, existingProgressMsg) {
@@ -1996,7 +2015,11 @@ const AiPanel = (() => {
       : operationMode === 'build_frontend'
       ? (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation })
       : operationMode === 'build_schema'
-      ? (ev) => showSchemaDesignReviewCard(ev.schema, ev.design_brief, { prompt: progressMsg.data.resumePrompt })
+      ? async (ev) => {
+          await addMessage(sess.id, { role: 'ai', type: 'schema-design', content: '',
+            data: { schema: ev.schema, design_brief: ev.design_brief, body: { prompt: progressMsg.data.resumePrompt } }, settled: false });
+          renderMessages();
+        }
       : operationMode === 'test'
       ? (ev) => { sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
@@ -2780,6 +2803,7 @@ const AiPanel = (() => {
     if (msg.type === 'edit-intent') return el('span', {});
     if (msg.type === 'recover') return renderRecoveryCard(msg);
     if (msg.type === 'plan') return renderPlanCard(msg);
+    if (msg.type === 'schema-design') return renderSchemaDesignReviewCard(msg);
     if (msg.type === 'result') return renderResultCard(msg);
     if (msg.type === 'resume') return renderResumeCard(msg);
     if (msg.type === 'diagnosis') return renderDiagnosisCard(msg);
@@ -4061,12 +4085,21 @@ const AiPanel = (() => {
         textarea,
         fileInput,
         el('div', { class: 'ai-input-actions' },
-          attachBtn,
-          runTestsBtn,
-          modelSelectorBtn,
-          modeBtn,
-          reviewToggle,
-          sendBtn
+          // Left cluster: settings/mode toggles, grouped together.
+          el('div', { class: 'ai-input-actions-group' },
+            runTestsBtn,
+            modelSelectorBtn,
+            modeBtn,
+            reviewToggle
+          ),
+          // Right cluster: the two actions that directly act on THIS
+          // message (attach a file to it, send it) — same size, paired,
+          // pushed to the far edge instead of scattered in with the
+          // settings toggles.
+          el('div', { class: 'ai-input-actions-group ai-input-actions-group--send' },
+            attachBtn,
+            sendBtn
+          )
         )
       )
     );

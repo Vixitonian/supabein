@@ -1315,9 +1315,21 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
 .ai-input-actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  justify-content: space-between;
   padding: 4px 8px 8px 10px;
   gap: 8px;
+}
+.ai-input-actions-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ai-input-actions-group--send {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+  gap: 6px;
 }
 .ai-project-label {
   font-size: 11px;
@@ -1338,7 +1350,6 @@ details[open] > .ai-plan-details-summary::before { content: '▾'; }
   flex-shrink: 0;
   font-size: 17px;
   line-height: 1;
-  margin-left: auto;
   transition: opacity 0.15s, transform 0.1s, background 0.15s;
 }
 .ai-send-btn:disabled {
@@ -1982,8 +1993,10 @@ details[open] > .ai-trace-ai-summary::before { content: '▾ '; }
   border: 1px solid var(--border);
   color: var(--muted);
   border-radius: 50%;
-  width: 30px;
-  height: 30px;
+  /* Same size as .ai-send-btn — they're a paired set of "act on this
+     message" controls, sitting right next to each other. */
+  width: 34px;
+  height: 34px;
   padding: 0;
   display: flex;
   align-items: center;
