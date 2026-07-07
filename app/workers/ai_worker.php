@@ -113,7 +113,11 @@ try {
         $prompt    = $payload['prompt']  ?? '';
         $history   = $payload['history'] ?? [];
         $validate  = $payload['validate'] ?? true;
-        $refs      = ai_job_payload_refs($payload);
+        // Project already exists for an edit, so any uploaded image is
+        // uploaded to its real storage right here — the AI gets the real
+        // URL directly, no __SB_PID__ placeholder/deferred-upload dance
+        // needed (that's only for a fresh build with no project yet).
+        $refs      = ai_job_payload_refs($payload, $projectId ?: null);
 
         // Continuing a previous edit job that hit its turn budget without
         // finishing — getJobById scopes by user_id, so this can only ever
