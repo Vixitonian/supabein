@@ -4587,7 +4587,7 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
 {
     $msg = strtolower($msg);
     if (str_contains($msg, 'rate limit') && (str_contains($msg, 'per-day') || str_contains($msg, 'per day') || str_contains($msg, 'daily'))) return true;
-    foreach (['insufficient credit', 'add credit', 'add 10 credits', 'quota exceeded', 'exceeded your current quota', 'invalid api key', 'unauthorized'] as $needle) {
+    foreach (['insufficient credit', 'add credit', 'add 10 credits', 'credit balance is too low', 'quota exceeded', 'exceeded your current quota', 'invalid api key', 'unauthorized'] as $needle) {
         if (str_contains($msg, $needle)) return true;
     }
     // Live-caught: attaching an image to a build/edit request can land on a
