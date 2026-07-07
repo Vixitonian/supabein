@@ -663,6 +663,11 @@ const AiPanel = (() => {
   // fresh poll again. Staleness on this timestamp is how that's detected.
   let lastPollTickAt = 0;
   let sendBtnEl = null;
+  // Files picked via the attach button for the NEXT message only — cleared
+  // once sent (or when switching/starting a session, so a file staged for
+  // one conversation never silently rides along into another).
+  // Each entry: { filename, mime_type, data_base64, size, isImage }
+  let pendingAttachments = [];
   // Session ids (as strings) with a job the server currently has queued/
   // running, refreshed periodically from /v1/ai/jobs while the panel is
   // open -- other sessions in the sidebar have no `messages` loaded locally,
@@ -716,6 +721,121 @@ const AiPanel = (() => {
       toast.classList.remove('ai-toast-visible');
       setTimeout(() => toast.remove(), 300);
     }, duration);
+  }
+
+  // ─── Attachments (reference images/PDF/docx/text for build & edit) ────────
+  // Mirrors the server's own limits (AI_ATTACHMENT_* in ai_routes.php) so a
+  // rejected file is caught instantly client-side instead of round-tripping
+  // to the server just to get the same 422 back.
+  const ATTACH_MAX_COUNT = 8;
+  const ATTACH_MAX_EACH_BYTES = 15 * 1024 * 1024;   // hard limit — server rejects above this
+  const ATTACH_MAX_TOTAL_BYTES = 40 * 1024 * 1024;  // hard limit — combined across all attachments
+  const ATTACH_RECOMMENDED_BYTES = 5 * 1024 * 1024; // soft guidance only — larger still works, just slower
+  // Extension fallback for when the browser doesn't set a useful file.type
+  // (common for .docx and .md in particular).
+  const ATTACH_EXT_MIME = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif',
+    pdf: 'application/pdf',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown',
+    html: 'text/html', htm: 'text/html', csv: 'text/csv', json: 'application/json',
+  };
+  const ATTACH_ALLOWED_MIME = new Set(Object.values(ATTACH_EXT_MIME));
+  const ATTACH_ACCEPT = '.png,.jpg,.jpeg,.webp,.gif,.pdf,.docx,.txt,.md,.markdown,.html,.htm,.csv,.json';
+
+  function attachmentMimeFor(file) {
+    if (file.type && ATTACH_ALLOWED_MIME.has(file.type)) return file.type;
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    return ATTACH_EXT_MIME[ext] || null;
+  }
+
+  function formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return Math.round(n / 1024) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handleFilesPicked(fileList) {
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+      if (pendingAttachments.length >= ATTACH_MAX_COUNT) {
+        showToast(`You can attach up to ${ATTACH_MAX_COUNT} files.`);
+        break;
+      }
+      const mime = attachmentMimeFor(file);
+      if (!mime) {
+        showToast(`"${file.name}" isn't a supported type — images, PDF, .docx, or text files only.`);
+        continue;
+      }
+      if (file.size > ATTACH_MAX_EACH_BYTES) {
+        showToast(`"${file.name}" is ${formatBytes(file.size)} — the limit is ${formatBytes(ATTACH_MAX_EACH_BYTES)} per file.`);
+        continue;
+      }
+      const totalBytes = pendingAttachments.reduce((sum, a) => sum + a.size, 0) + file.size;
+      if (totalBytes > ATTACH_MAX_TOTAL_BYTES) {
+        showToast(`Attaching "${file.name}" would exceed the ${formatBytes(ATTACH_MAX_TOTAL_BYTES)} combined limit.`);
+        continue;
+      }
+      if (file.size > ATTACH_RECOMMENDED_BYTES) {
+        showToast(`"${file.name}" is ${formatBytes(file.size)} — recommended under ${formatBytes(ATTACH_RECOMMENDED_BYTES)} per file for faster processing.`);
+      }
+      let base64;
+      try {
+        base64 = await readFileAsBase64(file);
+      } catch (e) {
+        showToast(`Couldn't read "${file.name}".`);
+        continue;
+      }
+      pendingAttachments.push({
+        filename: file.name,
+        mime_type: mime,
+        data_base64: base64,
+        size: file.size,
+        isImage: mime.startsWith('image/'),
+        previewUrl: mime.startsWith('image/') ? 'data:' + mime + ';base64,' + base64 : null,
+      });
+    }
+    renderAttachmentsRow();
+  }
+
+  function removeAttachment(index) {
+    pendingAttachments.splice(index, 1);
+    renderAttachmentsRow();
+  }
+
+  function clearAttachments() {
+    pendingAttachments = [];
+    renderAttachmentsRow();
+  }
+
+  function renderAttachmentsRow() {
+    if (!panelEl) return;
+    const row = panelEl.querySelector('.ai-attachments-row');
+    const attachBtn = panelEl.querySelector('.ai-attach-btn');
+    if (!row) return;
+    row.innerHTML = '';
+    row.style.display = pendingAttachments.length ? 'flex' : 'none';
+    if (attachBtn) attachBtn.classList.toggle('active', pendingAttachments.length > 0);
+    pendingAttachments.forEach((att, i) => {
+      const thumb = att.isImage
+        ? el('img', { class: 'ai-attachment-chip-thumb', src: att.previewUrl })
+        : el('span', { class: 'ai-attachment-chip-icon' }, '📄');
+      row.appendChild(el('div', { class: 'ai-attachment-chip' },
+        thumb,
+        el('span', { class: 'ai-attachment-chip-name', title: att.filename }, att.filename),
+        el('span', { class: 'ai-attachment-chip-size' }, formatBytes(att.size)),
+        el('button', { class: 'ai-attachment-chip-remove', title: 'Remove', onClick: () => removeAttachment(i) }, '×')
+      ));
+    });
   }
 
   const THINKING_STAGES = {
@@ -1609,13 +1729,13 @@ const AiPanel = (() => {
   async function runBuildFrontendStage(schema, designBrief, body, existingProgressMsg) {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
-    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief };
+    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief, attachments: body.attachments };
     return streamGenerate(jobBody, sess, {
       jobEndpoint: '/v1/ai/build-frontend/job',
       stages: BUILD_FRONTEND_STAGES,
       mode: 'build_frontend',
       title: 'Generating frontend code',
-      onComplete: (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation }),
+      onComplete: (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation, attachments: body.attachments }),
     }, existingProgressMsg, (msg) => runBuildFrontendStage(schema, designBrief, body, msg));
   }
 
@@ -1963,7 +2083,7 @@ const AiPanel = (() => {
     } else if (response.mode === 'build' && !reviewEnabled) {
       // Review off = watch only: deploy to staging straight away, no manual
       // Apply click — the only gate anyone gets is the final Publish to Live.
-      await applyPlan(response.plan, 'build', null, response.validation);
+      await applyPlan(response.plan, 'build', null, response.validation, undefined, response.attachments);
     } else if (response.mode === 'build' || response.mode === 'edit') {
       await addMessage(currentSessionId, { role: 'ai', type: 'plan', content: '', data: response, settled: false });
     } else {
@@ -2705,7 +2825,7 @@ const AiPanel = (() => {
   }
 
   function renderPlanCard(msg) {
-    const { plan, summary, mode } = msg.data;
+    const { plan, summary, mode, attachments } = msg.data;
     const lines = [];
 
     if (mode === 'build') {
@@ -2869,7 +2989,7 @@ const AiPanel = (() => {
         actionsDiv.innerHTML = '';
         actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Applying…'));
         card.classList.add('ai-plan-settled');
-        await applyPlan(plan, mode, msg);
+        await applyPlan(plan, mode, msg, undefined, undefined, attachments);
       }}, mode === 'build' ? '✓ Deploy to Staging' : '✓ Apply');
 
       if (msg.applyError) {
@@ -3405,6 +3525,7 @@ const AiPanel = (() => {
   }
 
   async function switchSession(id) {
+    clearAttachments(); // files staged for the previous session's next message don't carry over
     currentSessionId = id;
     const sess = getSession(id);
     if (sess) selectedProjectId = sess.projectId;
@@ -3418,6 +3539,7 @@ const AiPanel = (() => {
   }
 
   async function newSession() {
+    clearAttachments();
     // A new session must be scoped to whatever project this panel is
     // actually on top of right now — the previous session's own recorded
     // project, not the module-level selectedProjectId mirror, which can
@@ -3464,6 +3586,14 @@ const AiPanel = (() => {
     // Build conversation history for Gemini context. Validation and testing
     // are now unconditional stages of every build/edit, not a toggle.
     const body = { prompt, validate: true };
+    // Snapshot + clear now (same as the textarea above) so the chips
+    // disappear immediately on send rather than lingering until the
+    // response comes back. Only the fields the backend actually wants —
+    // isImage/previewUrl/size are UI-only.
+    if (pendingAttachments.length) {
+      body.attachments = pendingAttachments.map(a => ({ filename: a.filename, mime_type: a.mime_type, data_base64: a.data_base64 }));
+    }
+    clearAttachments();
     // Prefer the session's own recorded project over the module-level
     // selectedProjectId mirror (see renderProjectPicker) — using the stale
     // mirror here is exactly what silently misrouted an edit prompt on an
@@ -3511,7 +3641,7 @@ const AiPanel = (() => {
         if (sess) sess.messages.push({ id: thinkingId, role: 'ai', type: 'thinking', content: '', stageMode: 'intent' });
         renderMessages();
         try {
-          const res = await callWithFallback('/v1/ai/build', { review: true, prompt, history: body.history || [] }, currentAbortController.signal);
+          const res = await callWithFallback('/v1/ai/build', { review: true, prompt, history: body.history || [], attachments: body.attachments }, currentAbortController.signal);
           stopThinkingStages?.();
           if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
           renderMessages();
@@ -3575,7 +3705,7 @@ const AiPanel = (() => {
     return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
   }
 
-  async function applyPlan(plan, mode, planMsg, validation, progressMsg) {
+  async function applyPlan(plan, mode, planMsg, validation, progressMsg, attachments) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
     let autoTestProjectId = null;
@@ -3606,7 +3736,7 @@ const AiPanel = (() => {
     const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
       const t0 = Date.now();
-      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel }, currentAbortController.signal);
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel, attachments }, currentAbortController.signal);
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
@@ -3850,6 +3980,24 @@ const AiPanel = (() => {
     sendBtn.disabled = true;
     sendBtnEl = sendBtn;
 
+    // Attachments — a reference image (e.g. "use this as the logo"), a PDF
+    // or .docx sample to build a schema/UI from, or plain text/markdown/
+    // html/csv/json context. Picked files are staged in pendingAttachments
+    // and sent with the NEXT message (see sendMessage()).
+    const fileInput = el('input', {
+      type: 'file',
+      multiple: 'multiple',
+      accept: ATTACH_ACCEPT,
+      style: 'display:none',
+      onChange: (e) => { handleFilesPicked(e.target.files); e.target.value = ''; }
+    });
+    const attachBtn = el('button', {
+      class: 'ai-attach-btn',
+      title: `Attach reference files — images, PDF, .docx, or text\nUp to ${ATTACH_MAX_COUNT} files, ${formatBytes(ATTACH_MAX_EACH_BYTES)} each (recommended under ${formatBytes(ATTACH_RECOMMENDED_BYTES)} for faster processing)`,
+      onClick: () => fileInput.click()
+    }, '📎');
+    const attachmentsRow = el('div', { class: 'ai-attachments-row', style: 'display:none' });
+
     const reviewToggle = el('button', {
       class: 'ai-review-toggle' + (reviewEnabled ? ' active' : ''),
       title: 'Review intent before building',
@@ -3909,8 +4057,11 @@ const AiPanel = (() => {
 
     const inputBar = el('div', { class: 'ai-input-bar' },
       el('div', { class: 'ai-input-card' },
+        attachmentsRow,
         textarea,
+        fileInput,
         el('div', { class: 'ai-input-actions' },
+          attachBtn,
           runTestsBtn,
           modelSelectorBtn,
           modeBtn,
