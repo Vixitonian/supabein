@@ -1322,6 +1322,17 @@ const AiPanel = (() => {
       return;
     }
     sess.messages.forEach(msg => {
+      // A 'trace' card that finished (live:false) with zero entries recorded
+      // nothing worth seeing — the operation it was meant to trace either
+      // failed before the first network call, or never made one at all. Each
+      // retry attempt creates its own fresh trace card, so a session with
+      // several failed retries in a row (e.g. the offline stretch fixed
+      // above) could accumulate a run of empty ones — pure clutter, with a
+      // download button that would just export "[]". Skip rendering them
+      // rather than showing a wall of indistinguishable, contentless
+      // "Session trace" rows. A still-live one is never hidden, even if
+      // momentarily empty — it may get its first entry any moment.
+      if (msg.type === 'trace' && !msg.live && (!msg.data || msg.data.length === 0)) return;
       try {
         container.appendChild(renderMessage(msg));
       } catch (err) {
@@ -2155,6 +2166,29 @@ const AiPanel = (() => {
         renderMessages();
       }
     })();
+  }
+
+  // Manual "⟳" button in the panel header — the page's native pull-to-refresh
+  // gesture only works over the header area above the panel and navigates
+  // away entirely rather than refreshing the panel's own state. Mirrors what
+  // reopening the panel already does (cancel whatever local poll is running,
+  // reload this session's messages fresh from the server, then resume
+  // polling anything still genuinely unresolved) without an actual
+  // close/reopen round trip.
+  async function refreshCurrentPanel(btn) {
+    const sess = currentSession();
+    if (!sess) return;
+    if (btn) btn.disabled = true;
+    if (activeJobPoll) { activeJobPoll.cancelled = true; activeJobPoll = null; }
+    try {
+      await loadSessionMessages(sess.id);
+      resumeActiveJobIfAny(getSession(sess.id));
+      refreshActiveJobSessions();
+      renderMessages();
+      renderSidebar();
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   async function proceedWithBuildDirect(body) {
@@ -4265,6 +4299,14 @@ const AiPanel = (() => {
     );
 
     const hamburgerBtn = el('button', { class: 'ai-hamburger', onClick: () => toggleSidebar() }, '☰');
+    // The page's own pull-to-refresh (native browser gesture on the header
+    // area) navigates away from the panel entirely instead of refreshing its
+    // state — there was no in-panel way to force a reconnect at all. Mirrors
+    // what reopening the panel already does (cancel whatever poll is
+    // running, reload this session's messages fresh from the server, resume
+    // polling any job that's still genuinely unresolved) without requiring
+    // an actual close/reopen round trip.
+    const refreshBtn = el('button', { class: 'ai-header-refresh', title: 'Refresh', onClick: (e) => refreshCurrentPanel(e.currentTarget) }, '⟳');
     const newSessionBtn = el('button', { class: 'ai-new-session-btn', title: 'New session', onClick: newSession }, '✎');
     const closeBtn = el('button', { class: 'ai-header-close', onClick: close }, '×');
 
@@ -4276,6 +4318,7 @@ const AiPanel = (() => {
           projectLabel
         )
       ),
+      refreshBtn,
       newSessionBtn,
       closeBtn
     );
