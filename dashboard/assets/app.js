@@ -1151,6 +1151,30 @@ const AiPanel = (() => {
     try {
       const jobs = await Api.get('/v1/ai/jobs');
       sessionsWithActiveJob = new Set((jobs || []).filter(j => j.session_id != null).map(j => String(j.session_id)));
+
+      // A local poll loop can go silently dead — most commonly a mobile tab
+      // frozen (or its network layer suspended) mid-request, whose promise
+      // never settles even once the tab is back in the foreground — leaving
+      // a job that already finished server-side looking permanently "active"
+      // on screen, with only the client-computed elapsed-time number still
+      // ticking (it's derived from Date.now(), no network needed) to make it
+      // LOOK alive. Live-caught: a test job that finished 55+ minutes earlier
+      // was still shown mid-run, with its detail text frozen the entire time.
+      // This 15s watchdog runs on its own independent timer, so it can catch
+      // what a visibility-change wake-up alone can't — the tab may already
+      // BE in the foreground, just with a stuck request underneath it.
+      // Comparing against the server's own active-jobs list (not a timeout
+      // guess) is what makes it safe to force a reconnect immediately, no
+      // staleness window needed — the server has already told us the truth.
+      const sess = currentSession();
+      if (sess) {
+        const stuck = sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
+        if (stuck && !(jobs || []).some(j => String(j.id) === String(stuck.data.jobId))) {
+          if (activeJobPoll) activeJobPoll.cancelled = true;
+          activeJobPoll = null;
+          resumeActiveJobIfAny(sess);
+        }
+      }
     } catch (e) { /* leave the last-known set in place on a transient failure */ }
     renderSidebar();
   }
@@ -1850,6 +1874,15 @@ const AiPanel = (() => {
         if (active) active.status = 'error';
         progressMsg.data.error = job.error || (job.status === 'cancelled' ? 'Stopped' : 'The job failed — please try again.');
         console.error('[AiPanel] job resolved as ' + job.status, { jobId, error: progressMsg.data.error });
+        // Persist this resolution immediately rather than waiting for the
+        // next hadNewEvents write above (a failure detected with no new
+        // events on this same tick would otherwise skip it entirely) — a
+        // reload landing on a snapshot saved before this point would still
+        // show the stale in-flight state renderProgressCard's own
+        // effectiveStatus fallback now covers, but there's no reason to
+        // depend on that fallback when persisting the real resolution here
+        // costs nothing.
+        if (sess) persistSession(sess).catch(() => {});
         return null;
       }
     }
@@ -3447,21 +3480,32 @@ const AiPanel = (() => {
   // currently-active one ticks live against the real clock — both stashed
   // from the backend's own event timestamps, so this is correct whether
   // watched live or recomputed after a reload replays the same events.
-  function stageElapsedLabel(s) {
+  function stageElapsedLabel(s, effectiveStatus) {
     if (!s.startedAt) return '';
-    const end = s.status === 'active' ? Date.now() : s.endedAt;
-    if (!end) return '';
-    return formatElapsed(end - s.startedAt);
+    if (effectiveStatus === 'active') return formatElapsed(Date.now() - s.startedAt);
+    if (!s.endedAt) return ''; // resolved but no real end timestamp recorded — don't guess
+    return formatElapsed(s.endedAt - s.startedAt);
   }
 
   function renderProgressCard(msg) {
     const data = msg.data || { stages: [] };
     const ICON = { pending: '○', active: '', done: '✓', error: '✕' };
     const rows = (data.stages || []).map(s => {
-      const icon = s.status === 'active'
+      // The job resolving as failed/cancelled is supposed to flip whichever
+      // stage was in-flight to 'error' at the moment it's detected (see
+      // pollJob()) — but a stage can still be rendered here with a stale
+      // 'active' status next to an already-set data.error (e.g. a reload
+      // landing on a persisted snapshot saved a moment before that write, or
+      // any other path that sets data.error without also touching the stage
+      // list). Render — not just poll-time mutation — is what the user
+      // actually sees, so resolve the same inconsistency here too: a card
+      // that says the job failed must never also show a stage spinning as if
+      // it's still working.
+      const effectiveStatus = (data.error && s.status === 'active') ? 'error' : s.status;
+      const icon = effectiveStatus === 'active'
         ? el('span', { class: 'ai-progress-spin' })
-        : el('span', { class: 'ai-progress-icon ai-progress-icon--' + s.status }, ICON[s.status] || '○');
-      const stageElapsed = stageElapsedLabel(s);
+        : el('span', { class: 'ai-progress-icon ai-progress-icon--' + effectiveStatus }, ICON[effectiveStatus] || '○');
+      const stageElapsed = stageElapsedLabel(s, effectiveStatus);
       const elapsedSpan = stageElapsed
         ? el('span', { class: 'ai-progress-elapsed', style: 'color:var(--text-muted);font-size:0.75rem;margin-left:6px' }, stageElapsed)
         : null;
@@ -3515,7 +3559,7 @@ const AiPanel = (() => {
             el('pre', { class: 'ai-trace-json' }, JSON.stringify(s.rawData, null, 2))
           ));
         }
-        const details = el('details', { class: 'ai-progress-row ai-progress-row--' + s.status }, summary, body);
+        const details = el('details', { class: 'ai-progress-row ai-progress-row--' + effectiveStatus }, summary, body);
         details.open = !!s.expanded;
         details.addEventListener('toggle', () => { s.expanded = details.open; });
         return details;
@@ -3523,7 +3567,7 @@ const AiPanel = (() => {
       const textWrap = el('div', { class: 'ai-progress-text' },
         el('div', { class: 'ai-progress-label' }, s.label, elapsedSpan)
       );
-      return el('div', { class: 'ai-progress-row ai-progress-row--' + s.status }, icon, textWrap);
+      return el('div', { class: 'ai-progress-row ai-progress-row--' + effectiveStatus }, icon, textWrap);
     });
     const totalElapsed = data.startedAt
       ? formatElapsed((data.jobDone ? (data.lastEventTs || Date.now()) : Date.now()) - data.startedAt)
