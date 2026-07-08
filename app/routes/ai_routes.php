@@ -5832,6 +5832,14 @@ Hard rules:
   the two causes above — a story's target truly isn't findable or doesn't behave as expected,
   report_story it false with a specific, concrete detail (what you looked for, what you saw
   instead). That is a real finding, not a tool failure — do not report a story true just to move on.
+- You cannot see the database or the source code — only the rendered page. When a list/page looks
+  empty, describe exactly what you saw ("the page shows 0 items and the text 'No products available
+  yet'"), never WHY it's empty. "No data exists" and "data exists but isn't being displayed" look
+  IDENTICAL from the browser, and only one of them is something you actually verified. Live-caught: a
+  detail that asserted "the store has no products loaded" (a guess, not an observation) got copied
+  into a fix request as if it were fact, and sent an otherwise-capable fix agent off re-seeding a
+  table that already had real rows in it — the actual bug (a frontend display filter) never got found
+  because nothing ever contradicted the false premise. Report the symptom, not a diagnosis.
 - Live-caught: an agent couldn't find a "create project" form anywhere in the app, wrongly concluded
   its OWN login must have silently failed, and spent most of its remaining turns re-logging-in over
   and over instead of reporting the real finding ("this action has no UI anywhere"). If you already
@@ -7037,14 +7045,36 @@ PROMPT;
             $schemaCtx      = ai_schema_to_context($existingSchema);
             $currentFiles   = ai_read_frontend_files($config, $catalog, $projectId, $prompt);
 
+            // This call has no tools — it's one shot, no way to query the
+            // database itself — so without this it has to take a failing
+            // test's own narrative at face value. Live-caught: a test agent
+            // (which also can't see the database, only the rendered page)
+            // reported "the store has no products loaded" for a page that
+            // showed zero items — an inference from what it saw, not
+            // something it verified — and Resolve, with no way to check
+            // either, built a whole plan around re-seeding a table that
+            // actually already had 10 real rows in it. The real bug (a
+            // frontend filter comparing a boolean to the number 1) never got
+            // a chance to be found, because nothing in this call's context
+            // ever contradicted the false "no data" premise it was handed.
+            // A cheap, deterministic COUNT(*) per table closes that gap.
+            $rowCounts = [];
+            foreach ($catalog->listTables($projectId) as $t) {
+                $rowCounts[$t['table_name']] = $catalog->countTableRows($t['physical_name']);
+            }
+            $rowCountCtx = "\n\nActual current row counts (query results, not a guess — trust this over any "
+                . "narrative in the user request about a table being \"empty\" or having \"no data\"):\n"
+                . implode("\n", array_map(fn($k, $v) => "- {$k}: {$v} row(s)", array_keys($rowCounts), $rowCounts));
+
             $suggestContext = "Project: " . $project['name']
                 . "\n\nExact schema:\n" . $schemaCtx
+                . $rowCountCtx
                 . $currentFiles
                 . "\n\nUser request: " . $prompt;
 
             $suggestPrompt = <<<'PROMPT'
 You are a SupaBein full-stack AI assistant reviewing an edit request.
-Analyze the project schema, frontend files, and user request.
+Analyze the project schema, actual row counts, frontend files, and user request.
 Return a list of specific, concrete changes that should be made.
 Each suggestion should be a distinct, independently useful change.
 
@@ -7064,6 +7094,17 @@ Rules:
 - Each suggestion must reference actual column names from the schema
 - Be specific: "Add price column display to product cards" not "Update frontend"
 - Include both schema and frontend changes if applicable
+- The row counts given are ground truth, queried directly from the database —
+  a test result or user message saying a table is "empty"/"has no data" is
+  someone's (or something's) INFERENCE from what a page rendered, not a fact.
+  If the row count for a table is already greater than 0, do NOT suggest
+  seeding, inserting, or creating data for it — that will not fix anything
+  and will just add more rows the same bug keeps hiding. Instead, read the
+  frontend file(s) that fetch and render that table's data, and suggest the
+  SPECIFIC code fix — e.g. a comparison that can never match the type the API
+  actually returns (a strict `=== 1` check against a column the API
+  serializes as a JSON boolean is a common one), a filter excluding every row,
+  a route never registered, or an API call using the wrong table name.
 PROMPT;
 
             try {
