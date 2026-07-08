@@ -200,6 +200,25 @@ function ai_validator_extract_balanced_body(string $js, int $braceStart): ?strin
 // written as (b) look like it "exports nothing" no matter what it actually
 // contains, which then false-positives every route pointing at it forever
 // (no edit can fix a check that can't see the file's real exports).
+// A feature module file's own folder/file name doesn't always match the JS
+// identifier it actually declares — e.g. features/home/home.js commonly
+// declares `const homeModule = {...}` (a "Module" suffix the file path
+// itself doesn't carry), because index.html's route registrations
+// (`defineRoute('/', homeModule.renderHome)`) read more naturally that way.
+// The browser resolves that reference by the GLOBAL VARIABLE NAME alone —
+// it has never heard of the file's path — so matching route handlers by
+// path-derived name instead of the file's real declared identifier is a
+// false-positive machine: a working, deployed route can get flagged
+// "was never generated" forever, since no edit can fix a check that's
+// looking for a name the file was never going to have.
+function ai_validator_detect_module_identifier(string $js): ?string
+{
+    if (preg_match('/(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*[\{\(]/', $js, $m)) {
+        return $m[1];
+    }
+    return null;
+}
+
 function ai_validator_extract_exports(string $js, string $moduleName): array
 {
     if (preg_match('/return\s*\{([^}]*)\}\s*;\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/s', trim($js), $m)) {
@@ -327,10 +346,18 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
     if (!$byPath) return $findings; // nothing to check (schema-only change)
 
     // Feature module exports, e.g. 'home' => ['renderView'], 'budgets' => ['renderBudgetsList', 'renderBudgetDetail']
+    // Keyed by the JS identifier the file actually declares (see
+    // ai_validator_detect_module_identifier()'s doc comment), falling back to
+    // the folder name only when nothing better can be found in the file —
+    // for the common case where they genuinely do match, this changes
+    // nothing.
     $exportsByModule = [];
+    $pathByModule    = []; // real file path for each detected identifier — for the script-src check below
     foreach ($byPath as $path => $content) {
         if (!preg_match('#^features/([a-zA-Z0-9_]+)/\1\.js$#', $path, $m)) continue;
-        $exportsByModule[$m[1]] = ai_validator_extract_exports($content, $m[1]);
+        $ident = ai_validator_detect_module_identifier($content) ?? $m[1];
+        $exportsByModule[$ident] = ai_validator_extract_exports($content, $ident);
+        $pathByModule[$ident]    = $path;
     }
 
     $routeDefs     = [];
@@ -364,7 +391,7 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
         // written to disk but never given a <script src> tag, so visiting it threw
         // "profile is not defined" while every static check on the file passed.
         if (preg_match('/^([a-zA-Z0-9_]+)\./', $rd['handler'], $sm) && $sm[1] !== 'auth') {
-            $modPath = "features/{$sm[1]}/{$sm[1]}.js";
+            $modPath = $pathByModule[$sm[1]] ?? "features/{$sm[1]}/{$sm[1]}.js";
             if (isset($byPath[$modPath]) && $scriptSrcs && !in_array($modPath, $scriptSrcs, true)) {
                 $findings[] = ai_validator_finding('error', 'route',
                     "Route \"{$rd['path']}\" uses {$rd['handler']}, but index.html never loads {$modPath} via <script src>",
