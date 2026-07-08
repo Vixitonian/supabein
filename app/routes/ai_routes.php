@@ -2810,13 +2810,22 @@ function ai_provider_configured(array $config, string $provider): bool
 }
 
 // Builds the ordered list of (provider, model) candidates a FallbackAiClient
-// will try in turn: the caller's explicit request first (if valid and
-// configured), then every other combination this server actually has a key
-// for, tier by tier across AI_ALLOWED_MODELS' existing best-to-least-capable
-// per-provider ordering — so a rate-limited flagship degrades to the next-
-// best option in ANY provider before dropping to any provider's weakest
-// model. Never includes a provider with no configured key (see
-// ai_make_single_client()'s doc comment for why that matters here).
+// will try in turn. When the caller has an explicit preference — every real
+// dashboard request does, via the model selector's getSelectedModel() —
+// that candidate is the ONLY one returned: no silent cross-provider
+// fallback. A user who picked a specific model expects that model to
+// either do the job or visibly fail so they can switch and retry
+// themselves (the dashboard's existing failed-job error + Retry button
+// already re-reads the current selector on retry — this is the one piece
+// that was missing). Falling back through every other provider/model
+// combination behind their back means a "Gemini out of quota" or "NVIDIA
+// insufficient credits" failure is invisible: the job just quietly
+// finishes on a completely different model than the one they chose.
+// Only when NO preference is given at all (preferredProvider is null) does
+// this fall through to the old best-effort tier-by-tier default, for any
+// caller that genuinely has no user-facing selection to honor. Never
+// includes a provider with no configured key (see ai_make_single_client()'s
+// doc comment for why that matters here).
 function ai_build_fallback_chain(array $config, ?string $preferredProvider, ?string $preferredModel): array
 {
     $chain = [];
@@ -2833,6 +2842,7 @@ function ai_build_fallback_chain(array $config, ?string $preferredProvider, ?str
         $models = AI_ALLOWED_MODELS[$preferredProvider] ?? [];
         $model  = ($preferredModel !== null && in_array($preferredModel, $models, true)) ? $preferredModel : ($models[0] ?? null);
         if ($model !== null) $add($preferredProvider, $model);
+        return $chain;
     }
 
     $maxTier = max(array_map('count', AI_ALLOWED_MODELS));
