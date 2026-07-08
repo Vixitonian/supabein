@@ -746,6 +746,9 @@ Available tools:
     project behind it) — that's expected; smoke_test checks the app doesn't crash, not that seeded
     data round-trips. Costs real time (spins up a real browser) — call it once after a non-trivial
     change, and again right before finish if you touched routing/bootstrap code.
+    HARD RULE: if smoke_test's most recent result was ok: false, finish is REJECTED until you either
+    fix the problem or call smoke_test again and get ok: true — you cannot finish past a known-broken
+    smoke_test by ignoring it or ending the turn some other way.
   fetch_docs   args: {"url": string}
     Fetches a specific URL (e.g. a library's docs page) and returns its text content. This is a plain
     fetch, not a search engine — you need the exact URL already (from the request or something you
@@ -856,6 +859,9 @@ Available tools:
     that's expected; smoke_test checks the app doesn't crash, not that data round-trips. Costs real
     time — call it once you have index.html and at least one feature wired up, and again right before
     finish.
+    HARD RULE: if smoke_test's most recent result was ok: false, finish is REJECTED until you either
+    fix the problem or call smoke_test again and get ok: true — you cannot finish past a known-broken
+    smoke_test by ignoring it or ending the turn some other way.
   fetch_docs   args: {"url": string}
     Fetches a specific URL and returns its text content. This is a plain fetch, not a search engine —
     you need the exact URL already, not a topic to search for. Only http(s) URLs to public internet
@@ -4988,6 +4994,7 @@ function ai_run_edit_generation_agentic(
     }
     $recentCalls = [];
     $consecutiveParseFailures = 0;
+    $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -5035,6 +5042,19 @@ function ai_run_edit_generation_agentic(
         $loopHistory   = ai_agent_trim_history($loopHistory);
 
         if ($tool === 'finish') {
+            // A smoke_test that came back broken and was never fixed (or
+            // re-checked) must not be allowed to silently ship — this is
+            // exactly the gap that let the calculator app's "this.loadState
+            // is not a function" crash reach a real deploy: the tool to
+            // catch it existed by the time this check was added, but
+            // nothing stopped finish() from being called anyway.
+            if ($lastSmokeTestOk === false) {
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
+                    're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
+                    'to confirm it is clean before calling finish.']);
+                continue;
+            }
             $candidateDelta = [
                 'add_tables'      => $args['add_tables'] ?? [],
                 'add_columns'     => $args['add_columns'] ?? [],
@@ -5060,7 +5080,11 @@ function ai_run_edit_generation_agentic(
             continue;
         }
 
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId, $existingSchema));
+        $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId, $existingSchema);
+        if ($tool === 'smoke_test') {
+            $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
+        }
+        $turnMsg = json_encode($toolResult);
     }
 
     $incomplete = false;
@@ -5130,6 +5154,7 @@ function ai_run_build_frontend_agentic(
     $loopHistory = [];
     $recentCalls = [];
     $consecutiveParseFailures = 0;
+    $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -5186,6 +5211,19 @@ function ai_run_build_frontend_agentic(
                     "No files have been written yet — write_file the app's frontend before calling finish."]);
                 continue;
             }
+            // A smoke_test that came back broken and was never fixed (or
+            // re-checked) must not be allowed to silently ship — this is
+            // exactly the gap that let the calculator app's "this.loadState
+            // is not a function" crash reach a real deploy: the tool to
+            // catch it existed by the time this check was added, but
+            // nothing stopped finish() from being called anyway.
+            if ($lastSmokeTestOk === false) {
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
+                    're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
+                    'to confirm it is clean before calling finish.']);
+                continue;
+            }
             $finished = true;
             break;
         }
@@ -5203,7 +5241,11 @@ function ai_run_build_frontend_agentic(
         // placeholder; this agent's own system prompt never advertises
         // check_policy, so it has no route to actually call it. validate_frontend
         // works fine here though — it only needs the schema plan, not a live DB.
-        $turnMsg = json_encode(ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan));
+        $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan);
+        if ($tool === 'smoke_test') {
+            $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
+        }
+        $turnMsg = json_encode($toolResult);
     }
 
     if (!$finished) {
