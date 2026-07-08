@@ -256,6 +256,21 @@ router.defineRoute(path, handler) registers a route; path segments starting with
 calls handler({}). router.navigate(path) and router.onHashChange() work as already described above.
 
 ═══════════════════════════════════════════════════════
+RULE 2B — NEVER USE `this` INSIDE A FEATURE MODULE
+═══════════════════════════════════════════════════════
+router.onHashChange() invokes whatever function you registered as a bare call — handler(params) —
+never as a method call on your module object. So when a registered handler is a shorthand method
+that refers to a sibling method or the module's own state via `this` (this.loadState(), this.state,
+etc.), `this` is undefined inside it at call time and the app crashes with "this.xxx is not a
+function" the instant that route loads — indistinguishable from a blank/broken page to the user.
+Every feature module (and auth.js-style modules, if you ever touch one) MUST reference itself by its
+own top-level const name instead of `this`, with zero exceptions — this applies to every method in
+the module, not just ones registered as routes, since any method can end up passed around as a bare
+reference (e.g. an event listener callback has the exact same problem):
+  ✗ const calculator = { renderCalculator() { this.loadState().then(...); } };
+  ✓ const calculator = { renderCalculator() { calculator.loadState().then(...); } };
+
+═══════════════════════════════════════════════════════
 RULE 3 — AUTH: PLATFORM-PROVIDED, TWO SEPARATE ROUTES
 ═══════════════════════════════════════════════════════
 features/auth/auth.js is PLATFORM-PROVIDED — do NOT include "features/auth/auth.js" in your files
