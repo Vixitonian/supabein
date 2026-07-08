@@ -1732,6 +1732,68 @@ function ai_validate_delta(array $delta, array $existingSchema): ?string
     return null;
 }
 
+/**
+ * Apply-time only (POST /v1/ai/apply, mode=edit) — NOT used during generation.
+ * ai_execute_edit() applies add_tables/add_columns one item at a time with no
+ * transaction, each independently try/caught; a plan that fails partway
+ * through (a deploy error, a bad policy reference later in the same delta)
+ * can leave some tables/columns already created even though the overall
+ * request came back as a failure. The dashboard's "Retry apply" then resends
+ * that SAME plan — which ai_validate_delta() would permanently reject with
+ * "already exists", since it can't tell "the AI is confused" apart from "this
+ * specific retry already finished this specific piece". Strip anything the
+ * delta wants to add that the live schema already has before validating, so
+ * a retry finishes whatever didn't land instead of being blocked outright by
+ * the part that already did. Only strips exact matches against schema fetched
+ * fresh at apply time — a genuinely stale/wrong table or type still gets
+ * caught by ai_validate_delta() on whatever's left.
+ */
+function ai_reconcile_delta_for_apply(array $delta, array $existingSchema, int $projectId): array
+{
+    $existing = [];
+    foreach ($existingSchema['tables'] ?? [] as $t) {
+        $tn = strtolower((string)($t['name'] ?? ''));
+        if ($tn === '') continue;
+        $existing[$tn] = [];
+        foreach ($t['columns'] ?? [] as $c) {
+            $existing[$tn][strtolower((string)($c['name'] ?? ''))] = true;
+        }
+    }
+
+    if (!empty($delta['add_tables'])) {
+        $kept = [];
+        foreach ($delta['add_tables'] as $t) {
+            $tn = strtolower((string)($t['name'] ?? ''));
+            if ($tn !== '' && isset($existing[$tn])) {
+                sb_log('ai_edit', 'apply retry: skipping already-created table', ['project_id' => $projectId, 'table' => $t['name'] ?? '']);
+                continue;
+            }
+            $kept[] = $t;
+        }
+        $delta['add_tables'] = $kept;
+    }
+
+    if (!empty($delta['add_columns'])) {
+        $reconciled = [];
+        foreach ($delta['add_columns'] as $entry) {
+            $tn = strtolower((string)($entry['table'] ?? ''));
+            $cols = [];
+            foreach ($entry['columns'] ?? [] as $c) {
+                $cn = strtolower((string)($c['name'] ?? ''));
+                if ($cn !== '' && isset($existing[$tn][$cn])) {
+                    sb_log('ai_edit', 'apply retry: skipping already-added column', ['project_id' => $projectId, 'column' => ($entry['table'] ?? '') . '.' . ($c['name'] ?? '')]);
+                    continue;
+                }
+                $cols[] = $c;
+            }
+            if ($cols) { $entry['columns'] = $cols; $reconciled[] = $entry; }
+        }
+        $delta['add_columns'] = $reconciled;
+    }
+
+    return $delta;
+}
+
 // ─── Schema serializer for two-pass generation ───────────────────────────────
 
 /**
@@ -7672,7 +7734,12 @@ PROMPT;
             if (!$projectId) abort(422, 'plan.project_id is required for edit mode');
             $project = $catalog->getProjectById($projectId, $userId);
             if (!$project) abort(404, 'Project not found');
-            $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
+            $applySchema = ai_schema_from_db($projectId, $catalog);
+            // A retry of this same call (see "Retry apply" in the dashboard)
+            // must not be blocked by whatever the FIRST attempt already got
+            // through before failing on something later in the delta.
+            $plan = ai_reconcile_delta_for_apply($plan, $applySchema, $projectId);
+            $deltaError = ai_validate_delta($plan, $applySchema);
             if ($deltaError) abort(422, 'Invalid edit plan: ' . $deltaError);
 
             $result = ai_execute_edit($plan, $projectId, $userId);
