@@ -692,6 +692,11 @@ Available tools:
     e.g. "just add an About page" is not license to rewrite the notes list from memory and lose its
     create/edit form in the process. A path you're creating for the first time has nothing to read,
     so this only applies to paths list_files already showed you.
+  write_files  args: {"files": [{"path": string, "content": string}, ...]}
+    Same as calling write_file once per entry, in order, but in a single turn — use this whenever
+    you're about to write more than one file back-to-back (e.g. a new feature file plus its
+    index.html wiring) instead of spending a separate turn per file. The same write_file HARD RULE
+    applies to every entry individually.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
   check_policy args: {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE"}
@@ -731,6 +736,20 @@ Available tools:
     plan to include in your own finish() aren't real yet, so a file that assumes one of those already
     exists will still show a false positive here — that's expected. Worth calling once before finish()
     on any non-trivial change, especially one touching routes or a table you didn't just add yourself.
+  smoke_test   args: {}
+    Actually loads a disposable, isolated preview build of everything you've write_file'd so far in a
+    real headless browser (never the project's real staging/live site — this can't clobber what a user
+    might currently be looking at) and returns {ok, url, bodyText, elements, console_errors}. Catches
+    exactly what syntax_check and validate_frontend cannot: a file that parses fine and looks correct
+    but THROWS at runtime (e.g. a route handler that assumes `this` is bound when the router calls it
+    as a bare function — see RULE 2B). Real api.* calls in the preview will 404 (there's no real
+    project behind it) — that's expected; smoke_test checks the app doesn't crash, not that seeded
+    data round-trips. Costs real time (spins up a real browser) — call it once after a non-trivial
+    change, and again right before finish if you touched routing/bootstrap code.
+  fetch_docs   args: {"url": string}
+    Fetches a specific URL (e.g. a library's docs page) and returns its text content. This is a plain
+    fetch, not a search engine — you need the exact URL already (from the request or something you
+    already read), not a topic to search for. Only http(s) URLs to public internet addresses work.
   finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
     Ends the session. Every key is optional (omit or use [] / {} for "no schema change of this
     kind") — use the SAME shapes as a normal edit delta, documented below. Do NOT repeat frontend
@@ -815,6 +834,10 @@ Available tools:
     read_file it first so your change is based on what you actually wrote, not a guess from memory —
     e.g. adding a second feature's script tag is not license to reconstruct index.html from scratch
     and lose the first feature's tag/route in the process.
+  write_files  args: {"files": [{"path": string, "content": string}, ...]}
+    Same as calling write_file once per entry, in order, but in a single turn — use this whenever
+    you're about to write more than one file back-to-back (e.g. index.html plus a feature file)
+    instead of spending a separate turn per file.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
   validate_frontend args: {}
@@ -824,6 +847,19 @@ Available tools:
     up, and again right before finish — catches exactly the kind of mistake ("route registered but
     nothing links to it", "typo'd a table name in an api.list call") that's invisible just re-reading
     your own code, the same way running a test catches things proofreading doesn't.
+  smoke_test   args: {}
+    Actually loads a disposable preview build of everything you've write_file'd so far in a real
+    headless browser and returns {ok, url, bodyText, elements, console_errors}. Catches exactly what
+    syntax_check and validate_frontend cannot: a file that parses fine and looks correct but THROWS
+    at runtime (e.g. a route handler that assumes `this` is bound when the router calls it as a bare
+    function — see RULE 2B). Real api.* calls in the preview will 404 (there's no real project yet) —
+    that's expected; smoke_test checks the app doesn't crash, not that data round-trips. Costs real
+    time — call it once you have index.html and at least one feature wired up, and again right before
+    finish.
+  fetch_docs   args: {"url": string}
+    Fetches a specific URL and returns its text content. This is a plain fetch, not a search engine —
+    you need the exact URL already, not a topic to search for. Only http(s) URLs to public internet
+    addresses work.
   finish       args: {}
     Ends the session once the app is fully functional — real API calls, real CRUD, real auth flows
     where auth exists, and no dangling references (every <script src> you wrote corresponds to a
@@ -4326,6 +4362,124 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     return ['plan' => $plan, 'summary' => $summary, 'usage' => $feUsage, 'aiTrace' => $aiTrace, 'validation' => $validation];
 }
 
+// Renders the agent's current in-progress files in a real headless browser
+// via a disposable, isolated preview directory — never the project's real
+// staging/live site, so a mid-generation smoke test can never clobber what a
+// user might currently be looking at. Catches exactly the class of bug
+// syntax_check/validate_frontend cannot: a file that parses fine and looks
+// correct but THROWS at runtime. Confirmed live: this is precisely what let
+// a calculator app ship with a "this.loadState is not a function" crash
+// that nobody caught until a human opened a real browser after deploy.
+// Uses a sentinel project id (real api.* calls 404 against it) on purpose —
+// this checks the app doesn't crash when the backend is unavailable, not
+// that seeded data round-trips; a real end-to-end data check is what the
+// separate browser-test-agent is for, post-deploy.
+function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authInfo = null): array
+{
+    $token = $config['BROWSERLESS_TOKEN'] ?? '';
+    if (!$token) {
+        return ['ok' => null, 'error' => 'Browserless not configured on this server — smoke_test is unavailable'];
+    }
+    $sitesPath = rtrim((string)($config['SITES_PATH'] ?? ''), '/');
+    if ($sitesPath === '') {
+        return ['ok' => null, 'error' => 'SITES_PATH not configured on this server — smoke_test is unavailable'];
+    }
+    $previewToken = bin2hex(random_bytes(8));
+    $previewDir   = $sitesPath . '/_agent_preview/' . $previewToken;
+
+    if (!is_dir($previewDir) && !mkdir($previewDir, 0755, true)) {
+        return ['ok' => null, 'error' => 'Cannot create preview directory'];
+    }
+
+    try {
+        $files = ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
+        foreach ($files as $fileDef) {
+            $relPath = ltrim((string)($fileDef['path'] ?? ''), '/');
+            if ($relPath === '') continue;
+            $fullPath = \SupaBein\Deploy::normalizePath($previewDir . '/' . $relPath);
+            if (!str_starts_with($fullPath, $previewDir . '/')) continue; // unsafe path — same traversal guard as a real deploy, skip silently
+            $parentDir = dirname($fullPath);
+            if (!is_dir($parentDir)) mkdir($parentDir, 0755, true);
+            $rawContent = (string)($fileDef['content'] ?? '');
+            if ($relPath === 'index.html') $rawContent = ai_ensure_error_script_tag($rawContent);
+            $content = str_replace('__SB_PID__', '0', $rawContent);
+            file_put_contents($fullPath, $content);
+        }
+
+        $previewUrl = rtrim((string)($config['API_BASE_URL'] ?? ''), '/') . '/sites/_agent_preview/' . $previewToken . '/';
+        $script = ai_fetch_page_script_generate($previewUrl, $token, '/', false);
+        $result = ai_fetch_page_run($script, $config);
+
+        // Fold the platform's own console-error capture into the same
+        // pass/fail signal so the model doesn't have to separately notice a
+        // non-empty console_errors array on an otherwise "ok": true result.
+        if (($result['ok'] ?? false) && !empty($result['console_errors'])) {
+            $result['ok'] = false;
+        }
+        return $result;
+    } finally {
+        \SupaBein\Deploy::rrmdir($previewDir);
+    }
+}
+
+// Minimal external "read a doc page" capability — URL-in, text-out, no
+// search engine (no search API key available on this server), so the model
+// must already have a specific URL rather than searching one up. Guards
+// against SSRF: only http/https, resolves the host and rejects anything
+// that lands in a private/loopback/reserved range, and never follows
+// redirects (a redirect to an internal address would otherwise bypass the
+// same check).
+function ai_agent_fetch_docs(string $url, int $maxChars = 6000): array
+{
+    $parsed = parse_url($url);
+    $scheme = strtolower((string)($parsed['scheme'] ?? ''));
+    $host   = (string)($parsed['host'] ?? '');
+    if (!in_array($scheme, ['http', 'https'], true) || $host === '') {
+        return ['ok' => false, 'error' => 'invalid URL — must be a plain http(s) URL'];
+    }
+    $ip = filter_var($host, FILTER_VALIDATE_IP) ? $host : gethostbyname($host);
+    if ($ip === $host && !filter_var($host, FILTER_VALIDATE_IP)) {
+        return ['ok' => false, 'error' => 'could not resolve host'];
+    }
+    if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+        return ['ok' => false, 'error' => 'refusing to fetch an internal/private network address'];
+    }
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_TIMEOUT        => 10,
+        CURLOPT_PROTOCOLS      => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+        CURLOPT_USERAGENT      => 'SupaBein-AI-Agent/1.0 (doc fetch)',
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $body   = curl_exec($ch);
+    $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err    = curl_error($ch);
+    curl_close($ch);
+
+    if ($body === false) {
+        return ['ok' => false, 'error' => $err ?: 'request failed'];
+    }
+    if ($status >= 300 && $status < 400) {
+        return ['ok' => false, 'error' => "got a redirect (HTTP {$status}) — fetch_docs does not follow redirects; pass the final URL directly"];
+    }
+
+    $text = (string)preg_replace('/<(script|style)\b[^>]*>.*?<\/\1>/is', '', $body);
+    $text = strip_tags($text);
+    $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5);
+    $text = (string)preg_replace('/[ \t]+/', ' ', $text);
+    $text = trim((string)preg_replace('/\n{3,}/', "\n\n", $text));
+
+    return [
+        'ok'          => $status >= 200 && $status < 300,
+        'http_status' => $status,
+        'text'        => mb_substr($text, 0, $maxChars),
+        'truncated'   => mb_strlen($text) > $maxChars,
+    ];
+}
+
 // ── Edit agent: single tool-call execution ───────────────────────────────────
 // $byPath is the read-only starting file set; $changedFiles is the in-progress
 // staged-writes map, passed by reference so write_file's effects are visible
@@ -4569,6 +4723,29 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
                                 . 'you plan to include in finish() are not accounted for yet.',
             ]];
 
+        case 'smoke_test':
+            $merged = $byPath;
+            foreach ($changedFiles as $p => $c) $merged[$p] = $c;
+            $files = array_map(fn($p) => ['path' => $p, 'content' => $merged[$p]], array_keys($merged));
+            $authInfo = ai_detect_auth($schema);
+            return ['tool' => 'smoke_test', 'result' => ai_smoke_test_files($files, $config, $authInfo)];
+
+        case 'write_files':
+            $filesArg = is_array($args['files'] ?? null) ? $args['files'] : null;
+            if ($filesArg === null) return ['tool' => 'write_files', 'error' => 'args.files must be an array of {path, content}'];
+            $results = [];
+            foreach ($filesArg as $f) {
+                $results[] = is_array($f)
+                    ? ai_run_edit_agent_tool('write_file', $f, $byPath, $changedFiles, $readPaths, $config, $projectId, $schema)
+                    : ['tool' => 'write_file', 'error' => 'each entry must be an object with path and content'];
+            }
+            return ['tool' => 'write_files', 'result' => ['files' => $results]];
+
+        case 'fetch_docs':
+            $docUrl = trim((string)($args['url'] ?? ''));
+            if ($docUrl === '') return ['tool' => 'fetch_docs', 'error' => 'args.url is required'];
+            return ['tool' => 'fetch_docs', 'result' => ai_agent_fetch_docs($docUrl)];
+
         case 'syntax_check':
             if (isset($args['path'])) {
                 $path = $normalizePath((string)$args['path']);
@@ -4586,7 +4763,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
 
         default:
-            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, syntax_check, check_policy, curl_site, fetch_page, validate_frontend, finish"];
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, write_files, syntax_check, check_policy, curl_site, fetch_page, smoke_test, fetch_docs, validate_frontend, finish"];
     }
 }
 
@@ -4687,11 +4864,41 @@ function ai_agent_note_parse_failure(int &$consecutiveFailures, string $errorMsg
 // this without meaningfully hurting the model's ability to continue.
 const AI_AGENT_HISTORY_WINDOW_MESSAGES = 30; // ~15 turns of (user, model) pairs
 
+// Compaction-lite: rather than silently dropping everything past the
+// window (the model then has zero record of, say, already having written
+// index.html, and can waste a turn re-deriving or re-checking something it
+// already settled), fold the dropped turns' own tool calls into one cheap
+// summary line prepended to what's kept. Built entirely from data already
+// in $history — no extra AI call, just string/array work — so this doesn't
+// add any latency or cost of its own.
 function ai_agent_trim_history(array $history): array
 {
-    return count($history) > AI_AGENT_HISTORY_WINDOW_MESSAGES
-        ? array_slice($history, -AI_AGENT_HISTORY_WINDOW_MESSAGES)
-        : $history;
+    if (count($history) <= AI_AGENT_HISTORY_WINDOW_MESSAGES) return $history;
+
+    $dropped = array_slice($history, 0, count($history) - AI_AGENT_HISTORY_WINDOW_MESSAGES);
+    $kept    = array_slice($history, -AI_AGENT_HISTORY_WINDOW_MESSAGES);
+
+    $actions = [];
+    foreach ($dropped as $msg) {
+        if (($msg['role'] ?? '') !== 'model') continue;
+        $decoded = json_decode((string)($msg['text'] ?? ''), true);
+        if (!is_array($decoded)) continue;
+        $tool = (string)($decoded['tool'] ?? '');
+        if ($tool === '') continue;
+        $path = (string)($decoded['args']['path'] ?? '');
+        $actions[] = $path !== '' ? "{$tool}({$path})" : $tool;
+    }
+
+    if ($actions) {
+        $shown = array_slice($actions, 0, 20);
+        $summary = ['role' => 'user', 'text' =>
+            '(Summary of ' . count($dropped) . ' earlier messages, dropped from context to save space — actions '
+            . "you already took: " . implode(', ', $shown) . (count($actions) > count($shown) ? ', …' : '')
+            . '. Do not repeat these unless something is actually broken.)'];
+        array_unshift($kept, $summary);
+    }
+
+    return $kept;
 }
 
 function ai_edit_agent_step_label(string $tool, array $args): string
@@ -4701,8 +4908,11 @@ function ai_edit_agent_step_label(string $tool, array $args): string
         'search_code'  => 'Searching for "' . ($args['query'] ?? '') . '"…',
         'read_file'    => 'Reading ' . ($args['path'] ?? '?') . '…',
         'write_file'   => 'Writing ' . ($args['path'] ?? '?') . '…',
+        'write_files'  => 'Writing ' . count($args['files'] ?? []) . ' files…',
         'syntax_check' => 'Checking syntax' . (isset($args['path']) ? ' of ' . $args['path'] : '') . '…',
         'check_policy' => 'Testing ' . ($args['table'] ?? '?') . ' ' . ($args['api_role'] ?? '?') . ' ' . ($args['operation'] ?? '?') . '…',
+        'smoke_test'   => 'Loading in a real browser to check for errors…',
+        'fetch_docs'   => 'Reading ' . ($args['url'] ?? 'a doc page') . '…',
         'finish'       => 'Finishing up…',
         default        => 'Working…',
     };
