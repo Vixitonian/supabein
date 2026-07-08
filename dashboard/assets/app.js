@@ -3394,11 +3394,22 @@ const AiPanel = (() => {
     { key: 'validate', label: 'Checking for mismatches' },
   ];
 
+  // Mirrors ai_run_edit_generation()'s real stage sequence exactly (read ->
+  // changes -> validate), plus the two client-driven steps that follow once
+  // the job itself resolves (deploy via /v1/ai/apply, then the post-edit
+  // auto-test). Missing 'validate' here used to mean the job's own validate
+  // events had no matching row to land in — applyProgressEvent()'s "attach
+  // to whichever stage is currently active" fallback (meant for collapsing
+  // the standalone test job's OWN script/run/stories/validate sub-stages
+  // into a single row) would grab them instead, live-caught showing a
+  // validation error count under "Deploying to staging" — a stage it has
+  // nothing to do with.
   const EDIT_PROGRESS_STAGES = [
-    { key: 'read',    label: 'Reading current schema & files' },
-    { key: 'changes', label: 'Generating changes' },
-    { key: 'deploy',  label: 'Deploying to staging' },
-    { key: 'test',    label: 'Running tests' },
+    { key: 'read',     label: 'Reading current schema & files' },
+    { key: 'changes',  label: 'Generating changes' },
+    { key: 'validate', label: 'Checking for mismatches' },
+    { key: 'deploy',   label: 'Deploying to staging' },
+    { key: 'test',     label: 'Running tests' },
   ];
 
   // Order must mirror ai_run_project_tests() exactly (script → run → stories
