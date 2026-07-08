@@ -3337,6 +3337,7 @@ const AiPanel = (() => {
     if (status === 'active' || status === 'done') {
       for (let i = 0; i < idx; i++) if (stages[i].status !== 'error') stages[i].status = 'done';
     }
+    const wasActive = stages[idx].status === 'active';
     stages[idx].status = status;
     if (detail != null && detail !== '') stages[idx].detail = detail;
     // ts (ms epoch, from the backend's own appendJobProgress()) lets a stage's
@@ -3344,8 +3345,21 @@ const AiPanel = (() => {
     // stashed on the stage itself so it survives reload-replay the same way
     // detail/traceEntries already do.
     if (ts) {
-      if (!stages[idx].startedAt) stages[idx].startedAt = ts;
-      if (status === 'done' || status === 'error') stages[idx].endedAt = ts;
+      // A stage key can recur within a single job — the test-and-autofix loop
+      // re-runs script/run/stories/validate up to several times (test, fix,
+      // retest), reusing the exact same four keys each pass. Reset on every
+      // FRESH transition into 'active' (not already active, or never stamped
+      // yet), so a later pass's timer starts clean instead of inheriting a
+      // startedAt from its very first pass — which would silently fold every
+      // earlier test attempt AND the AI edit run in between into what looks
+      // like one stage's duration.
+      if (status === 'active' && (!wasActive || stages[idx].startedAt == null)) {
+        stages[idx].startedAt = ts;
+        stages[idx].endedAt = null;
+      } else if (status === 'done' || status === 'error') {
+        if (!stages[idx].startedAt) stages[idx].startedAt = ts;
+        stages[idx].endedAt = ts;
+      }
     }
   }
 
@@ -3418,11 +3432,11 @@ const AiPanel = (() => {
     // on whatever detail text it started with (typically "Starting tests…")
     // for the entire run. Surface the latest detail on whichever stage is
     // actually active instead of dropping it.
+    // (startedAt for the active stage is already stamped correctly by
+    // progressSetStage() on the matched-key path above every time it goes
+    // active — nothing to do here for timing, this is detail text only.)
     const active = msg.data.stages.find(s => s.status === 'active');
-    if (active) {
-      if (ev.detail) active.detail = ev.detail;
-      if (ev.ts && !active.startedAt) active.startedAt = ev.ts;
-    }
+    if (active && ev.detail) active.detail = ev.detail;
   }
 
   // A done/error stage's elapsed time is fixed (endedAt - startedAt); the
