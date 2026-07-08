@@ -136,7 +136,10 @@ try {
 
     } elseif ($mode === 'test') {
         $projectId = (int)($payload['project_id'] ?? 0);
-        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+        $autoFix   = !empty($payload['auto_fix']);
+        $result    = $autoFix
+            ? ai_run_test_and_autofix($projectId, $userId, $catalog, $config, $report, $client)
+            : ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'test'], $result)));
 
     } elseif ($mode === 'seed') {

@@ -6392,6 +6392,97 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     return array_merge($result, ['target' => $target, 'validation' => $validation]);
 }
 
+// Hard cap on auto-fix cycles in ai_run_test_and_autofix() below. Each cycle
+// is a full edit generation + deploy + re-test, not a single API call — an
+// unbounded "just keep trying" loop here would be the same failure mode as
+// today's JSON-parse retry storm, just at a much higher cost per iteration.
+const AI_TEST_AUTOFIX_MAX_ATTEMPTS = 2;
+
+// Runs the test suite, and if it reports failing user stories, feeds the
+// SPECIFIC failures (story label + what was actually observed, not just
+// "something failed") back in as an edit request, applies and deploys the
+// fix to STAGING ONLY (identical to how every normal edit apply already
+// works — the user still publishes to live explicitly, autofix never does
+// that for them), then re-tests. Always goes through the edit agent, never
+// the build agent — once a project exists, fixing it is an edit no matter
+// whether the failure surfaced right after the very first build or much
+// later. Stops on a clean pass, the hard cap above, or the failing-story
+// set coming back byte-identical to the previous attempt's — a fix that
+// visibly changed nothing is not worth paying for a second time.
+function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, object $client): array
+{
+    $fixAttempts = [];
+    $prevFailingSignature = null;
+
+    $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+
+    for ($fixAttempt = 1; $fixAttempt <= AI_TEST_AUTOFIX_MAX_ATTEMPTS; $fixAttempt++) {
+        $failingStories = array_values(array_filter($result['stories'] ?? [], fn($s) => empty($s['passed'])));
+        if (!$failingStories) break; // clean — nothing to fix
+
+        $signature = implode('|', array_map(
+            fn($s) => ($s['label'] ?? '') . ':' . ($s['detail'] ?? ''),
+            $failingStories
+        ));
+        if ($signature === $prevFailingSignature) {
+            $result['autofix_stalled'] = true;
+            break; // the previous fix attempt visibly changed nothing — don't repeat it
+        }
+        $prevFailingSignature = $signature;
+
+        $report(['stage' => 'autofix', 'status' => 'active', 'label' =>
+            "Auto-fix attempt {$fixAttempt}/" . AI_TEST_AUTOFIX_MAX_ATTEMPTS . ': fixing '
+            . count($failingStories) . ' failing ' . (count($failingStories) === 1 ? 'story' : 'stories') . '…']);
+
+        $fixPrompt = "The following user stories failed real browser testing against the deployed app. Fix the "
+            . "actual underlying problem behind each one:\n\n" . implode("\n\n", array_map(
+                fn($s) => '- "' . ($s['label'] ?? 'Untitled story') . '": ' . ($s['detail'] ?? 'no detail captured'),
+                $failingStories
+            ));
+
+        $editResult = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true);
+        $plan       = $editResult['plan'] ?? [];
+
+        $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
+        if ($deltaError !== null) {
+            // Nothing safe to apply — stop rather than deploy a broken
+            // change or loop again on a generation that's already failing.
+            $result['autofix_error'] = "Auto-fix attempt {$fixAttempt} produced an invalid change: {$deltaError}";
+            break;
+        }
+
+        ai_execute_edit($plan, $projectId, $userId);
+
+        $project = $catalog->getProjectById($projectId, $userId);
+        $sites   = $catalog->listSites($projectId);
+        if ($project && $sites && !empty($plan['frontend']['files'])) {
+            $updatedSchema = ai_schema_from_db($projectId, $catalog);
+            // Staging only — same deploy call and same $publishLive=false
+            // every normal edit apply already uses.
+            ai_deploy_files($config, $catalog, (int)$sites[0]['id'], $project,
+                             $plan['frontend']['files'], true, false, ai_detect_auth($updatedSchema));
+        }
+
+        $fixAttempts[] = [
+            'attempt'         => $fixAttempt,
+            'failing_stories' => array_map(fn($s) => $s['label'] ?? '', $failingStories),
+            'fix_summary'     => [
+                'add_tables'      => count($plan['add_tables'] ?? []),
+                'add_columns'     => count($plan['add_columns'] ?? []),
+                'update_policies' => count($plan['update_policies'] ?? []),
+                'frontend_files'  => count($plan['frontend']['files'] ?? []),
+            ],
+        ];
+
+        $report(['stage' => 'autofix', 'status' => 'active', 'label' => "Auto-fix attempt {$fixAttempt}: re-testing…"]);
+        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+    }
+
+    $result['autofix_attempts'] = $fixAttempts;
+    $result['autofix_gave_up']  = (bool)array_filter($result['stories'] ?? [], fn($s) => empty($s['passed']));
+    return $result;
+}
+
 // Spawns a fully independent OS process to run one job. This — not a shared
 // queue/consumer — is what lets every user's build/edit run in true parallel:
 // each job gets its own process the moment it's created, so nobody waits on
@@ -7575,6 +7666,11 @@ PROMPT;
             // Story-test generation uses the same model the user picked in the panel.
             'provider'   => $req['body']['provider'] ?? null,
             'model'      => $req['body']['model'] ?? null,
+            // Opt-in: on a failure, feed it back as an edit and re-test, up
+            // to AI_TEST_AUTOFIX_MAX_ATTEMPTS times — see
+            // ai_run_test_and_autofix(). Off by default so a plain "run
+            // tests" request never silently starts editing the project.
+            'auto_fix'   => !empty($req['body']['auto_fix']),
         ]);
         ai_spawn_job_worker($config, (int)$job['id']);
         json_out(['job_id' => (int)$job['id']], 202);
