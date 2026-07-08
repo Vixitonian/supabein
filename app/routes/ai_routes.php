@@ -5741,21 +5741,46 @@ const AI_BROWSER_TEST_AGENT_TURN_TIMEOUT_SEC = 20;
 // is no selector-guessing surface at all, by construction.
 function ai_browser_agent_script_generate(string $appUrl, string $token, bool $hasAuth): string
 {
+    // Login-first, signup-fallback rather than always signing up: this same
+    // block runs again on every periodic page recycle (see __recycle__
+    // below), not just once at startup, and TEST_EMAIL is the same constant
+    // for the whole run — a second signup attempt with an email that
+    // already exists silently fails (swallowed by the outer catch), leaving
+    // every recycled page running unauthenticated and false-failing any
+    // story that needs a login. Trying login first makes every call after
+    // the very first one succeed the normal way instead.
     $loginBlock = $hasAuth ? <<<'JSEOF'
+  let loggedIn = false;
   try {
-    await page.goto(APP_URL + '#/signup', { waitUntil: 'networkidle', timeout: 15000 });
+    await page.goto(APP_URL + '#/login', { waitUntil: 'networkidle', timeout: 15000 });
     await page.waitForTimeout(500);
-    const idField = await page.$('#auth-form #auth-identifier');
-    if (idField) {
+    const loginIdField = await page.$('#auth-form #auth-identifier');
+    if (loginIdField) {
       await page.fill('#auth-form #auth-identifier', TEST_EMAIL);
       await page.fill('#auth-form #auth-password', TEST_PASS);
       await page.click('#auth-form button[type="submit"]');
-      await page.waitForFunction(
+      loggedIn = await page.waitForFunction(
         () => { const el = document.querySelector('#nav-logout'); return el && !el.classList.contains('hidden'); },
-        { timeout: 15000 }
-      ).catch(() => {});
+        { timeout: 8000 }
+      ).then(() => true).catch(() => false);
     }
   } catch (_) {}
+  if (!loggedIn) {
+    try {
+      await page.goto(APP_URL + '#/signup', { waitUntil: 'networkidle', timeout: 15000 });
+      await page.waitForTimeout(500);
+      const idField = await page.$('#auth-form #auth-identifier');
+      if (idField) {
+        await page.fill('#auth-form #auth-identifier', TEST_EMAIL);
+        await page.fill('#auth-form #auth-password', TEST_PASS);
+        await page.click('#auth-form button[type="submit"]');
+        await page.waitForFunction(
+          () => { const el = document.querySelector('#nav-logout'); return el && !el.classList.contains('hidden'); },
+          { timeout: 15000 }
+        ).catch(() => {});
+      }
+    } catch (_) {}
+  }
 JSEOF
         : '';
 
@@ -5903,6 +5928,24 @@ async function handleCommand(cmd) {
     if (cmd.tool === '__shutdown__') {
       try { await browser.close(); } catch (_) {}
       process.exit(0);
+    }
+    if (cmd.tool === '__recycle__') {
+      // Deliberate periodic close+reconnect (called by the PHP loop at each
+      // story boundary, not just on error) -- a long-lived page/browser
+      // accumulates enough local + remote state over many turns to risk
+      // this account's per-process memory ceiling on a big multi-story run
+      // (confirmed live: a 140-turn run died mid-test from exactly this).
+      // Recycling bounds growth to roughly one story's worth of turns.
+      try {
+        try { await browser.close(); } catch (_) {}
+        await connectAndLogin();
+        await page.goto(APP_URL + '#' + lastPath, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        await page.waitForTimeout(500);
+        sendResult({ tool: '__recycle__', result: { ok: true } });
+      } catch (e) {
+        sendResult({ tool: '__recycle__', error: 'recycle failed: ' + String((e && e.message) || e) });
+      }
+      continue;
     }
     const res = await handleCommand(cmd);
     sendResult(res);
@@ -6151,6 +6194,11 @@ function ai_run_browser_test_agent(
                 $recorded[] = $entry;
             }
             $turnsAtLastReport = $turn;
+            // Recycle the browser/page at this natural story boundary — see
+            // the Node script's __recycle__ handler's own comment for why.
+            // Best-effort: if it fails, the next real command's existing
+            // disconnect-and-retry path recovers anyway.
+            ai_browser_agent_send($handles, ['tool' => '__recycle__']);
             $turnMsg = json_encode(['tool' => 'report_story', 'result' => ['ok' => true, 'recorded' => count($recorded), 'of' => count($stories)]]);
             continue;
         }
