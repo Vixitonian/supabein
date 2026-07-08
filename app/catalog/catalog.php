@@ -896,6 +896,12 @@ class Catalog
 
     public function appendJobProgress(int $jobId, array $event): void
     {
+        // Stamped here (one place) rather than at each of the several dozen
+        // $report([...]) call sites across the AI pipeline — lets the client
+        // compute exactly how long each stage (and the job as a whole) took,
+        // consistently whether it's watching live or replaying persisted
+        // events after a reload.
+        $event['ts'] = $event['ts'] ?? (int)round(microtime(true) * 1000);
         $stmt = $this->pdo->prepare('SELECT progress FROM ai_jobs WHERE id = ?');
         $stmt->execute([$jobId]);
         $current = $stmt->fetchColumn();
