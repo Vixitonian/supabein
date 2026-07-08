@@ -4653,6 +4653,30 @@ function ai_agent_detect_stuck_repeat(array &$recentCalls, string $tool, array $
     return $stuck;
 }
 
+// A model that fails to produce valid JSON for one action rarely recovers by
+// just being told "try again" — left alone, the retry catch blocks below
+// repeat that identical soft nudge every time, and a model that's stuck
+// tends to send back the SAME broken response verbatim turn after turn.
+// Confirmed live: one build failed the same write_file action 4 times in a
+// row, ~11 minutes of retries with zero forward progress, before finally
+// succeeding on the 5th attempt. Escalate to a much more forceful
+// instruction once a few consecutive failures pile up, mirroring how
+// ai_agent_detect_stuck_repeat() above already escalates for a *successful*
+// action repeated pointlessly.
+function ai_agent_note_parse_failure(int &$consecutiveFailures, string $errorMsg, int $threshold = 2): string
+{
+    $consecutiveFailures++;
+    if ($consecutiveFailures < $threshold) {
+        return "\n\n(Your previous response to this could not be parsed as valid JSON — it may have been cut "
+             . "off: {$errorMsg}. Respond again with a single valid JSON action; if you were writing a large "
+             . 'file, keep the content more concise.)';
+    }
+    return "\n\n(You have now failed to produce valid JSON {$consecutiveFailures} times in a row for this exact "
+         . "action: {$errorMsg}. Repeating the same attempt again will not work either. Do ONE of: write a "
+         . 'substantially shorter/simpler version of whatever you were writing, split it into a smaller piece, '
+         . 'switch to a completely different action, or call finish with whatever is already staged.)';
+}
+
 // Turn budgets across the three agent loops now run 60-120 turns (up from
 // 12-60), and every turn appends two messages to $loopHistory with no cap —
 // resent in full on every single subsequent call. Left unbounded, a long-
@@ -4743,6 +4767,7 @@ function ai_run_edit_generation_agentic(
         $loopHistory = $history;
     }
     $recentCalls = [];
+    $consecutiveParseFailures = 0;
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -4767,11 +4792,10 @@ function ai_run_edit_generation_agentic(
                 'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
             $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
                 'detail' => 'Response was invalid, retrying…']);
-            $turnMsg .= "\n\n(Your previous response to this could not be parsed as valid JSON — it may have "
-                     . "been cut off: {$e->getMessage()}. Respond again with a single valid JSON action; if "
-                     . 'you were writing a large file, keep the content more concise.)';
+            $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
             continue;
         }
+        $consecutiveParseFailures = 0;
         $ms    = (int)((microtime(true) - $_t0) * 1000);
         $usage = $client->getLastUsage();
         foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
@@ -4885,6 +4909,7 @@ function ai_run_build_frontend_agentic(
              . 'Respond with your first tool action.';
     $loopHistory = [];
     $recentCalls = [];
+    $consecutiveParseFailures = 0;
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -4909,11 +4934,10 @@ function ai_run_build_frontend_agentic(
                 'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
             $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
                 'detail' => 'Response was invalid, retrying…']);
-            $turnMsg .= "\n\n(Your previous response to this could not be parsed as valid JSON — it may have "
-                     . "been cut off: {$e->getMessage()}. Respond again with a single valid JSON action; if "
-                     . 'you were writing a large file, keep the content more concise.)';
+            $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
             continue;
         }
+        $consecutiveParseFailures = 0;
         $ms    = (int)((microtime(true) - $_t0) * 1000);
         $usage = $client->getLastUsage();
         foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
@@ -5745,6 +5769,7 @@ function ai_run_browser_test_agent(
     $aiTrace  = [];
     $finished = false;
     $recentCalls = [];
+    $consecutiveParseFailures = 0;
 
     // The whole run's turn budget is shared across every story with no per-
     // story limit, so a story the agent gets stuck on (e.g. a broken login
@@ -5798,9 +5823,10 @@ function ai_run_browser_test_agent(
                 'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
                 'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
             $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => 'Response was invalid, retrying…']);
-            $turnMsg .= "\n\n(Your previous response could not be parsed as valid JSON: {$e->getMessage()}. Respond again with a single valid JSON action.)";
+            $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
             continue;
         }
+        $consecutiveParseFailures = 0;
         $ms = (int)((microtime(true) - $_t0) * 1000);
 
         $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
