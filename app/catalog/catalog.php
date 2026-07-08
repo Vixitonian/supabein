@@ -921,7 +921,7 @@ class Catalog
     // anything the deploy pipeline itself reads.
     private const JOB_RESULT_BYTE_CAP = 900000;
 
-    public function markJobDone(int $jobId, array $result): void
+    private function encodeJobResultCapped(array $result): string
     {
         $encoded = json_encode($result, JSON_UNESCAPED_UNICODE);
         if (strlen($encoded) > self::JOB_RESULT_BYTE_CAP && !empty($result['aiTrace']) && is_array($result['aiTrace'])) {
@@ -934,8 +934,27 @@ class Catalog
                 $encoded = json_encode($result, JSON_UNESCAPED_UNICODE);
             }
         }
+        return $encoded;
+    }
+
+    public function markJobDone(int $jobId, array $result): void
+    {
         $this->pdo->prepare("UPDATE ai_jobs SET status = 'done', result = ? WHERE id = ?")
-                   ->execute([$encoded, $jobId]);
+                   ->execute([$this->encodeJobResultCapped($result), $jobId]);
+    }
+
+    // Persists progress into the SAME `result` column a finished job's output
+    // eventually lands in, while the job stays 'running' — so a worker killed
+    // by the host (OOM, resource limits) before it ever reaches markJobDone()
+    // still leaves the last completed stage's output on the row. A follow-up
+    // request that passes this job's id back as resume_job_id can then pick
+    // up from there instead of redoing every stage from scratch. markJobDone()
+    // always overwrites this with the real final result once the job actually
+    // finishes, so there's no risk of a stale checkpoint being mistaken for it.
+    public function saveJobCheckpoint(int $jobId, array $checkpoint): void
+    {
+        $this->pdo->prepare("UPDATE ai_jobs SET result = ? WHERE id = ? AND status = 'running'")
+                   ->execute([$this->encodeJobResultCapped($checkpoint), $jobId]);
     }
 
     public function markJobFailed(int $jobId, string $error): void

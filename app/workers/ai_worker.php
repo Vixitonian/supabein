@@ -78,12 +78,30 @@ try {
         $approvedIntent = $payload['intent']  ?? null;
         $validate       = $payload['validate'] ?? true;
         $refs           = ai_job_payload_refs($payload);
+
+        // Continuing a previous 'build' job that died partway through (a
+        // worker crash, most commonly during the browser-driven test stage) —
+        // getJobById scopes by user_id, so this can only ever resolve to a
+        // job this same user owns. See ai_run_build_and_deploy()'s doc
+        // comment for exactly which stages this lets a retry skip.
+        $resumeCheckpoint = null;
+        $resumeJobId = (int)($payload['resume_job_id'] ?? 0);
+        if ($resumeJobId > 0) {
+            $priorJob = $catalog->getJobById($resumeJobId, $userId);
+            if ($priorJob && $priorJob['mode'] === 'build' && is_array($priorJob['result'] ?? null)) {
+                $resumeCheckpoint = $priorJob['result'];
+            }
+        }
+        $checkpointFn = function (string $stage, array $data) use ($catalog, $jobId): void {
+            $catalog->saveJobCheckpoint($jobId, array_merge($data, ['stage' => $stage]));
+        };
+
         // The '/v1/ai/build/job' route is only ever used by the Review-off
         // ("watch only") flow now — Review-on uses the separate
         // build_schema/build_frontend jobs below — so it's safe for this one
         // job to also deploy and test, giving the whole pipeline one
         // reload-proof progress trail instead of three separately-tracked steps.
-        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId, $refs);
+        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId, $refs, $resumeCheckpoint, $checkpointFn);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build'], $result)));
 
     } elseif ($mode === 'build_schema') {
@@ -119,9 +137,11 @@ try {
         // needed (that's only for a fresh build with no project yet).
         $refs      = ai_job_payload_refs($payload, $projectId ?: null);
 
-        // Continuing a previous edit job that hit its turn budget without
-        // finishing — getJobById scopes by user_id, so this can only ever
-        // resolve to a job this same user owns, never another user's.
+        // Continuing a previous edit job — either one that gracefully hit its
+        // turn budget, or one a worker crash killed outright mid-loop (the
+        // checkpoint below is now saved every turn, not just at the graceful
+        // turn-limit case) — getJobById scopes by user_id, so this can only
+        // ever resolve to a job this same user owns, never another user's.
         $resumeState = null;
         $resumeJobId = (int)($payload['resume_job_id'] ?? 0);
         if ($resumeJobId > 0) {
@@ -130,8 +150,11 @@ try {
                 $resumeState = $priorJob['result']['resume_state'] ?? null;
             }
         }
+        $checkpointFn = function (array $state) use ($catalog, $jobId): void {
+            $catalog->saveJobCheckpoint($jobId, ['resume_state' => $state]);
+        };
 
-        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate, $resumeState, $refs);
+        $result = ai_run_edit_generation($projectId, $prompt, $history, $client, $catalog, $config, $report, $validate, $resumeState, $refs, $checkpointFn);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'edit'], $result)));
 
     } elseif ($mode === 'test') {
