@@ -4384,10 +4384,20 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
     if ($sitesPath === '') {
         return ['ok' => null, 'error' => 'SITES_PATH not configured on this server — smoke_test is unavailable'];
     }
-    $previewToken = bin2hex(random_bytes(8));
-    $previewDir   = $sitesPath . '/_agent_preview/' . $previewToken;
 
-    if (!is_dir($previewDir) && !mkdir($previewDir, 0755, true)) {
+    // Real deployed sites are only servable at all through a narrow path
+    // shape: both the web server's rewrite rule and site-serve.php's own
+    // regex require exactly sites/s{numeric}/(current|staging)/... —
+    // anything else 403s before PHP even runs. A fake numeric ID in a range
+    // real auto-increment site IDs will never reach works fine for this:
+    // site-serve.php only hits the database at all as an SPA-fallback when
+    // the requested file is missing, and since index.html always exists
+    // here, that path never triggers — no real site or DB row needed.
+    $previewSiteId = 900000000 + random_int(0, 99999999);
+    $previewRoot   = $sitesPath . '/s' . $previewSiteId;
+    $previewDir    = $previewRoot . '/staging';
+
+    if (!mkdir($previewDir, 0755, true)) {
         return ['ok' => null, 'error' => 'Cannot create preview directory'];
     }
 
@@ -4406,7 +4416,7 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
             file_put_contents($fullPath, $content);
         }
 
-        $previewUrl = rtrim((string)($config['API_BASE_URL'] ?? ''), '/') . '/sites/_agent_preview/' . $previewToken . '/';
+        $previewUrl = rtrim((string)($config['API_BASE_URL'] ?? ''), '/') . '/sites/s' . $previewSiteId . '/staging/';
         $script = ai_fetch_page_script_generate($previewUrl, $token, '/', false);
         $result = ai_fetch_page_run($script, $config);
 
@@ -4418,7 +4428,7 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
         }
         return $result;
     } finally {
-        \SupaBein\Deploy::rrmdir($previewDir);
+        \SupaBein\Deploy::rrmdir($previewRoot);
     }
 }
 
