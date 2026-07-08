@@ -4244,9 +4244,22 @@ function ai_run_build_and_deploy(string $prompt, array $history, ?array $approve
                      'detail' => $ev['label'] . (!empty($ev['detail']) ? ' — ' . $ev['detail'] : '')]);
         };
         try {
-            $testResult = ai_run_project_tests((int)$applyResult['project']['id'], $userId, $catalog, $config, $testReport, $client);
+            // Review-off ("watch only") is the one flow where nobody's going
+            // to look at a plan card and click Apply -- deploy already
+            // happened automatically, so a test failure here has no human in
+            // the loop to notice and fix it unless auto-fix does that job
+            // instead. Review-on builds and every edit still stop at a
+            // manual Apply/Run Full Test click, so this is deliberately
+            // scoped to just this one pipeline.
+            $testResult = ai_run_test_and_autofix((int)$applyResult['project']['id'], $userId, $catalog, $config, $testReport, $client);
             $passed = $testResult['passed'] ?? 0; $failed = $testResult['failed'] ?? 0;
-            $report(['stage' => 'test', 'status' => 'done', 'label' => 'Tests finished', 'detail' => "{$passed} passed, {$failed} failed"]);
+            $autofixNote = '';
+            if (!empty($testResult['autofix_attempts'])) {
+                $fixedCount  = count($testResult['autofix_attempts']);
+                $autofixNote = ' (' . $fixedCount . ' auto-fix attempt' . ($fixedCount === 1 ? '' : 's')
+                             . ($testResult['autofix_gave_up'] ? ', still failing after' : ', resolved') . ')';
+            }
+            $report(['stage' => 'test', 'status' => 'done', 'label' => 'Tests finished', 'detail' => "{$passed} passed, {$failed} failed{$autofixNote}"]);
         } catch (\Throwable $e) {
             $report(['stage' => 'test', 'status' => 'error', 'label' => 'Testing failed', 'detail' => $e->getMessage()]);
         }
