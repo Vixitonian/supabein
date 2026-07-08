@@ -7767,7 +7767,20 @@ PROMPT;
         $userId    = (int)$req['auth']['user_id'];
         $sessionId = (int)$req['params']['id'];
         $catalog   = \SupaBein\Catalog::getInstance();
-        $sess = $catalog->getAiSession($sessionId, $userId);
+        // Lazy loading: default to only the most recent page of messages
+        // (large sessions can carry hundreds of KB of trace/progress data) —
+        // ?before=<messageId> pages further back as the client scrolls up.
+        // ?full=1 is kept for any caller that genuinely needs everything.
+        if (!empty($req['query']['full'])) {
+            $sess = $catalog->getAiSession($sessionId, $userId);
+            if (!$sess) abort(404, 'Session not found');
+            json_out($sess);
+            return;
+        }
+        $limit  = isset($req['query']['limit']) ? max(1, min(200, (int)$req['query']['limit'])) : 40;
+        $before = isset($req['query']['before']) && $req['query']['before'] !== ''
+            ? (string)$req['query']['before'] : null;
+        $sess = $catalog->getAiSessionPage($sessionId, $userId, $limit, $before);
         if (!$sess) abort(404, 'Session not found');
         json_out($sess);
     }, ['auth_middleware']);
@@ -7780,29 +7793,32 @@ PROMPT;
         $messages  = $req['body']['messages'] ?? null;
         $sess = $catalog->getAiSession($sessionId, $userId);
         if (!$sess) abort(404, 'Session not found');
-        $newName     = $name ?: $sess['name'];
-        $newMessages = $sess['messages'];
+        $newName = $name ?: $sess['name'];
         if (is_array($messages)) {
-            // Every save here is a full-array overwrite, not an append — so a
-            // client racing an OLDER, shorter in-memory copy against a save
-            // that already landed (a background tab resuming after being
-            // suspended mid-job, a stray retry, two tabs open on the same
-            // session) would otherwise silently erase every card the newer
-            // save had already added, with no error anywhere. Live-caught: an
-            // edit's deploy and a 20-minute auto-test both completed
-            // successfully, but the session's chat history never recorded any
-            // of it past the apply call — the richest history a client has
-            // ever sent for this session should win, not whichever save
-            // happens to land last.
-            $newMessages = count($messages) >= count($sess['messages']) ? $messages : $sess['messages'];
+            // Upsert by message id rather than a blind "whichever array is
+            // longer wins" — a lazy-loading client only ever holds a partial
+            // window of the full history, so a length check would treat that
+            // window as poorer than the server's full copy and silently
+            // discard every new message on it. Merging by id preserves the
+            // original guarantee this replaced (a save can never erase a
+            // message the server already has — the bug that produced this
+            // code in the first place: an edit's deploy and a 20-minute
+            // auto-test both completed, but the session's chat history never
+            // recorded any of it past the apply call) while staying correct
+            // for a client that only has the last N messages loaded.
+            $catalog->upsertAiSessionMessages($sessionId, $userId, $newName, $messages);
+        } else {
+            $catalog->updateAiSession($sessionId, $userId, $newName, $sess['messages']);
         }
-        $catalog->updateAiSession($sessionId, $userId, $newName, $newMessages);
         // Attach the session to the project a completed build just created —
         // only ever moves a session FROM unassigned TO a project, never away.
         if (isset($req['body']['project_id']) && $sess['project_id'] === null) {
             $catalog->setAiSessionProject($sessionId, $userId, (int)$req['body']['project_id']);
         }
-        json_out($catalog->getAiSession($sessionId, $userId));
+        // The client only needs to know the save landed, not the full/paged
+        // history back — returning it here would defeat the point of lazy
+        // loading by re-downloading everything after every single save.
+        json_out(['id' => $sessionId, 'saved' => true]);
     }, ['auth_middleware']);
 
     $router->delete('/v1/ai/sessions/:id', function (array $req): void {

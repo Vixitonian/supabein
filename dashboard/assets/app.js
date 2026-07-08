@@ -93,6 +93,19 @@ const LoadingBar = (() => {
 
 // ─── API ─────────────────────────────────────────────────────────────────────
 
+// A viewer's device clock is not trustworthy — wrong timezone/DST handling,
+// no NTP sync, a phone that's just plain off by minutes or hours. Every
+// elapsed-time display (job stage timers, "total" time) needs to measure
+// against the SERVER's clock, not whatever the browser reports. There's no
+// dedicated "what time is it" endpoint, but every HTTP response already
+// carries a standard `Date` response header for free — track the gap between
+// that and this device's own Date.now() and use it everywhere "now" means
+// "now, per the server" for the rest of the page's life. Refreshed on every
+// request, so it also self-corrects for the device's clock drifting over a
+// long-lived session.
+let clockOffset = 0;
+function serverNow() { return Date.now() + clockOffset; }
+
 const Api = (() => {
   // Derive API base from current location
   const BASE = (() => {
@@ -147,6 +160,12 @@ const Api = (() => {
       throw e;
     }
     if (showBar) LoadingBar.end();
+
+    const serverDateHeader = res.headers.get('Date');
+    if (serverDateHeader) {
+      const serverMs = Date.parse(serverDateHeader);
+      if (!isNaN(serverMs)) clockOffset = serverMs - Date.now();
+    }
 
     if (res.status === 401) {
       Auth.clear();
@@ -1312,6 +1331,9 @@ const AiPanel = (() => {
     const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     container.innerHTML = '';
     const sess = currentSession();
+    if (sess?._loadingOlder) {
+      container.appendChild(el('div', { class: 'ai-loading-older' }, 'Loading earlier messages…'));
+    }
     if (!sess || !sess.messages.length) {
       container.appendChild(el('div', { class: 'ai-welcome' },
         el('div', { class: 'ai-welcome-icon' }, '✦'),
@@ -1645,13 +1667,13 @@ const AiPanel = (() => {
     } });
 
     if (!progressMsg) return;
-    progressSetStage(progressMsg, 'deploy', 'done');
+    progressSetStage(progressMsg, 'deploy', 'done', undefined, serverNow());
     const deployStage = progressMsg.data.stages.find(s => s.key === 'deploy');
     if (deployStage) deployStage.rawData = applyResult;
     const testStage = progressMsg.data.stages.find(s => s.key === 'test');
     if (testStage) {
       const t = ev.test;
-      progressSetStage(progressMsg, 'test', 'done', t ? `${t.passed || 0} passed, ${t.failed || 0} failed` : 'Nothing to test');
+      progressSetStage(progressMsg, 'test', 'done', t ? `${t.passed || 0} passed, ${t.failed || 0} failed` : 'Nothing to test', serverNow());
       if (t) {
         testStage.testData = {
           stories: t.stories || [], passed: t.passed || 0, failed: t.failed || 0,
@@ -2033,7 +2055,7 @@ const AiPanel = (() => {
           await opts.onComplete(finalEv, progressMsg);
         } catch (e) {
           console.error('[AiPanel] onComplete handler failed', { jobEndpoint: opts.jobEndpoint, jobId, error: e });
-          progressSetStage(progressMsg, progressMsg.data.stages.find(s => s.status === 'active')?.key, 'error', e.message);
+          progressSetStage(progressMsg, progressMsg.data.stages.find(s => s.status === 'active')?.key, 'error', e.message, serverNow());
           progressMsg.data.error = e.message || 'Something went wrong after generation finished.';
           // No retry button here on purpose: the job itself already succeeded
           // server-side (this failure is in applying/displaying the result), so
@@ -2127,7 +2149,7 @@ const AiPanel = (() => {
       // reload) — just finish the test stage in place, same as
       // runEditAutoTest()'s own success path, instead of re-running the edit.
       ? (ev) => {
-          progressSetStage(progressMsg, 'test', 'done', `${ev.passed || 0} passed, ${ev.failed || 0} failed`);
+          progressSetStage(progressMsg, 'test', 'done', `${ev.passed || 0} passed, ${ev.failed || 0} failed`, serverNow());
           const testStage = progressMsg.data.stages.find(s => s.key === 'test');
           if (testStage) {
             testStage.testData = {
@@ -3554,7 +3576,7 @@ const AiPanel = (() => {
   // watched live or recomputed after a reload replays the same events.
   function stageElapsedLabel(s, effectiveStatus) {
     if (!s.startedAt) return '';
-    if (effectiveStatus === 'active') return formatElapsed(Date.now() - s.startedAt);
+    if (effectiveStatus === 'active') return formatElapsed(serverNow() - s.startedAt);
     if (!s.endedAt) return ''; // resolved but no real end timestamp recorded — don't guess
     return formatElapsed(s.endedAt - s.startedAt);
   }
@@ -3642,7 +3664,7 @@ const AiPanel = (() => {
       return el('div', { class: 'ai-progress-row ai-progress-row--' + effectiveStatus }, icon, textWrap);
     });
     const totalElapsed = data.startedAt
-      ? formatElapsed((data.jobDone ? (data.lastEventTs || Date.now()) : Date.now()) - data.startedAt)
+      ? formatElapsed((data.jobDone ? (data.lastEventTs || serverNow()) : serverNow()) - data.startedAt)
       : '';
     const titleText = (data.title || 'Building your app') + (totalElapsed ? ' · ' + totalElapsed : '');
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-progress-card' },
@@ -3739,18 +3761,57 @@ const AiPanel = (() => {
     if (testBtn) testBtn.style.display = effectiveProjectId ? '' : 'none';
   }
 
+  // Only the most recent page loads up front — long-running sessions carry
+  // hundreds of KB of trace/progress data, most of which nobody scrolls back
+  // to see. loadOlderMessages() below fetches earlier pages on demand.
+  const AI_SESSION_PAGE_SIZE = 40;
+
   async function loadSessionMessages(id) {
     if (!id || String(id).startsWith('tmp_')) return; // unsaved local session
     try {
-      const full = await Api.get('/v1/ai/sessions/' + id);
-      if (full && Array.isArray(full.messages)) {
+      const page = await Api.get('/v1/ai/sessions/' + id + '?limit=' + AI_SESSION_PAGE_SIZE);
+      if (page && Array.isArray(page.messages)) {
         // Tolerant comparison — id can arrive as a string (e.g. from
         // localStorage on a fresh page load) while session ids from the API
         // are numbers, which a strict === would silently miss.
         const idx = sessions.findIndex(s => String(s.id) === String(id));
-        if (idx !== -1) sessions[idx].messages = full.messages;
+        if (idx !== -1) {
+          sessions[idx].messages = page.messages;
+          sessions[idx]._hasMoreOlder = !!page.has_more;
+        }
       }
     } catch(e) {}
+  }
+
+  // Fetches the page of messages immediately before whatever's currently the
+  // oldest-loaded one, and prepends it. Keeps the viewport anchored to the
+  // same message the user was looking at (scrollHeight/scrollTop math below)
+  // instead of jumping to the top of the newly-taller container.
+  async function loadOlderMessages() {
+    const sess = currentSession();
+    if (!sess || sess._loadingOlder || sess._hasMoreOlder === false) return;
+    const oldestId = sess.messages[0]?.id;
+    if (!oldestId) return;
+    const container = panelEl?.querySelector('.ai-messages');
+    const prevScrollHeight = container ? container.scrollHeight : 0;
+    const prevScrollTop = container ? container.scrollTop : 0;
+    sess._loadingOlder = true;
+    renderMessages();
+    try {
+      const page = await Api.get('/v1/ai/sessions/' + sess.id
+        + '?limit=' + AI_SESSION_PAGE_SIZE + '&before=' + encodeURIComponent(oldestId));
+      if (page && Array.isArray(page.messages) && page.messages.length) {
+        sess.messages = page.messages.concat(sess.messages);
+      }
+      sess._hasMoreOlder = !!(page && page.has_more);
+    } catch (e) {
+      // Leave _hasMoreOlder as-is — scrolling up again retries.
+    } finally {
+      sess._loadingOlder = false;
+      renderMessages();
+      const c = panelEl?.querySelector('.ai-messages');
+      if (c) c.scrollTop = c.scrollHeight - prevScrollHeight + prevScrollTop;
+    }
   }
 
   async function switchSession(id) {
@@ -3959,7 +4020,7 @@ const AiPanel = (() => {
 
     const deployStage = progressMsg?.data?.stages?.find(s => s.key === 'deploy');
     const testStage = progressMsg?.data?.stages?.find(s => s.key === 'test');
-    if (deployStage) progressSetStage(progressMsg, 'deploy', 'active');
+    if (deployStage) progressSetStage(progressMsg, 'deploy', 'active', undefined, serverNow());
     renderMessages();
 
     const { provider: aProvider, model: aModel } = getSelectedModel();
@@ -3969,7 +4030,7 @@ const AiPanel = (() => {
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);
-      if (deployStage) progressSetStage(progressMsg, 'deploy', 'done', result.staging ? 'Deployed to staging' : 'Deployed');
+      if (deployStage) progressSetStage(progressMsg, 'deploy', 'done', result.staging ? 'Deployed to staging' : 'Deployed', serverNow());
       renderMessages();
 
       // Edits always auto-test. Builds only auto-test when Review is off
@@ -4107,7 +4168,7 @@ const AiPanel = (() => {
     // (hollow circle, no spinner) look for however long job creation + the
     // worker picking it up + the browser launching takes, which reads as the
     // whole card being stuck rather than genuinely working in the background.
-    progressSetStage(progressMsg, 'test', 'active', 'Starting tests…');
+    progressSetStage(progressMsg, 'test', 'active', 'Starting tests…', serverNow());
     renderMessages();
     try {
       const { provider, model } = getSelectedModel();
@@ -4132,7 +4193,7 @@ const AiPanel = (() => {
       if (activeJobPoll === pollState) activeJobPoll = null;
 
       if (finalEv) {
-        progressSetStage(progressMsg, 'test', 'done', `${finalEv.passed || 0} passed, ${finalEv.failed || 0} failed`);
+        progressSetStage(progressMsg, 'test', 'done', `${finalEv.passed || 0} passed, ${finalEv.failed || 0} failed`, serverNow());
         testStage.testData = {
           stories: finalEv.stories || [], passed: finalEv.passed || 0, failed: finalEv.failed || 0,
           error: finalEv.error || null, screenshot: finalEv.screenshot || null,
@@ -4175,6 +4236,9 @@ const AiPanel = (() => {
     );
 
     const messages = el('div', { class: 'ai-messages' });
+    messages.addEventListener('scroll', () => {
+      if (messages.scrollTop < 60) loadOlderMessages();
+    });
 
     // Read-only — the panel is always scoped to whatever project it was opened
     // for (or no project, for a fresh "Build with AI"); it can never be
@@ -4454,6 +4518,14 @@ const AiPanel = (() => {
     if (document.hidden || !isOpen) return;
     clearStalePollIfAny();
     resumeActiveJobIfAny(currentSession());
+    // The 15s watchdog below (activeJobRefreshTimer) is itself throttled
+    // while the tab is hidden -- often far past 15s on mobile, sometimes to
+    // just once a minute -- so whatever it would have caught can sit stale
+    // for the entire time the tab was backgrounded. Firing it immediately on
+    // return means the panel already reflects anything that finished
+    // server-side while the user was away, instead of waiting for the next
+    // (possibly still-throttled) tick to notice.
+    refreshActiveJobSessions();
   });
 
   function toggle(options) {

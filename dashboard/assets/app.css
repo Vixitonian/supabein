@@ -1113,6 +1113,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   padding: 20px;
 }
 .ai-welcome-icon { font-size: 28px; color: var(--accent); margin-bottom: 8px; }
+.ai-loading-older {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 0;
+}
 .ai-msg {
   border-radius: 10px;
   padding: 10px 13px;

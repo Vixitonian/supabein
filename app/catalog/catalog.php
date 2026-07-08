@@ -784,6 +784,66 @@ class Catalog
         return $ok;
     }
 
+    // Merges a client's messages into the stored history by `id` instead of
+    // replacing the array outright — the old PATCH handler picked whichever
+    // side had MORE messages and threw the other away wholesale, which only
+    // stayed safe as long as every client always held the session's entire
+    // history in memory. Lazy/paginated loading breaks that assumption: a
+    // client that only has the most recent page loaded will always look
+    // "shorter" than the server's full history, so a length-based check would
+    // silently discard every new message that page ever produced. Upserting
+    // by id keeps the length-based fix's original guarantee (a save can never
+    // erase a message the server already has) while also working correctly
+    // for a client holding only a partial window of the conversation.
+    public function upsertAiSessionMessages(int $id, int $userId, string $name, array $incoming): bool
+    {
+        $sess = $this->getAiSession($id, $userId);
+        if (!$sess) return false;
+        $merged = $sess['messages'];
+        $indexById = [];
+        foreach ($merged as $i => $m) {
+            if (isset($m['id'])) $indexById[$m['id']] = $i;
+        }
+        foreach ($incoming as $m) {
+            $mid = $m['id'] ?? null;
+            if ($mid !== null && isset($indexById[$mid])) {
+                $merged[$indexById[$mid]] = $m; // update in place — keeps chronological order
+            } else {
+                $merged[] = $m;
+                if ($mid !== null) $indexById[$mid] = count($merged) - 1;
+            }
+        }
+        return $this->updateAiSession($id, $userId, $name, $merged);
+    }
+
+    // Returns a page of a session's messages, most-recent-first pagination
+    // (mirrors how a chat UI loads: newest on open, older ones as you scroll
+    // up). $beforeMessageId, when given, pages further back from that
+    // message instead of from the end of the full history. Storage is still
+    // a single JSON blob per session (no per-message rows), so this reads the
+    // whole thing and slices in PHP — no less DB I/O than before, but far
+    // less sent over the wire and rendered client-side, which is the actual
+    // problem this exists to solve.
+    public function getAiSessionPage(int $id, int $userId, int $limit, ?string $beforeMessageId): ?array
+    {
+        $sess = $this->getAiSession($id, $userId);
+        if (!$sess) return null;
+        $all = $sess['messages'];
+        $total = count($all);
+        if ($beforeMessageId !== null) {
+            $cutoff = null;
+            foreach ($all as $i => $m) {
+                if (($m['id'] ?? null) === $beforeMessageId) { $cutoff = $i; break; }
+            }
+            if ($cutoff !== null) $all = array_slice($all, 0, $cutoff);
+        }
+        $hasMore = count($all) > $limit;
+        $sess['messages'] = $hasMore ? array_values(array_slice($all, -$limit)) : array_values($all);
+        $sess['has_more'] = $hasMore;
+        $sess['total'] = $total;
+        return $sess;
+    }
+
     // Attaches a session to the project a completed build just created, so the
     // conversation that built it shows up in that project's own history from
     // then on instead of staying in the unassigned "Build with AI" bucket.
