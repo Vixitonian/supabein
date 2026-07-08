@@ -1798,7 +1798,16 @@ const AiPanel = (() => {
   async function pollJob(jobId, progressMsg, pollState, sess) {
     let since = 0;
     let consecutiveFailures = 0;
-    const MAX_CONSECUTIVE_FAILURES = 15; // ~30s of nothing-but-errors — give up rather than spin forever
+    // Job-status requests time out at 15s each (see Api's AbortSignal.timeout
+    // for '/ai/jobs/' paths) — the old value of 15 assumed near-instant
+    // failures and could leave a real dead connection retrying in total
+    // silence for up to ~4 minutes before ever showing an error. Live-caught:
+    // a phone that was genuinely offline for several minutes, with nothing
+    // in the UI to say so — just an elapsed-time counter that kept climbing
+    // as if work were still happening. 6 caps the same silent window at
+    // under 90s worst-case, and reconnecting (below) gives visible feedback
+    // well before even that.
+    const MAX_CONSECUTIVE_FAILURES = 6;
     const startedAt = Date.now();
     const SLOW_JOB_WARNING_MS = 20 * 60 * 1000; // 20 min — a heads-up, not a kill; real jobs can legitimately run long
     let warnedSlow = false;
@@ -1817,6 +1826,10 @@ const AiPanel = (() => {
       try {
         job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
         consecutiveFailures = 0;
+        if (progressMsg.data.reconnecting) {
+          progressMsg.data.reconnecting = false;
+          renderMessages();
+        }
       } catch (e) {
         if (e.status === 401 || e.status === 404) {
           // Session expired or the job vanished server-side — neither is
@@ -1831,8 +1844,21 @@ const AiPanel = (() => {
           return null;
         }
         consecutiveFailures++;
+        // Visible the moment a failure repeats, well before the hard give-up
+        // below — the actual work may still be progressing fine server-side,
+        // this is purely "I can't currently confirm that", so it's worded as
+        // a connection problem, not a job problem. Otherwise the only signal
+        // something's wrong is a console error no ordinary user ever opens —
+        // the elapsed-time counter keeps climbing regardless (it's pure
+        // Date.now() math, no network needed), which reads as "still working
+        // normally" even when every request has been failing for a while.
+        if (consecutiveFailures >= 2 && !progressMsg.data.reconnecting) {
+          progressMsg.data.reconnecting = true;
+          renderMessages();
+        }
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
           progressMsg.data.jobDone = true;
+          progressMsg.data.reconnecting = false;
           const active = progressMsg.data.stages.find(s => s.status === 'active');
           if (active) active.status = 'error';
           progressMsg.data.error = 'Lost connection to the server — please try again.';
@@ -1896,6 +1922,7 @@ const AiPanel = (() => {
     progressMsg.data.error = null;
     progressMsg.data.jobDone = false;
     progressMsg.data.slowWarning = null;
+    progressMsg.data.reconnecting = false;
     delete progressMsg.data.jobId;
     progressMsg.data.stages.forEach((s, i) => {
       s.status = i === 0 ? 'active' : 'pending';
@@ -3577,6 +3604,10 @@ const AiPanel = (() => {
       el('div', { class: 'ai-progress-title' }, titleText),
       ...rows
     );
+    if (data.reconnecting && !data.jobDone) {
+      card.appendChild(el('div', { class: 'ai-progress-warning' },
+        '📶 Trouble reaching the server — retrying… (the work itself may still be progressing fine, this is just the status check)'));
+    }
     if (data.slowWarning && !data.jobDone) {
       card.appendChild(el('div', { class: 'ai-progress-warning' }, '⏳ ' + data.slowWarning));
     }
