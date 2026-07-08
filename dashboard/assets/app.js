@@ -3329,7 +3329,7 @@ const AiPanel = (() => {
     };
   }
 
-  function progressSetStage(msg, key, status, detail) {
+  function progressSetStage(msg, key, status, detail, ts) {
     const stages = msg.data.stages;
     const idx = stages.findIndex(s => s.key === key);
     if (idx === -1) return;
@@ -3339,6 +3339,27 @@ const AiPanel = (() => {
     }
     stages[idx].status = status;
     if (detail != null && detail !== '') stages[idx].detail = detail;
+    // ts (ms epoch, from the backend's own appendJobProgress()) lets a stage's
+    // row show exactly how long IT took, not just the job as a whole —
+    // stashed on the stage itself so it survives reload-replay the same way
+    // detail/traceEntries already do.
+    if (ts) {
+      if (!stages[idx].startedAt) stages[idx].startedAt = ts;
+      if (status === 'done' || status === 'error') stages[idx].endedAt = ts;
+    }
+  }
+
+  // "45s" / "3m 12s" / "1h 05m" — deliberately coarse (no fractional seconds,
+  // no milliseconds) since this is a human glance-at-it duration, not a
+  // profiling number.
+  function formatElapsed(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) return `${h}h ${String(m).padStart(2, '0')}m`;
+    if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+    return `${s}s`;
   }
 
   // Maps a progress card's stage keys to the aiTrace 'stage' values the
@@ -3366,9 +3387,17 @@ const AiPanel = (() => {
   // Map a streamed build event onto the progress card's stage list.
   function applyProgressEvent(msg, ev) {
     if (!ev || !ev.stage) return;
+    // The very first event's ts is as close as the client gets to "job
+    // started" (queued-to-claimed lag is normally sub-second); lastEventTs
+    // keeps advancing so a finished job's total is exact even after a
+    // reload, when there's no live Date.now() tick left to fall back on.
+    if (ev.ts) {
+      if (!msg.data.startedAt) msg.data.startedAt = ev.ts;
+      msg.data.lastEventTs = ev.ts;
+    }
     if (ev.stage === 'error') {
       const active = msg.data.stages.find(s => s.status === 'active');
-      if (active) active.status = 'error';
+      if (active) { active.status = 'error'; if (ev.ts) active.endedAt = ev.ts; }
       msg.data.error = ev.message || 'Something went wrong';
       return;
     }
@@ -3378,7 +3407,7 @@ const AiPanel = (() => {
     }
     const status = ev.status === 'start' ? 'active' : ev.status === 'done' ? 'done' : 'active';
     if (msg.data.stages.some(s => s.key === ev.stage)) {
-      progressSetStage(msg, ev.stage, status, ev.detail || '');
+      progressSetStage(msg, ev.stage, status, ev.detail || '', ev.ts);
       return;
     }
     // This card collapses a job's real sub-stages into one row instead of
@@ -3390,7 +3419,21 @@ const AiPanel = (() => {
     // for the entire run. Surface the latest detail on whichever stage is
     // actually active instead of dropping it.
     const active = msg.data.stages.find(s => s.status === 'active');
-    if (active && ev.detail) active.detail = ev.detail;
+    if (active) {
+      if (ev.detail) active.detail = ev.detail;
+      if (ev.ts && !active.startedAt) active.startedAt = ev.ts;
+    }
+  }
+
+  // A done/error stage's elapsed time is fixed (endedAt - startedAt); the
+  // currently-active one ticks live against the real clock — both stashed
+  // from the backend's own event timestamps, so this is correct whether
+  // watched live or recomputed after a reload replays the same events.
+  function stageElapsedLabel(s) {
+    if (!s.startedAt) return '';
+    const end = s.status === 'active' ? Date.now() : s.endedAt;
+    if (!end) return '';
+    return formatElapsed(end - s.startedAt);
   }
 
   function renderProgressCard(msg) {
@@ -3400,6 +3443,10 @@ const AiPanel = (() => {
       const icon = s.status === 'active'
         ? el('span', { class: 'ai-progress-spin' })
         : el('span', { class: 'ai-progress-icon ai-progress-icon--' + s.status }, ICON[s.status] || '○');
+      const stageElapsed = stageElapsedLabel(s);
+      const elapsedSpan = stageElapsed
+        ? el('span', { class: 'ai-progress-elapsed', style: 'color:var(--text-muted);font-size:0.75rem;margin-left:6px' }, stageElapsed)
+        : null;
       // Once a stage has something to show (detail text, the matching raw AI
       // call trace, or — for the 'test' stage — the full test+validation
       // breakdown), its row becomes a click-to-expand disclosure instead of a
@@ -3410,7 +3457,8 @@ const AiPanel = (() => {
       // silently re-collapse whatever the user had opened.
       const hasExpandable = s.detail || (s.traceEntries && s.traceEntries.length) || s.testData || s.rawData;
       if (hasExpandable) {
-        const summary = el('summary', { class: 'ai-progress-summary' }, icon, el('span', { class: 'ai-progress-label ai-progress-label--clickable' }, s.label));
+        const summary = el('summary', { class: 'ai-progress-summary' }, icon,
+          el('span', { class: 'ai-progress-label ai-progress-label--clickable' }, s.label), elapsedSpan);
         const body = el('div', { class: 'ai-progress-detail-body' });
         if (s.detail) body.appendChild(el('div', { class: 'ai-progress-detail' }, s.detail));
         if (s.traceEntries && s.traceEntries.length) {
@@ -3455,12 +3503,16 @@ const AiPanel = (() => {
         return details;
       }
       const textWrap = el('div', { class: 'ai-progress-text' },
-        el('div', { class: 'ai-progress-label' }, s.label)
+        el('div', { class: 'ai-progress-label' }, s.label, elapsedSpan)
       );
       return el('div', { class: 'ai-progress-row ai-progress-row--' + s.status }, icon, textWrap);
     });
+    const totalElapsed = data.startedAt
+      ? formatElapsed((data.jobDone ? (data.lastEventTs || Date.now()) : Date.now()) - data.startedAt)
+      : '';
+    const titleText = (data.title || 'Building your app') + (totalElapsed ? ' · ' + totalElapsed : '');
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-progress-card' },
-      el('div', { class: 'ai-progress-title' }, data.title || 'Building your app'),
+      el('div', { class: 'ai-progress-title' }, titleText),
       ...rows
     );
     if (data.slowWarning && !data.jobDone) {
