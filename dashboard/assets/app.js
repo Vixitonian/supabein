@@ -1312,6 +1312,9 @@ const AiPanel = (() => {
     const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
     container.innerHTML = '';
     const sess = currentSession();
+    if (sess?._loadingOlder) {
+      container.appendChild(el('div', { class: 'ai-loading-older' }, 'Loading earlier messages…'));
+    }
     if (!sess || !sess.messages.length) {
       container.appendChild(el('div', { class: 'ai-welcome' },
         el('div', { class: 'ai-welcome-icon' }, '✦'),
@@ -3739,18 +3742,57 @@ const AiPanel = (() => {
     if (testBtn) testBtn.style.display = effectiveProjectId ? '' : 'none';
   }
 
+  // Only the most recent page loads up front — long-running sessions carry
+  // hundreds of KB of trace/progress data, most of which nobody scrolls back
+  // to see. loadOlderMessages() below fetches earlier pages on demand.
+  const AI_SESSION_PAGE_SIZE = 40;
+
   async function loadSessionMessages(id) {
     if (!id || String(id).startsWith('tmp_')) return; // unsaved local session
     try {
-      const full = await Api.get('/v1/ai/sessions/' + id);
-      if (full && Array.isArray(full.messages)) {
+      const page = await Api.get('/v1/ai/sessions/' + id + '?limit=' + AI_SESSION_PAGE_SIZE);
+      if (page && Array.isArray(page.messages)) {
         // Tolerant comparison — id can arrive as a string (e.g. from
         // localStorage on a fresh page load) while session ids from the API
         // are numbers, which a strict === would silently miss.
         const idx = sessions.findIndex(s => String(s.id) === String(id));
-        if (idx !== -1) sessions[idx].messages = full.messages;
+        if (idx !== -1) {
+          sessions[idx].messages = page.messages;
+          sessions[idx]._hasMoreOlder = !!page.has_more;
+        }
       }
     } catch(e) {}
+  }
+
+  // Fetches the page of messages immediately before whatever's currently the
+  // oldest-loaded one, and prepends it. Keeps the viewport anchored to the
+  // same message the user was looking at (scrollHeight/scrollTop math below)
+  // instead of jumping to the top of the newly-taller container.
+  async function loadOlderMessages() {
+    const sess = currentSession();
+    if (!sess || sess._loadingOlder || sess._hasMoreOlder === false) return;
+    const oldestId = sess.messages[0]?.id;
+    if (!oldestId) return;
+    const container = panelEl?.querySelector('.ai-messages');
+    const prevScrollHeight = container ? container.scrollHeight : 0;
+    const prevScrollTop = container ? container.scrollTop : 0;
+    sess._loadingOlder = true;
+    renderMessages();
+    try {
+      const page = await Api.get('/v1/ai/sessions/' + sess.id
+        + '?limit=' + AI_SESSION_PAGE_SIZE + '&before=' + encodeURIComponent(oldestId));
+      if (page && Array.isArray(page.messages) && page.messages.length) {
+        sess.messages = page.messages.concat(sess.messages);
+      }
+      sess._hasMoreOlder = !!(page && page.has_more);
+    } catch (e) {
+      // Leave _hasMoreOlder as-is — scrolling up again retries.
+    } finally {
+      sess._loadingOlder = false;
+      renderMessages();
+      const c = panelEl?.querySelector('.ai-messages');
+      if (c) c.scrollTop = c.scrollHeight - prevScrollHeight + prevScrollTop;
+    }
   }
 
   async function switchSession(id) {
@@ -4175,6 +4217,9 @@ const AiPanel = (() => {
     );
 
     const messages = el('div', { class: 'ai-messages' });
+    messages.addEventListener('scroll', () => {
+      if (messages.scrollTop < 60) loadOlderMessages();
+    });
 
     // Read-only — the panel is always scoped to whatever project it was opened
     // for (or no project, for a fresh "Build with AI"); it can never be
