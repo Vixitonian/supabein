@@ -4198,10 +4198,15 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     // for the schema pass — generate it here instead of skipping it outright.
     // Review-on always passes an already-confirmed $approvedIntent, so this
     // never re-runs (and never re-generates) an intent the user already saw.
-    if ($approvedIntent === null && !empty($resumeCheckpoint['intent'])) {
-        // A crashed prior run already understood the requirements — reuse
-        // that instead of asking the model again.
-        $approvedIntent = $resumeCheckpoint['intent'];
+    $resumedPastIntent = !empty($resumeCheckpoint['intent']) || !empty($resumeCheckpoint['schema']) || !empty($resumeCheckpoint['plan']);
+    if ($approvedIntent === null && $resumedPastIntent) {
+        // A crashed prior run already got at least as far as schema/design
+        // (or beyond) — that only ever happens after requirements were
+        // already understood, so there is nothing left for this step to do,
+        // whether or not the checkpoint it resumed from happened to still
+        // carry the intent object itself (only the earliest 'intent'
+        // checkpoint does; later ones don't need to re-carry it).
+        $approvedIntent = $resumeCheckpoint['intent'] ?? null;
         $report(['stage' => 'requirements', 'status' => 'done', 'label' => 'Requirements understood (resumed)']);
     } elseif ($approvedIntent === null) {
         $report(['stage' => 'requirements', 'status' => 'start', 'label' => 'Understanding your requirements…']);
