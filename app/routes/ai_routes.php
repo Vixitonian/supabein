@@ -4179,9 +4179,18 @@ function ai_fetch_page_run(string $script, array $config): array
 // single job. The "confirm each stage" (Review on) flow instead calls
 // ai_run_build_schema_design() and ai_run_build_frontend() as two separate
 // jobs, with a user confirmation in between.
-/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
-function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true, array $refs = []): array
+/**
+ * @param array $refs See ai_generate_intent()'s doc comment for the shape.
+ * @param array|null $resumeCheckpoint A prior 'build' job's saved checkpoint
+ *   (see ai_run_build_and_deploy()'s doc comment) — when a stage's output is
+ *   already present here, that stage is skipped entirely and its saved
+ *   output reused, instead of re-running (and re-billing) it.
+ * @param callable|null $checkpoint Called as $checkpoint(string $stage, array
+ *   $data) right after each stage completes, so the caller can persist it.
+ */
+function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true, array $refs = [], ?array $resumeCheckpoint = null, ?callable $checkpoint = null): array
 {
+    $checkpoint = $checkpoint ?? function (string $stage, array $data): void {};
     $aiTrace = [];
 
     // Review-off ("watch only") never runs the separate intent-review step,
@@ -4189,7 +4198,12 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     // for the schema pass — generate it here instead of skipping it outright.
     // Review-on always passes an already-confirmed $approvedIntent, so this
     // never re-runs (and never re-generates) an intent the user already saw.
-    if ($approvedIntent === null) {
+    if ($approvedIntent === null && !empty($resumeCheckpoint['intent'])) {
+        // A crashed prior run already understood the requirements — reuse
+        // that instead of asking the model again.
+        $approvedIntent = $resumeCheckpoint['intent'];
+        $report(['stage' => 'requirements', 'status' => 'done', 'label' => 'Requirements understood (resumed)']);
+    } elseif ($approvedIntent === null) {
         $report(['stage' => 'requirements', 'status' => 'start', 'label' => 'Understanding your requirements…']);
         $_t0 = microtime(true);
         $approvedIntent = ai_generate_intent($client, $prompt, $history, $refs);
@@ -4198,10 +4212,45 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
         $storyCount = array_sum(array_map(fn($a) => is_array($a) ? count($a['stories'] ?? []) : 0, $approvedIntent['actors'] ?? []));
         $report(['stage' => 'requirements', 'status' => 'done', 'label' => 'Requirements understood',
                  'detail' => count($actorNames) . ' actor(s): ' . implode(', ', $actorNames) . ' — ' . $storyCount . ' user stor' . ($storyCount === 1 ? 'y' : 'ies')]);
+        $checkpoint('intent', ['intent' => $approvedIntent]);
     }
 
-    $schemaResult   = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report, $refs);
-    $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate, $refs);
+    // A 'plan' checkpoint (saved once frontend generation finishes, or once
+    // deploy finishes — both stages that only ever run AFTER schema/design)
+    // already carries the schema inside it, so schema/design never needs to
+    // re-run just because this resume's checkpoint happens to have been
+    // saved from a later stage than 'schema' itself.
+    if (!empty($resumeCheckpoint['schema']) || !empty($resumeCheckpoint['plan'])) {
+        $schemaResult = [
+            'schema'       => $resumeCheckpoint['schema'] ?? $resumeCheckpoint['plan'],
+            'design_brief' => $resumeCheckpoint['design_brief'] ?? [],
+            'aiTrace' => [], 'usage' => $client->getLastUsage(),
+        ];
+        $tableNames = array_map(fn($t) => $t['name'], $schemaResult['schema']['tables'] ?? []);
+        $report(['stage' => 'schema', 'status' => 'done', 'label' => 'Database schema ready (resumed)', 'detail' => count($tableNames) . ' table' . (count($tableNames) === 1 ? '' : 's') . ': ' . implode(', ', $tableNames)]);
+        $report(['stage' => 'design', 'status' => 'done', 'label' => 'Visual design chosen (resumed)']);
+    } else {
+        $schemaResult = ai_run_build_schema_design($prompt, $history, $approvedIntent, $client, $report, $refs);
+        $checkpoint('schema', ['intent' => $approvedIntent, 'schema' => $schemaResult['schema'], 'design_brief' => $schemaResult['design_brief']]);
+    }
+
+    if (!empty($resumeCheckpoint['plan'])) {
+        $frontendResult = ['plan' => $resumeCheckpoint['plan'], 'summary' => [
+            'project_name'   => $resumeCheckpoint['plan']['project_name'] ?? '',
+            'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $resumeCheckpoint['plan']['tables'] ?? []),
+            'frontend_files' => count($resumeCheckpoint['plan']['frontend']['files'] ?? []),
+        ], 'usage' => $client->getLastUsage(), 'aiTrace' => [], 'validation' => $resumeCheckpoint['validation'] ?? []];
+        $report(['stage' => 'frontend', 'status' => 'done', 'label' => 'Frontend generated (resumed)', 'detail' => count($resumeCheckpoint['plan']['frontend']['files'] ?? []) . ' file(s)']);
+        if ($validate) {
+            $report(['stage' => 'validate', 'status' => 'done', 'label' => $frontendResult['validation'] ? 'Validation found issues (resumed)' : 'No issues found (resumed)']);
+        }
+    } else {
+        $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate, $refs);
+        $checkpoint('frontend', [
+            'intent' => $approvedIntent, 'schema' => $schemaResult['schema'], 'design_brief' => $schemaResult['design_brief'],
+            'plan' => $frontendResult['plan'], 'validation' => $frontendResult['validation'],
+        ]);
+    }
 
     return [
         'plan'       => $frontendResult['plan'],
@@ -4222,23 +4271,49 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
 // forever while a completely different, older code path took over instead).
 // Doing deploy+test inside the same job gives them the same resumability
 // as generation for free.
-/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
-function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId, array $refs = []): array
+/**
+ * @param array $refs See ai_generate_intent()'s doc comment for the shape.
+ * @param array|null $resumeCheckpoint A prior 'build' job's checkpoint —
+ *   pass the ('mode'==='build') job's own saved result when retrying it via
+ *   resume_job_id. Its 'stage' key names the last stage that finished
+ *   ('intent'|'schema'|'frontend'|'deploy'); every stage up to and including
+ *   that one is skipped and its saved output reused verbatim (never
+ *   re-billed, and — critically for 'deploy' — never re-creates the
+ *   project). The stage that was RUNNING when the prior job died (most
+ *   often 'test', the one with a live browser subprocess) always re-runs.
+ * @param callable|null $checkpoint Wired by the worker to persist the
+ *   checkpoint to this job's own row after each stage — see
+ *   Catalog::saveJobCheckpoint().
+ */
+function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId, array $refs = [], ?array $resumeCheckpoint = null, ?callable $checkpoint = null): array
 {
-    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate, $refs);
+    $checkpoint = $checkpoint ?? function (string $stage, array $data): void {};
+    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate, $refs, $resumeCheckpoint, $checkpoint);
 
-    $report(['stage' => 'deploy', 'status' => 'start', 'label' => 'Deploying to staging…']);
-    $applyResult = ai_execute_build($genResult['plan'], $userId);
-    // Uploaded reference images (e.g. "use this as the logo") were staged as
-    // 'pending_assets' during generation, before a project existed to store
-    // them under — write the actual bytes now that ai_execute_build() has
-    // created one, so the __SB_PID__-placeholder URLs already baked into the
-    // generated frontend resolve to real files the moment it's viewed.
-    if (!empty($refs['pending_assets']) && !empty($applyResult['project']['id'])) {
-        ai_upload_pending_assets($refs['pending_assets'], (int)$applyResult['project']['id']);
+    if (!empty($resumeCheckpoint['apply'])) {
+        // The prior run already deployed this exact plan before it died —
+        // reuse that project/site/deploy rather than calling
+        // ai_execute_build() again, which would unconditionally create a
+        // SECOND project with the same name and fail on the duplicate-name
+        // constraint (or silently double it, if the name happened to differ).
+        $applyResult = $resumeCheckpoint['apply'];
+        $report(['stage' => 'deploy', 'status' => 'done', 'label' => 'Deployed (resumed)',
+                 'detail' => $applyResult['staging'] ? 'Reusing previously deployed project' : ($applyResult['site'] ? 'Site created — no frontend deployed' : 'No site created')]);
+    } else {
+        $report(['stage' => 'deploy', 'status' => 'start', 'label' => 'Deploying to staging…']);
+        $applyResult = ai_execute_build($genResult['plan'], $userId);
+        // Uploaded reference images (e.g. "use this as the logo") were staged as
+        // 'pending_assets' during generation, before a project existed to store
+        // them under — write the actual bytes now that ai_execute_build() has
+        // created one, so the __SB_PID__-placeholder URLs already baked into the
+        // generated frontend resolve to real files the moment it's viewed.
+        if (!empty($refs['pending_assets']) && !empty($applyResult['project']['id'])) {
+            ai_upload_pending_assets($refs['pending_assets'], (int)$applyResult['project']['id']);
+        }
+        $report(['stage' => 'deploy', 'status' => 'done', 'label' => 'Deployed',
+                 'detail' => $applyResult['staging'] ? 'Deployed to staging' : ($applyResult['site'] ? 'Site created — no frontend deployed' : 'No site created')]);
+        $checkpoint('deploy', ['plan' => $genResult['plan'], 'validation' => $genResult['validation'] ?? [], 'apply' => $applyResult]);
     }
-    $report(['stage' => 'deploy', 'status' => 'done', 'label' => 'Deployed',
-             'detail' => $applyResult['staging'] ? 'Deployed to staging' : ($applyResult['site'] ? 'Site created — no frontend deployed' : 'No site created')]);
 
     $hasDeployed = !empty($applyResult['deploy']) || !empty($applyResult['staging']) || !empty($applyResult['site']);
     $testResult  = null;
@@ -4966,11 +5041,19 @@ function ai_edit_agent_step_label(string $tool, array $args): string
 // 'incomplete' (bool), and when true, 'resume_state'/'turns_used' — the
 // turn-budget-exhausted case a follow-up request can pass back in via
 // $resumeState to continue this exact session instead of starting over.
-/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+/**
+ * @param array $refs See ai_generate_intent()'s doc comment for the shape.
+ * @param callable|null $checkpoint Called after every turn (and once more
+ *   right after finish() validates) with the same shape 'resume_state' below
+ *   would hold — lets the caller persist progress DURING the loop, not just
+ *   when it gracefully runs out of turns, so a hard worker crash mid-loop
+ *   still leaves a checkpoint a retry can resume from.
+ */
 function ai_run_edit_generation_agentic(
     string $prompt, array $history, array $existingSchema, array $currentFiles,
-    object $client, array $config, callable $report, int $projectId, ?array $resumeState = null, array $refs = []
+    object $client, array $config, callable $report, int $projectId, ?array $resumeState = null, array $refs = [], ?callable $checkpoint = null
 ): array {
+    $checkpoint = $checkpoint ?? function (array $state): void {};
     $hasRefs         = !empty($refs['attachments']) || !empty($refs['context']);
     $editAgentPrompt = ai_bind_auth_placeholders(AI_EDIT_AGENT_SYSTEM_PROMPT, $existingSchema)
                      . ($hasRefs ? ai_attachment_instruction_note() : '');
@@ -4980,6 +5063,25 @@ function ai_run_edit_generation_agentic(
     foreach ($currentFiles as $f) {
         if (isset($f['path'])) $byPath[$f['path']] = (string)($f['content'] ?? '');
     }
+
+    // A crashed prior run's agentic loop had already validated finish() (all
+    // that was left was this function returning and the caller's own
+    // validate stage) — nothing left to do here, skip the loop entirely and
+    // resolve straight to the same delta it was about to produce.
+    if (!empty($resumeState['delta_ready'])) {
+        $changedFiles = $resumeState['changed_files'] ?? [];
+        $delta = $resumeState['finish_args'];
+        $delta['frontend'] = ['files' => array_map(
+            fn($p) => ['path' => $p, 'content' => $changedFiles[$p]],
+            array_keys($changedFiles)
+        )];
+        $delta['aiTrace']     = [];
+        $delta['usage']       = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
+        $delta['incomplete']  = false;
+        $report(['stage' => 'changes', 'status' => 'done', 'label' => 'Changes ready (resumed)']);
+        return $delta;
+    }
+
     // A resumed run's staged writes were already deployed to staging by the
     // /v1/ai/apply call that followed the PREVIOUS (turn-budget-exhausted)
     // run — see the incomplete/resume_state block below — so $byPath (re-read
@@ -5087,6 +5189,7 @@ function ai_run_edit_generation_agentic(
             $deltaError = ai_validate_delta($candidateDelta, $existingSchema);
             if ($deltaError === null) {
                 $finishArgs = $candidateDelta;
+                $checkpoint(['delta_ready' => true, 'finish_args' => $finishArgs, 'changed_files' => $changedFiles]);
                 break;
             }
             $turnMsg = json_encode(['tool' => 'finish', 'error' =>
@@ -5108,6 +5211,12 @@ function ai_run_edit_generation_agentic(
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
         }
         $turnMsg = json_encode($toolResult);
+
+        // Persisted every turn (not just when the turn budget runs out below)
+        // so a worker killed mid-loop by the host — not just one that
+        // gracefully exhausts its turns — still leaves a resumable
+        // checkpoint. Same shape as the turn-budget-exhausted resume_state.
+        $checkpoint(['loop_history' => $loopHistory, 'changed_files' => $changedFiles, 'read_paths' => $readPaths, 'next_turn_msg' => $turnMsg]);
     }
 
     $incomplete = false;
@@ -5282,8 +5391,13 @@ function ai_run_build_frontend_agentic(
     return ['files' => $files, 'aiTrace' => $aiTrace, 'usage' => $totalUsage];
 }
 
-/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
-function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true, ?array $resumeState = null, array $refs = []): array
+/**
+ * @param array $refs See ai_generate_intent()'s doc comment for the shape.
+ * @param callable|null $checkpoint See ai_run_edit_generation_agentic()'s doc
+ *   comment — wired by the worker to persist progress DURING the agentic
+ *   loop via Catalog::saveJobCheckpoint(), not just when it returns.
+ */
+function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true, ?array $resumeState = null, array $refs = [], ?callable $checkpoint = null): array
 {
     $aiTrace = [];
 
@@ -5320,7 +5434,7 @@ function ai_run_edit_generation(int $projectId, string $prompt, array $history, 
     $report(['stage' => 'read', 'status' => 'done', 'label' => 'Loaded current project']);
 
     $report(['stage' => 'changes', 'status' => 'start', 'label' => 'Generating changes…']);
-    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId, $resumeState, $refs);
+    $delta = ai_run_edit_generation_agentic($prompt, $history, $existingSchema, $currentFiles, $client, $config, $report, $projectId, $resumeState, $refs, $checkpoint);
     $aiTrace     = array_merge($aiTrace, $delta['aiTrace']);
     $editUsage   = $delta['usage'];
     $incomplete  = $delta['incomplete'] ?? false;
@@ -7267,14 +7381,21 @@ PROMPT;
         $intent    = (isset($req['body']['intent']) && is_array($req['body']['intent'])) ? $req['body']['intent'] : null;
         $sessionId = isset($req['body']['session_id']) ? (int)$req['body']['session_id'] : null;
 
+        // Continuing a previous build job that died partway through — the
+        // worker resolves this to that job's own saved checkpoint (scoped to
+        // this same user), so a retry can skip straight past whatever
+        // already finished instead of redoing the whole pipeline.
+        $resumeJobId = isset($req['body']['resume_job_id']) ? (int)$req['body']['resume_job_id'] : 0;
+
         $payload = [
-            'prompt'      => $prompt,
-            'history'     => $history,
-            'intent'      => $intent,
-            'provider'    => $req['body']['provider'] ?? null,
-            'model'       => $req['body']['model'] ?? null,
-            'validate'    => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
-            'attachments' => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
+            'prompt'        => $prompt,
+            'history'       => $history,
+            'intent'        => $intent,
+            'provider'      => $req['body']['provider'] ?? null,
+            'model'         => $req['body']['model'] ?? null,
+            'validate'      => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            'resume_job_id' => $resumeJobId ?: null,
+            'attachments'   => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);

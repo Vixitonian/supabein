@@ -1257,10 +1257,18 @@ const AiPanel = (() => {
         // A stashed prompt from before the 2000-char cap (RESOLVE_PROMPT_MAX)
         // existed can itself be the reason this failed -- truncate defensively
         // so retrying never resends the exact same oversized prompt into the
-        // exact same rejection.
-        msg.data.retry = () => proceedWithEditStreaming({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), project_id: projectId, validate: true }, sess, msg);
+        // exact same rejection. resume_job_id (read here, before streamGenerate's
+        // resetProgressMsgForRetry deletes msg.data.jobId) lets the server pick
+        // up from whatever this job's own agentic loop last checkpointed instead
+        // of redoing every already-completed turn from scratch.
+        msg.data.retry = () => proceedWithEditStreaming({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), project_id: projectId, validate: true, resume_job_id: msg.data.jobId }, sess, msg);
       } else if (mode === 'build' && msg.data.resumePrompt) {
-        msg.data.retry = () => runBuildWatchOnly({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), validate: true }, sess, msg);
+        // Same resume_job_id idea as edit above, generalized to every stage of
+        // the build pipeline (schema/design/frontend/deploy/test) -- the server
+        // skips straight past whatever this job already finished and checkpointed
+        // before it failed, so a crash during (say) the test stage doesn't also
+        // re-generate the whole app and re-deploy a duplicate project.
+        msg.data.retry = () => runBuildWatchOnly({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), validate: true, resume_job_id: msg.data.jobId }, sess, msg);
       }
     });
   }
