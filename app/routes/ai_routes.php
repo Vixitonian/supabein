@@ -6188,12 +6188,13 @@ function ai_browser_agent_step_label(string $tool, array $args): string
 function ai_run_browser_test_agent(
     object $client, array $stories, string $appUrl, string $browserlessToken, bool $hasAuth, callable $report
 ): array {
-    if (!$stories) return ['stories' => [], 'passed' => 0, 'failed' => 0];
+    $zeroUsage = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
+    if (!$stories) return ['stories' => [], 'passed' => 0, 'failed' => 0, 'usage' => $zeroUsage];
 
     $script  = ai_browser_agent_script_generate($appUrl, $browserlessToken, $hasAuth);
     $handles = ai_browser_agent_spawn($script, \App::get('config'));
     if ($handles === null) {
-        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => 'Failed to launch the browser testing agent'];
+        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => 'Failed to launch the browser testing agent', 'usage' => $zeroUsage];
     }
 
     // Wait for the __init__ handshake (browser connected + logged in) before
@@ -6205,7 +6206,7 @@ function ai_run_browser_test_agent(
     $init = ai_browser_agent_read($handles, 25);
     if (!empty($init['error']) && ($init['tool'] ?? '') === '__init__') {
         ai_browser_agent_shutdown($handles);
-        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => $init['error']];
+        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => $init['error'], 'usage' => $zeroUsage];
     }
 
     $storiesText = implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . $s, $stories, array_keys($stories)));
@@ -6216,6 +6217,9 @@ function ai_run_browser_test_agent(
     $aiTrace  = [];
     $finished = false;
     $recentCalls = [];
+    // Aggregated across every turn — a loop of up to AI_BROWSER_TEST_AGENT_MAX_TURNS
+    // calls makes $client->getLastUsage() alone wildly undercount the real cost.
+    $totalUsage = $zeroUsage;
     $consecutiveParseFailures = 0;
 
     // The whole run's turn budget is shared across every story with no per-
@@ -6274,14 +6278,16 @@ function ai_run_browser_test_agent(
             continue;
         }
         $consecutiveParseFailures = 0;
-        $ms = (int)((microtime(true) - $_t0) * 1000);
+        $ms    = (int)((microtime(true) - $_t0) * 1000);
+        $usage = $client->getLastUsage();
+        foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
 
         $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
         $args = is_array($action) && is_array($action['args'] ?? null) ? $action['args'] : [];
 
         $aiTrace[] = ['stage' => 'browser_test_agent', 'system' => $agentPrompt, 'history' => [],
             'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
-            'response' => $action, 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => false];
+            'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
 
         $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => ai_browser_agent_step_label($tool, $args)]);
 
@@ -6362,7 +6368,7 @@ function ai_run_browser_test_agent(
 
     $passed = count(array_filter($recorded, fn($s) => $s['passed']));
     $failed = count($recorded) - $passed;
-    return ['stories' => $recorded, 'passed' => $passed, 'failed' => $failed, 'aiTrace' => $aiTrace];
+    return ['stories' => $recorded, 'passed' => $passed, 'failed' => $failed, 'aiTrace' => $aiTrace, 'usage' => $totalUsage];
 }
 
 // Deterministic syntax check for a single agent-written file — used by the
@@ -6521,6 +6527,7 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     // the schema + the deployed frontend instead, so every project still gets
     // story tests. Best effort throughout — any failure here just means the
     // deterministic tests above stand alone.
+    $totalUsage = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
     if ($client) {
         $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Testing user stories…']);
         try {
@@ -6529,9 +6536,12 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
             if (!$stories) {
                 $stories = ai_infer_stories($client, $schema, $indexHtml);
                 $source  = 'inferred';
+                $usage   = $client->getLastUsage();
+                foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
             }
             $authInfo   = ai_detect_auth($schema);
             $agentResult = ai_run_browser_test_agent($client, $stories, $appUrl, $browserlessToken, !empty($authInfo['table']), $report);
+            foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($agentResult['usage'][$k] ?? 0);
             if (!empty($agentResult['stories'])) {
                 $result['stories'] = array_merge($result['stories'] ?? [], $agentResult['stories']);
                 $result['passed']  = ($result['passed'] ?? 0) + $agentResult['passed'];
@@ -6567,6 +6577,8 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
         $validation    = ai_validator_check_project($schema, $frontendFiles);
         if ($client && array_filter($validation, fn($f) => $f['severity'] === 'error')) {
             $validation = ai_validator_explain_findings($validation, $client);
+            $usage = $client->getLastUsage();
+            foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
         }
         $errCount  = count(array_filter($validation, fn($f) => $f['severity'] === 'error'));
         $warnCount = count(array_filter($validation, fn($f) => $f['severity'] === 'warning'));
@@ -6579,7 +6591,7 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
 
     ai_track_new_rows_since($projectId, $catalog, $preTestMarks);
 
-    return array_merge($result, ['target' => $target, 'validation' => $validation]);
+    return array_merge($result, ['target' => $target, 'validation' => $validation, 'usage' => $totalUsage]);
 }
 
 // Hard cap on auto-fix cycles in ai_run_test_and_autofix() below. Each cycle
@@ -6603,8 +6615,17 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
 {
     $fixAttempts = [];
     $prevFailingSignature = null;
+    // ai_run_project_tests()'s own 'usage' only ever covers that ONE call —
+    // each retest below overwrites it on $result, so the running total
+    // across every test pass AND every autofix edit in between has to be
+    // tracked separately here, not read back off $result at the end.
+    $totalUsage = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
+    $addUsage = function (?array $usage) use (&$totalUsage) {
+        foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
+    };
 
     $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+    $addUsage($result['usage'] ?? null);
 
     for ($fixAttempt = 1; $fixAttempt <= AI_TEST_AUTOFIX_MAX_ATTEMPTS; $fixAttempt++) {
         $failingStories = array_values(array_filter($result['stories'] ?? [], fn($s) => empty($s['passed'])));
@@ -6632,6 +6653,7 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
 
         $editResult = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true);
         $plan       = $editResult['plan'] ?? [];
+        $addUsage($editResult['usage'] ?? null);
 
         $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
         if ($deltaError !== null) {
@@ -6666,10 +6688,12 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
 
         $report(['stage' => 'autofix', 'status' => 'active', 'label' => "Auto-fix attempt {$fixAttempt}: re-testing…"]);
         $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+        $addUsage($result['usage'] ?? null);
     }
 
     $result['autofix_attempts'] = $fixAttempts;
     $result['autofix_gave_up']  = (bool)array_filter($result['stories'] ?? [], fn($s) => empty($s['passed']));
+    $result['usage'] = $totalUsage;
     return $result;
 }
 

@@ -1621,7 +1621,7 @@ const AiPanel = (() => {
         testStage.testData = {
           stories: t.stories || [], passed: t.passed || 0, failed: t.failed || 0,
           error: t.error || null, screenshot: t.screenshot || null,
-          validation: t.validation || ev.validation || [],
+          validation: t.validation || ev.validation || [], usage: t.usage || null,
         };
       }
     }
@@ -2039,6 +2039,7 @@ const AiPanel = (() => {
       ? (ev) => { sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
           error: ev.error || null, screenshot: ev.screenshot || null, validation: ev.validation || [],
+          usage: ev.usage || null,
         }}); }
       : operationMode === 'edit'
       ? async (ev) => {
@@ -2061,6 +2062,7 @@ const AiPanel = (() => {
             testStage.testData = {
               stories: ev.stories || [], passed: ev.passed || 0, failed: ev.failed || 0,
               error: ev.error || null, screenshot: ev.screenshot || null, validation: ev.validation || [],
+              usage: ev.usage || null,
             };
           }
         }
@@ -2485,7 +2487,7 @@ const AiPanel = (() => {
         sess.messages.push({ id: 'test_' + Date.now(), role: 'ai', type: 'test', data: {
           stories: finalEv.stories || [], passed: finalEv.passed || 0, failed: finalEv.failed || 0,
           error: finalEv.error || null, screenshot: finalEv.screenshot || null,
-          validation: finalEv.validation || [],
+          validation: finalEv.validation || [], usage: finalEv.usage || null,
         }});
       } else if (!pollState.cancelled) {
         sess.messages.push({ id: 'test_err_' + Date.now(), role: 'ai', type: 'test',
@@ -2610,7 +2612,7 @@ const AiPanel = (() => {
   ];
 
   function renderTestCard(msg) {
-    const { stories = [], passed = 0, failed = 0, error, screenshot, validation = [] } = msg.data || {};
+    const { stories = [], passed = 0, failed = 0, error, screenshot, validation = [], usage } = msg.data || {};
     const total = passed + failed;
     const statusColor = error ? 'var(--danger)' : total === 0 ? 'var(--text-muted)' : failed === 0 ? '#22c55e' : 'var(--danger)';
     const statusText  = error
@@ -2710,6 +2712,8 @@ const AiPanel = (() => {
       resolveBtn.addEventListener('click', () => resolveIssues(msg.data, resolveBtn));
       cardActions.appendChild(resolveBtn);
     }
+    const tokenEl = renderTokenUsage(usage);
+    if (tokenEl) cardActions.appendChild(tokenEl);
     card.appendChild(cardActions);
 
     return card;
@@ -4012,7 +4016,7 @@ const AiPanel = (() => {
         testStage.testData = {
           stories: finalEv.stories || [], passed: finalEv.passed || 0, failed: finalEv.failed || 0,
           error: finalEv.error || null, screenshot: finalEv.screenshot || null,
-          validation: finalEv.validation || [],
+          validation: finalEv.validation || [], usage: finalEv.usage || null,
         };
       } else if (!pollState.cancelled) {
         testStage.status = 'error';
