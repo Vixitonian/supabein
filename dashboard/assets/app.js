@@ -1764,6 +1764,16 @@ const AiPanel = (() => {
       // card through so the post-deploy auto-test folds into its 'test'
       // stage instead of spawning a separate card.
       onComplete: async (ev, pMsg) => {
+        // Captured BEFORE applyPlan() runs -- applyPlan() triggers the
+        // post-deploy auto-test (runEditAutoTest), which deliberately
+        // overwrites this SAME card's data.jobId with the auto-test job's id
+        // so the test folds into the card's own 'test' stage instead of
+        // spawning a separate one. Reading pMsg.data.jobId AFTER applyPlan()
+        // returns picks up that overwritten value instead of the edit job
+        // that actually ran out of turns -- live-caught: a resume card whose
+        // jobId pointed at a 'test' job with no agentic-loop checkpoint at
+        // all, so "Continue this edit" had nothing real to resume from.
+        const editJobId = pMsg?.data?.jobId;
         await applyPlan(ev.plan, 'edit', null, ev.validation, pMsg);
         // The agent ran out of turns before calling finish() — whatever it
         // had staged was still applied above (same as a normal edit), but
@@ -1771,15 +1781,21 @@ const AiPanel = (() => {
         // agent session (its full tool-call trace, not a fresh restart)
         // rather than silently treating a partial result as complete.
         if (ev.incomplete) {
+          // progressMsgId is the card's own stable message id -- unlike
+          // data.jobId (which the auto-test above may already have
+          // overwritten), this never changes, so "Continue this edit" can
+          // always find the right card to reuse regardless of how much has
+          // happened to it since.
           await addMessage(currentSessionId, { role: 'ai', type: 'resume', content: '', data: {
-            jobId: pMsg?.data?.jobId, projectId: ev.plan?.project_id, prompt: body.prompt, turnsUsed: ev.turns_used,
+            jobId: editJobId, progressMsgId: pMsg?.id, projectId: ev.plan?.project_id,
+            prompt: body.prompt, turnsUsed: ev.turns_used,
           } });
         }
       },
     }, existingProgressMsg, (msg) => proceedWithEditStreaming(body, sess, msg));
   }
 
-  async function continueEditJob(jobId, projectId, prompt, btn) {
+  async function continueEditJob(jobId, projectId, prompt, btn, progressMsgId) {
     if (btn) btn.disabled = true;
     try {
       const sess = currentSession();
@@ -1793,7 +1809,17 @@ const AiPanel = (() => {
       // in the panel. Reusing the original card is also what makes this
       // continuation-of-a-continuation-of-a-continuation chain visually
       // coherent instead of leaving a trail of stale cards behind.
-      const existingProgressMsg = sess?.messages.find(m => m.type === 'progress' && m.data.jobId === jobId);
+      //
+      // Matched by the card's own stable message id first -- the auto-test
+      // that runs right after this same edit deploys deliberately overwrites
+      // the card's data.jobId with the TEST job's id (see runEditAutoTest),
+      // so by the time this button is actually clicked, a jobId match would
+      // often find nothing (or worse, find the wrong card and hand ITS id
+      // back to the server as if it were an edit-agent checkpoint, which it
+      // isn't). Falls back to matching by jobId only for older persisted
+      // resume cards saved before progressMsgId existed.
+      const existingProgressMsg = sess?.messages.find(m =>
+        m.type === 'progress' && (progressMsgId ? m.id === progressMsgId : m.data.jobId === jobId));
       await proceedWithEditStreaming({ prompt, project_id: projectId, validate: true, resume_job_id: jobId }, sess, existingProgressMsg);
     } finally {
       if (btn) btn.disabled = false;
@@ -1801,14 +1827,14 @@ const AiPanel = (() => {
   }
 
   function renderResumeCard(msg) {
-    const { jobId, projectId, prompt, turnsUsed } = msg.data || {};
+    const { jobId, projectId, prompt, turnsUsed, progressMsgId } = msg.data || {};
     const card = el('div', { class: 'ai-msg ai-msg-ai', style: 'padding:12px 14px' },
       el('div', { style: 'font-size:0.8rem;color:var(--text-muted);margin-bottom:8px' },
         `Used all ${turnsUsed || 'its'} turns before finishing this request — some of it may still be incomplete.`),
       el('button', { class: 'btn btn-ai btn-sm' }, '▶ Continue this edit')
     );
     const btn = card.querySelector('button');
-    btn.addEventListener('click', () => continueEditJob(jobId, projectId, prompt, btn));
+    btn.addEventListener('click', () => continueEditJob(jobId, projectId, prompt, btn, progressMsgId));
     return card;
   }
 
