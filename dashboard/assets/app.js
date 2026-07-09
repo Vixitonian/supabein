@@ -967,14 +967,31 @@ const AiPanel = (() => {
       currentAbortController.abort();
       currentAbortController = null;
     }
-    const sess = currentSession();
     if (activeJobPoll) {
       activeJobPoll.cancelled = true;
       activeJobPoll = null;
-      // Tell the server to actually kill the worker process too — matches the
-      // old behavior where aborting the stream fetch also killed the PHP side.
-      const jobMsg = sess && sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
-      if (jobMsg) Api.post(`/v1/ai/jobs/${jobMsg.data.jobId}/cancel`, {}).catch(() => {});
+    }
+    const sess = currentSession();
+    // The card actually showing a spinner right now -- covers both "still
+    // generating" (jobDone false) and "generation finished, now deploying/
+    // testing" (jobDone already true, but a later stage went active). The
+    // old lookup only matched the first case via !jobDone, so stopping
+    // mid-deploy left the card spinning forever with no error and no retry
+    // button: nothing here ever touched its stage or error state at all.
+    const stoppedMsg = sess && sess.messages.slice().reverse()
+      .find(m => m.type === 'progress' && m.data.stages.some(s => s.status === 'active'));
+    let jobIdToCancel = null;
+    if (stoppedMsg) {
+      // Only meaningful mid-generation -- once jobDone is already true the
+      // background job itself already finished server-side; whatever's still
+      // "active" (deploy/test) is a plain HTTP call already covered by
+      // currentAbortController above, not a job to cancel.
+      if (!stoppedMsg.data.jobDone && stoppedMsg.data.jobId) jobIdToCancel = stoppedMsg.data.jobId;
+      const active = stoppedMsg.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
+      stoppedMsg.data.jobDone = true;
+      stoppedMsg.data.error = 'Stopped';
+      stoppedMsg.data.reconnecting = false;
     }
     // Reset the UI immediately so the stop button responds even if the
     // in-flight request takes a moment to unwind (or the backend keeps going).
@@ -985,6 +1002,17 @@ const AiPanel = (() => {
     if (sess) sess.messages = sess.messages.filter(m => m.type !== 'thinking');
     updateSendBtn();
     renderMessages();
+    // Persist immediately -- without this, a reload (or another tab, or the
+    // next foreground resync) would still find the card looking in-progress
+    // and try to reconnect/resume it, even though Stop already resolved it.
+    if (sess) persistSession(sess).catch(() => {});
+    // Tell the server to actually kill the worker process too — matches the
+    // old behavior where aborting the stream fetch also killed the PHP side.
+    if (jobIdToCancel) {
+      Api.post(`/v1/ai/jobs/${jobIdToCancel}/cancel`, {}).catch(e => {
+        console.error('[AiPanel] failed to cancel job server-side', jobIdToCancel, e);
+      });
+    }
   }
 
   function updateSendBtn() {
