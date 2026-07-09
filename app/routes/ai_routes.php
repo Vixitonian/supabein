@@ -7686,7 +7686,24 @@ PROMPT;
 
     $router->get('/v1/ai/jobs', function (array $req): void {
         $catalog = \SupaBein\Catalog::getInstance();
-        json_out($catalog->listActiveJobs((int)$req['auth']['user_id']));
+        $jobs = $catalog->listActiveJobs((int)$req['auth']['user_id']);
+        // Same orphan sweep GET /v1/ai/jobs/:id already applies to a single
+        // job -- without it, a job whose worker died (OOM, host restart, any
+        // crash that never reaches the try/catch that marks it failed) sits
+        // 'running' here forever. That's what silently broke the dashboard's
+        // active-jobs watchdog: it asks "is my stuck job still in the active
+        // list?" specifically so a "no" means safe-to-reconnect -- but a
+        // truly-dead job answered "yes" on every single poll, indefinitely,
+        // since nothing here ever looked past its status column to check
+        // whether the process behind it actually still existed.
+        $jobs = array_values(array_filter(array_map(function ($job) use ($catalog) {
+            if (ai_job_is_orphaned($job)) {
+                $catalog->markJobFailed((int)$job['id'], 'Worker process stopped unexpectedly — please retry.');
+                return null;
+            }
+            return $job;
+        }, $jobs)));
+        json_out($jobs);
     }, ['auth_middleware']);
 
     $router->post('/v1/ai/jobs/:id/cancel', function (array $req): void {

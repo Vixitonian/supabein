@@ -933,8 +933,12 @@ class Catalog
 
     public function listActiveJobs(int $userId): array
     {
+        // pid included so the caller can run the same orphan check
+        // (ai_job_is_orphaned()) the single-job endpoint already does -- it
+        // needs both pid and updated_at, neither of which this returned
+        // before.
         $stmt = $this->pdo->prepare(
-            "SELECT id, user_id, session_id, mode, status, created_at, updated_at
+            "SELECT id, user_id, session_id, mode, status, pid, created_at, updated_at
              FROM ai_jobs WHERE user_id = ? AND status IN ('queued','running')
              ORDER BY created_at DESC"
         );
