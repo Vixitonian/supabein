@@ -4979,6 +4979,21 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
     return false;
 }
 
+// A rate-limited request never reached the model at all -- there is no
+// "response" to have been malformed. Live-caught by profiling a real test
+// run: of 21 turns that showed "Response was invalid, retrying…" on
+// screen, 20 were plain HTTP 429s from the provider, not the model
+// producing bad JSON. Every one of the three agent turn loops below caught
+// ALL \Throwable the same way and labeled every one of them identically,
+// which is what made a pure rate-limiting problem look like a model/schema
+// quality problem in the UI and in any trace pulled afterward for analysis.
+function ai_agent_is_rate_limited(string $errorMsg): bool
+{
+    return stripos($errorMsg, '429') !== false
+        || stripos($errorMsg, 'too many requests') !== false
+        || stripos($errorMsg, 'rate limit') !== false;
+}
+
 // General stuck-loop detector shared by every agent turn loop below. Two
 // live-caught bugs this session — an edit agent re-reading the same
 // unchanged file ~9 turns in a row, and a test agent re-attempting login
@@ -5209,9 +5224,19 @@ function ai_run_edit_generation_agentic(
             $aiTrace[] = ['stage' => 'edit_agent', 'system' => $editAgentPrompt, 'history' => [],
                 'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
                 'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
-            $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
-                'detail' => 'Response was invalid, retrying…']);
-            $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            // A rate limit isn't the model's fault -- telling it "your JSON
+            // was malformed, write something shorter" is actively wrong
+            // feedback for a request that was rejected before generation
+            // even started, and would count toward the escalating "you keep
+            // failing" nudge for something the model never did.
+            if (ai_agent_is_rate_limited($e->getMessage())) {
+                $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
+                    'detail' => 'Rate limited by the AI provider — waiting…']);
+            } else {
+                $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
+                    'detail' => 'Response was invalid, retrying…']);
+                $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            }
             continue;
         }
         $consecutiveParseFailures = 0;
@@ -5376,9 +5401,14 @@ function ai_run_build_frontend_agentic(
             $aiTrace[] = ['stage' => 'frontend_agent', 'system' => $agentPrompt, 'history' => [],
                 'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
                 'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
-            $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
-                'detail' => 'Response was invalid, retrying…']);
-            $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            if (ai_agent_is_rate_limited($e->getMessage())) {
+                $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+                    'detail' => 'Rate limited by the AI provider — waiting…']);
+            } else {
+                $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+                    'detail' => 'Response was invalid, retrying…']);
+                $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            }
             continue;
         }
         $consecutiveParseFailures = 0;
@@ -6343,8 +6373,12 @@ function ai_run_browser_test_agent(
             $aiTrace[] = ['stage' => 'browser_test_agent', 'system' => $agentPrompt, 'history' => [],
                 'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
                 'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
-            $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => 'Response was invalid, retrying…']);
-            $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            if (ai_agent_is_rate_limited($e->getMessage())) {
+                $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => 'Rate limited by the AI provider — waiting…']);
+            } else {
+                $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => 'Response was invalid, retrying…']);
+                $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            }
             continue;
         }
         $consecutiveParseFailures = 0;
