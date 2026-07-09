@@ -2124,7 +2124,35 @@ const AiPanel = (() => {
   // reloaded mid-operation), resume polling it right where it left off —
   // this is what makes reload/rotate/close-the-tab safe.
   function resumeActiveJobIfAny(sess) {
-    if (!sess || activeJobPoll) return;
+    if (!sess) return;
+
+    // A progress card that never got a jobId means the POST that creates the
+    // job itself never completed -- most plausibly the tab being frozen or
+    // killed by the mobile OS mid-request. Every recovery path in this file,
+    // including the search two lines below, requires data.jobId to be
+    // truthy, so a card stuck in this state was invisible to all of them:
+    // no jobId to poll, no error to show a retry button for, permanently
+    // stuck with zero UI affordance. Live-caught directly in the database --
+    // a card created hours earlier, still sitting jobId:null/jobDone:false/
+    // error:null. A short grace period avoids flagging a creation request
+    // that's still genuinely in flight in THIS exact tab (streamGenerate
+    // doesn't set activeJobPoll until after the POST resolves, so the guard
+    // above doesn't cover this window on its own).
+    const orphaned = sess.messages.find(m => {
+      if (m.type !== 'progress' || m.data.jobId || m.data.jobDone) return false;
+      const createdAt = parseInt(String(m.id).split('_')[1], 10);
+      return !isNaN(createdAt) && Date.now() - createdAt > 60000;
+    });
+    if (orphaned) {
+      const active = orphaned.data.stages.find(s => s.status === 'active');
+      if (active) active.status = 'error';
+      orphaned.data.jobDone = true;
+      orphaned.data.error = "This never started — the request to begin it didn't go through. Please retry.";
+      persistSession(sess).catch(() => {});
+      renderMessages();
+    }
+
+    if (activeJobPoll) return;
     const progressMsg = sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
     if (!progressMsg) return;
 
