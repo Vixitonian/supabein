@@ -2225,6 +2225,20 @@ const AiPanel = (() => {
       renderMessages();
     }
 
+    // activeJobPoll is one global, not scoped per-session -- a poll for a
+    // DIFFERENT session's job that went silently dead (network drop, tab
+    // backgrounding) can leave it non-null long after that poll stopped
+    // ticking. Without clearing it here, this guard treats that stale,
+    // completely unrelated reference as "already polling" and bails before
+    // ever looking at THIS session's own stuck job. Previously only open()
+    // cleared this, once, before session selection even ran -- switchSession()
+    // (what "Run tests" / clicking a session in the sidebar goes through)
+    // never did, so a session created after a prior one's poll went stale
+    // could be silently blocked from ever resuming, permanently, with no
+    // error and no retry button -- exactly the "still stuck after switching
+    // sessions" report, live-caught on a job that had already finished
+    // server-side over 25 minutes earlier.
+    clearStalePollIfAny();
     if (activeJobPoll) return;
     const progressMsg = sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
     if (!progressMsg) return;
