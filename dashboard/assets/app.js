@@ -1755,7 +1755,18 @@ const AiPanel = (() => {
     if (btn) btn.disabled = true;
     try {
       const sess = currentSession();
-      await proceedWithEditStreaming({ prompt, project_id: projectId, validate: true, resume_job_id: jobId }, sess);
+      // Without this, proceedWithEditStreaming gets no existingProgressMsg,
+      // so streamGenerate falls into its "brand new card" branch instead of
+      // resetting/reusing the original job's card — the continuation then
+      // has no visible progress card of its own to spin on-screen at all
+      // (the old card, already resolved, just sits there unchanged), even
+      // though the resumed job is genuinely running server-side. Live-caught:
+      // a resumed job with 40+ real progress events and no spinner anywhere
+      // in the panel. Reusing the original card is also what makes this
+      // continuation-of-a-continuation-of-a-continuation chain visually
+      // coherent instead of leaving a trail of stale cards behind.
+      const existingProgressMsg = sess?.messages.find(m => m.type === 'progress' && m.data.jobId === jobId);
+      await proceedWithEditStreaming({ prompt, project_id: projectId, validate: true, resume_job_id: jobId }, sess, existingProgressMsg);
     } finally {
       if (btn) btn.disabled = false;
     }
