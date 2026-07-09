@@ -79,6 +79,7 @@ class NvidiaClient
             ];
             $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
+            $responseHeaders = [];
             $ch = curl_init(self::ENDPOINT);
             curl_setopt_array($ch, [
                 CURLOPT_RETURNTRANSFER => true,
@@ -91,6 +92,13 @@ class NvidiaClient
                 ],
                 CURLOPT_TIMEOUT        => 420,
                 CURLOPT_CONNECTTIMEOUT => 10,
+                // Captured so a 429 can honor the server's own Retry-After
+                // instead of guessing at a backoff — see below.
+                CURLOPT_HEADERFUNCTION => function ($curlHandle, string $headerLine) use (&$responseHeaders): int {
+                    $parts = explode(':', $headerLine, 2);
+                    if (count($parts) === 2) $responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+                    return strlen($headerLine);
+                },
             ]);
 
             $response = curl_exec($ch);
@@ -132,8 +140,25 @@ class NvidiaClient
                 // delay, hits 429 again instantly, and burns its entire turn
                 // budget on rate-limit errors in milliseconds instead of ever
                 // getting a real generation through.
+                //
+                // 429 gets its own, longer schedule than plain 5xx -- a real
+                // agentic loop (the browser-test agent alone makes 60-90+ of
+                // these calls per run) profiled at 17-of-17 and 20-of-21
+                // "malformed response" retries actually being 429s that the
+                // OLD attempt*2 (2s/4s/6s, 12s total) schedule never
+                // recovered from even once across all 4 attempts. Respect
+                // the server's own Retry-After when it sends one (capped at
+                // 60s so a huge/bogus value can't hang a turn indefinitely);
+                // otherwise back off on a schedule long enough to plausibly
+                // cross a per-minute rate-limit window.
                 if (($httpCode >= 500 || $httpCode === 429 || str_contains($msg, 'DEGRADED')) && $attempt < 4) {
-                    sleep($attempt * 2);
+                    if ($httpCode === 429) {
+                        $retryAfter = isset($responseHeaders['retry-after']) ? (float)$responseHeaders['retry-after'] : null;
+                        $wait = $retryAfter !== null ? min(60.0, max(1.0, $retryAfter)) : (10 * $attempt);
+                    } else {
+                        $wait = $attempt * 2;
+                    }
+                    sleep((int)ceil($wait));
                     continue;
                 }
                 throw $lastError;
