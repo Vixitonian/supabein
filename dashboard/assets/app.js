@@ -139,7 +139,15 @@ const Api = (() => {
     // connection it could sit "pending" for up to 10 minutes doing the one
     // job that's supposed to catch that. Live-caught in the network tab.
     const isJobsPath = path.startsWith('/v1/ai/jobs');
-    const showBar = !isJobsPath;
+    // Session syncing (loading a session, and especially the background
+    // auto-save PATCH pollJob() fires roughly every 2s while a job has new
+    // progress events) is the same kind of ambient, non-user-initiated
+    // traffic as job polling -- it was flashing the top bar every couple of
+    // seconds for the entire length of any active job, which reads as the
+    // whole page "periodically refreshing" rather than anything a user asked
+    // for. The progress card itself is the real feedback for that; the top
+    // bar is for direct actions (send, apply, delete...).
+    const showBar = !isJobsPath && !path.startsWith('/v1/ai/sessions');
     if (showBar) LoadingBar.start();
 
     // Job-status polls are lightweight and frequent — bound each attempt to a
