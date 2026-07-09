@@ -5879,20 +5879,25 @@ Respond with ONLY a single JSON object — no markdown fences, no explanation, n
 exactly as one action:
   {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
 
-Available tools:
+Available tools — navigate/click/fill/wait each already return a fresh snapshot of the page as
+part of their own result (no need to follow any of them with a separate snapshot call just to see
+what they did):
   navigate      args: {"path": string}
-    Goes to a hash route of this app, e.g. "/" or "/notes/3/edit". Returns a fresh snapshot.
+    Goes to a hash route of this app, e.g. "/" or "/notes/3/edit". Result includes a fresh snapshot.
+  click         args: {"index": number}
+    Clicks the element at that index from the MOST RECENT snapshot. Result includes a fresh snapshot
+    taken right after, so you see the effect immediately — no separate look needed.
+  fill          args: {"index": number, "value": string}
+    Types into the input/textarea at that index from the most recent snapshot. Result includes a
+    fresh snapshot taken right after.
+  wait          args: {"ms": number}  (max 3000)
+    Pauses for async UI updates (a save request, a re-render) to settle, then returns a fresh
+    snapshot — use this when you need MORE time to pass before checking, not just to see current state.
   snapshot      args: {}
     Returns the CURRENT page's visible interactive elements, each tagged with an "index" — the ONLY
-    way to address an element in click/fill. Also returns a short excerpt of visible text. Call this
-    after every navigate, click, or wait — you cannot know what changed otherwise, and an index from
-    an earlier snapshot may no longer point at the same thing.
-  click         args: {"index": number}
-    Clicks the element at that index from the MOST RECENT snapshot.
-  fill          args: {"index": number, "value": string}
-    Types into the input/textarea at that index from the most recent snapshot.
-  wait          args: {"ms": number}  (max 3000)
-    Pauses for async UI updates (a save request, a re-render) to settle before your next snapshot.
+    way to address an element in click/fill. Also returns a short excerpt of visible text. You
+    usually don't need to call this explicitly — only if you want to re-check without taking an
+    action first, or an index from an earlier turn may no longer point at the same thing.
   report_story  args: {"label": string, "passed": boolean, "detail": string}
     Records ONE story's real, observed result, then move on to testing the next one. "passed" must
     reflect what a snapshot actually showed you — never assume an action worked, verify it.
@@ -5903,13 +5908,13 @@ Hard rules:
 - NEVER invent a selector or assume a page's structure — the only elements you may click or fill are
   ones an index from your most recent snapshot actually showed you.
 - Verify, don't assume: after an action that should change something (checking a box, saving a form,
-  deleting a row), call snapshot — after a short `wait` if the change might be async — and read the
-  real result before calling report_story.
+  deleting a row), read the snapshot that came back with it — use `wait` first if the change might be
+  async (its result is a fresh snapshot too) — before calling report_story.
 - Never click the same element twice in a row to "make sure" or because you didn't see the expected
   change yet. A checkbox/toggle you click again before its first click's own effect has landed gets
   flipped right back to where it started — that looks exactly like "nothing happened" but is actually
-  your own two actions canceling out. If an effect isn't visible yet, `wait` then `snapshot` — never
-  re-click the same control to check again.
+  your own two actions canceling out. If an effect isn't visible yet, `wait` — never re-click the same
+  control to check again.
 - A tool error saying the page/browser was closed, disconnected, or crashed is a TEST-INFRASTRUCTURE
   failure, not evidence about the app. Never conclude a feature "doesn't work" from an error like
   that — report_story it false with a detail that plainly says the test session was interrupted
@@ -6085,18 +6090,23 @@ async function runCommand(cmd) {
     // like the same still-live element can double-toggle it back before the
     // first click's own effect ever became visible.
     await page.waitForTimeout(300);
-    return { tool, result: { ok: true } };
+    // Bundling a fresh snapshot into the result (same as navigate already
+    // does) instead of making the model spend a whole separate LLM turn on
+    // an explicit snapshot call to see what its own action just did — that
+    // was ~10s of pure model-decision latency per click/fill/wait for
+    // nothing but permission to look at the page it just acted on.
+    return { tool, result: Object.assign({ ok: true }, await doSnapshot()) };
   }
   if (tool === 'fill') {
     const h = lastHandles[args.index];
     if (!h) return { tool, error: 'no element at index ' + args.index + ' — call snapshot again' };
     await h.fill(String(args.value ?? ''), { timeout: 8000 });
-    return { tool, result: { ok: true } };
+    return { tool, result: Object.assign({ ok: true }, await doSnapshot()) };
   }
   if (tool === 'wait') {
     const ms = Math.min(Math.max(parseInt(args.ms, 10) || 500, 0), 3000);
     await page.waitForTimeout(ms);
-    return { tool, result: { ok: true } };
+    return { tool, result: Object.assign({ ok: true }, await doSnapshot()) };
   }
   return { tool, error: 'unknown tool: ' + tool };
 }
