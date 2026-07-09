@@ -130,7 +130,16 @@ const Api = (() => {
 
     // Job-status polling fires every ~2s while a job runs and already has its
     // own progress card — showing the global bar for it too would just flicker.
-    const showBar = !path.includes('/ai/jobs/');
+    // Covers BOTH the single-job poll (/v1/ai/jobs/:id) and the active-jobs
+    // list (/v1/ai/jobs, no id) -- a plain .includes('/ai/jobs/') requires the
+    // trailing slash a bare list request never has, so it silently missed the
+    // list call and left it on the 10-minute generation-request timeout below.
+    // That's the exact request the 15s watchdog (refreshActiveJobSessions)
+    // depends on to notice a stuck card and recover it -- on a bad mobile
+    // connection it could sit "pending" for up to 10 minutes doing the one
+    // job that's supposed to catch that. Live-caught in the network tab.
+    const isJobsPath = path.startsWith('/v1/ai/jobs');
+    const showBar = !isJobsPath;
     if (showBar) LoadingBar.start();
 
     // Job-status polls are lightweight and frequent — bound each attempt to a
@@ -139,7 +148,7 @@ const Api = (() => {
     // assumes each failed attempt fails fast). Generation requests (build/
     // edit/seed) keep the generous 10-minute ceiling since those are real,
     // long-running single calls.
-    const signal = abortSignal ?? AbortSignal.timeout(path.includes('/ai/jobs/') ? 15000 : 600000);
+    const signal = abortSignal ?? AbortSignal.timeout(isJobsPath ? 15000 : 600000);
     let res;
     try {
       res = await fetch(BASE + path, { method, headers, body, signal });
@@ -148,9 +157,8 @@ const Api = (() => {
       if (e instanceof DOMException) {
         if (abortSignal?.aborted) throw e;
         if (e.name === 'TimeoutError' || e.name === 'AbortError') {
-          const isPoll = path.includes('/ai/jobs/');
           throw new ApiError(
-            isPoll
+            isJobsPath
               ? 'Timed out checking job status — retrying…'
               : 'Request timed out after 10 minutes — the server took too long. Try a simpler prompt or check server health.',
             408, {}
@@ -693,6 +701,7 @@ const AiPanel = (() => {
   // so their live-job state can't be read off an in-memory progress card the
   // way the current session's can.
   let sessionsWithActiveJob = new Set();
+  let refreshingActiveJobSessions = false;
   let activeJobRefreshTimer = null;
 
   // Ordered best-to-least capable for software/frontend generation (scale, tier, coding
@@ -1167,6 +1176,12 @@ const AiPanel = (() => {
   }
 
   async function refreshActiveJobSessions() {
+    // The 15s timer and the instant on-foreground trigger can both fire close
+    // together (or the previous call is still waiting out its own timeout on
+    // a bad connection) -- without this, overlapping calls pile up rather
+    // than the newest one just reusing whatever's already in flight.
+    if (refreshingActiveJobSessions) return;
+    refreshingActiveJobSessions = true;
     try {
       const jobs = await Api.get('/v1/ai/jobs');
       sessionsWithActiveJob = new Set((jobs || []).filter(j => j.session_id != null).map(j => String(j.session_id)));
@@ -1195,6 +1210,7 @@ const AiPanel = (() => {
         }
       }
     } catch (e) { /* leave the last-known set in place on a transient failure */ }
+    finally { refreshingActiveJobSessions = false; }
     renderSidebar();
   }
 
