@@ -176,6 +176,9 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#projects-create">POST /projects</a>
     <a class="sb-link" href="#projects-delete">DELETE /projects/:id</a>
     <a class="sb-link" href="#rotate-service-key">POST rotate-service-key</a>
+    <a class="sb-link" href="#projects-overview">Overview (account + per-project)</a>
+    <a class="sb-link" href="#projects-seed-clear">Clear seed data</a>
+    <a class="sb-link" href="#projects-cleanup">Cleanup / reconcile</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Tables</span>
@@ -218,6 +221,13 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#deploy-diff">Diff deploys</a>
     <a class="sb-link" href="#deploy-browse">Browse deployed files</a>
     <a class="sb-link" href="#deploy-download">Download deploy (zip)</a>
+    <a class="sb-link" href="#sites-debug">Debug (filesystem diagnostics)</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Error Logs</span>
+    <a class="sb-link" href="#errors-list">GET (list errors)</a>
+    <a class="sb-link" href="#errors-download">GET (download as JSON)</a>
+    <a class="sb-link" href="#errors-clear">DELETE (clear all)</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Access Tokens</span>
@@ -231,6 +241,7 @@ tr:last-child td{border-bottom:none}
 
 <h1>API Reference</h1>
 <p>All endpoints live under <code>/api/v1</code>. Responses are JSON. Authentication uses the <code>Authorization: Bearer &lt;token&gt;</code> header.</p>
+<p style="color:var(--muted);font-size:0.85rem">This reference covers the data/schema/deploy API — what you'd use to build or integrate with a project yourself. SupaBein's own in-dashboard AI chat builder is a separate, internal system (its endpoints aren't part of this public surface and aren't documented here) — if you're building externally, use the endpoints below rather than trying to reverse-engineer the dashboard's own network calls.</p>
 
 <!-- ── Quick Start ── -->
 <h2 id="quickstart">Quick Start</h2>
@@ -299,7 +310,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
   <li><strong>Deploys are staging-first by design.</strong> A zip/file upload always lands in <code>staging/</code>; call <a href="#deploy-publish">Publish to live</a> only when explicitly instructed to make it the live version.</li>
   <li><strong>Set a real <code>User-Agent</code> header on every request</strong> (e.g. <code>User-Agent: MyBuilder/1.0</code>), especially file uploads. The hosting-level WAF in front of this API blocks generic/absent User-Agents on some routes and returns a plain HTML 403 page instead of a JSON error — indistinguishable from an auth failure unless you know to check for it.</li>
   <li><strong>The root <code>.htaccess</code> of a deployed site is managed by SupaBein and cannot be uploaded, changed, or removed</strong> — every deploy/finalize call overwrites it. If you need client-side routing (a SPA with pushState routes), set <code>spa_mode: true</code> when creating the site instead of trying to write rewrite rules yourself; hash-based routing (<code>#/path</code>) works with no server config at all.</li>
-  <li><strong>To verify a deploy, prefer a plain request over driving a headless browser at the live URL.</strong> A live subdomain may not resolve from a sandboxed/CI network, and the same WAF that blocks bad User-Agents can reset headless-browser traffic too. A direct <code>curl</code>/<code>fetch</code> of the returned <code>live_url</code>/<code>staging_url</code>, or reading files back via <a href="#deploy-browse">Browse deployed files</a>, is more reliable from an automated environment.</li>
+  <li><strong>To verify a deploy, prefer a plain request over driving a headless browser at the live URL.</strong> A live subdomain may not resolve from a sandboxed/CI network, and the same WAF that blocks bad User-Agents can reset headless-browser traffic too. A direct <code>curl</code>/<code>fetch</code> of the returned <code>live_url</code>/<code>staging_url</code>, or reading files back via <a href="#deploy-browse">Browse deployed files</a>, is more reliable from an automated environment. After a deploy, also check <a href="#errors-list">Error Logs</a> — every deployed app auto-reports its own client-side JS errors with zero setup, which is real evidence the app works for actual visitors, not just that the files are present.</li>
   <li><strong>Design within the Limitations above</strong> rather than discovering them by trial and error — most "I need X" cases (auth, simple CRUD, storage) are already covered by this API; the limits are a stable design constraint, not a bug to route around.</li>
 </ul>
 
@@ -468,6 +479,52 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-rotate',this)">Copy</button></div>
     <p>Returns <code>{"service_key": "eyJ..."}</code>.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="projects-overview">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/overview  ·  /v1/projects/:id/overview</span>
+    <span class="desc">Summary stats — across all projects, or one</span>
+  </div>
+  <div class="endpoint-body">
+    <p><code>GET /v1/overview</code> summarizes every project you own (table counts, live sites). <code>GET /v1/projects/:id/overview</code> gives one project's tables, sites, and a recent-activity feed (deploys, project creation). Useful for a quick "what's already here" check before editing an existing project.</p>
+    <div class="code-wrap"><pre class="code" id="c-overview">curl "https://your-domain/api/v1/projects/1/overview" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-overview',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="projects-seed-clear">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/seed/clear</span>
+    <span class="desc">Delete all AI-generated seed/demo rows</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Removes only the rows that were inserted as seed/demo data (tracked separately from rows created afterward through normal use) — for clearing placeholder content before real users start using the app, without touching anything they've since added.</p>
+    <div class="code-wrap"><pre class="code" id="c-seedclear">curl -X POST "https://your-domain/api/v1/projects/1/seed/clear" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-seedclear',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="projects-cleanup">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/v1/projects/:id/cleanup</span>
+    <span class="desc">Reconcile the table catalog against actual MySQL state</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Maintenance operation — drops orphaned physical tables no longer in the catalog, removes catalog rows for tables that no longer exist in MySQL, and clears stale deploy/directory records. Not something you'd normally need in regular use; useful if something got out of sync (e.g. a failed operation left partial state).</p>
+    <div class="code-wrap"><pre class="code" id="c-cleanup">curl -X POST "https://your-domain/api/v1/projects/1/cleanup" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-cleanup',this)">Copy</button></div>
   </div>
 </div>
 
@@ -1063,6 +1120,67 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
   -o deploy.zip</pre>
     <button class="copy-btn" onclick="copyEl('c-download',this)">Copy</button></div>
     <p>Returns the zip as a binary response (<code>Content-Type: application/zip</code>), not JSON.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="sites-debug">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:project_id/sites/:site_id/debug</span>
+    <span class="desc">Filesystem diagnostics — did the deploy actually land where it should?</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Returns the resolved <code>current/</code> directory path, whether it exists, and its top-level file listing. Useful when a deploy reports success but the live site doesn't reflect it — diagnoses that class of problem directly instead of guessing from the outside.</p>
+    <div class="code-wrap"><pre class="code" id="c-debug">curl "https://your-domain/api/v1/projects/1/sites/1/debug" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-debug',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Error Logs ── -->
+<h2 id="errors-list">Error Logs</h2>
+<p>Every deployed app automatically loads a platform-injected script (<code>core/errors.js</code>) that reports the visiting end-user's own client-side JS errors, unhandled promise rejections, and failed API calls back to SupaBein — with no setup required and no auth possible for the report itself (it's a logged-out visitor's browser reporting on itself). This is the most reliable way to check whether a deployed app is actually working for real users, especially when you can't drive a browser against the live URL yourself (see <a href="#automated-builders">Notes for Automated Builders</a>).</p>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/errors</span>
+    <span class="desc">List logged client-side errors, most recent first</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Errors are deduplicated server-side by a fingerprint of type+message+stack — repeated occurrences of the same error increment <code>occurrences</code> and <code>last_seen_at</code> rather than creating duplicate rows.</p>
+    <div class="code-wrap"><pre class="code" id="c-errlist">curl "https://your-domain/api/v1/projects/1/errors" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-errlist',this)">Copy</button></div>
+    <p>Returns <code>{"errors": [{id, type, message, stack, url, user_agent, meta, occurrences, first_seen_at, last_seen_at}, ...]}</code>. <code>type</code> is one of <code>js_error</code>, <code>promise_rejection</code>, <code>api_error</code>, <code>console_error</code>.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="errors-download">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:id/errors/download</span>
+    <span class="desc">Same data as a downloadable JSON file</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-errdl">curl "https://your-domain/api/v1/projects/1/errors/download" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -o errors.json</pre>
+    <button class="copy-btn" onclick="copyEl('c-errdl',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="errors-clear">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/v1/projects/:id/errors</span>
+    <span class="desc">Clear all logged errors for a project</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Housekeeping once triaged — there's no per-error delete, only clear-all.</p>
+    <div class="code-wrap"><pre class="code" id="c-errclear">curl -X DELETE "https://your-domain/api/v1/projects/1/errors" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-errclear',this)">Copy</button></div>
   </div>
 </div>
 
