@@ -216,6 +216,8 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#deploy-delete-file">Delete staged file</a>
     <a class="sb-link" href="#deploy-finalize">Finalize deploy</a>
     <a class="sb-link" href="#deploy-diff">Diff deploys</a>
+    <a class="sb-link" href="#deploy-browse">Browse deployed files</a>
+    <a class="sb-link" href="#deploy-download">Download deploy (zip)</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Access Tokens</span>
@@ -289,10 +291,15 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <h2 id="automated-builders">Notes for Automated Builders</h2>
 <p>If an AI or automated tool is building or editing a project against this API, these operating rules avoid the most common mistakes:</p>
 <ul style="color:var(--text);padding-left:20px;line-height:2">
+  <li><strong>Discover which project a scoped token belongs to via <code>GET /v1/auth/me</code>.</strong> A project-scoped PAT can call this even though it can't call <code>GET /v1/projects</code> — the response includes <code>project_id</code> and <code>project_name</code>. Call this first; don't brute-force project ids.</li>
+  <li><strong>To read an existing app's code, don't guess from file lists</strong> — the <a href="#tables-list">tables/columns/policies</a> endpoints tell you the data model, and for the deployed frontend use <a href="#deploy-browse">Browse deployed files</a> (reads one file's actual content) or <a href="#deploy-download">Download a deploy as zip</a> (the whole file tree at once). A deploy's file list alone (names + sizes) is not enough to edit code safely — always read the real content first.</li>
   <li><strong>Check existing state before creating.</strong> When editing an existing project, call <code>GET /v1/projects/:id/tables</code> (and list policies) first, and build additively — don't assume a clean slate.</li>
   <li><strong>An unpolicied table is fully locked.</strong> A table with no policy rows set denies every operation to <code>anon</code> and <code>authenticated</code> — only the owner token/PAT or <code>service_key</code> can touch it. Set policies explicitly for every table you create.</li>
   <li><strong>Never expose <code>service_key</code> in client-side code.</strong> It bypasses every policy. Use it only from trusted server-side code, or not at all if the app is pure frontend + anon/authenticated policy access.</li>
   <li><strong>Deploys are staging-first by design.</strong> A zip/file upload always lands in <code>staging/</code>; call <a href="#deploy-publish">Publish to live</a> only when explicitly instructed to make it the live version.</li>
+  <li><strong>Set a real <code>User-Agent</code> header on every request</strong> (e.g. <code>User-Agent: MyBuilder/1.0</code>), especially file uploads. The hosting-level WAF in front of this API blocks generic/absent User-Agents on some routes and returns a plain HTML 403 page instead of a JSON error — indistinguishable from an auth failure unless you know to check for it.</li>
+  <li><strong>The root <code>.htaccess</code> of a deployed site is managed by SupaBein and cannot be uploaded, changed, or removed</strong> — every deploy/finalize call overwrites it. If you need client-side routing (a SPA with pushState routes), set <code>spa_mode: true</code> when creating the site instead of trying to write rewrite rules yourself; hash-based routing (<code>#/path</code>) works with no server config at all.</li>
+  <li><strong>To verify a deploy, prefer a plain request over driving a headless browser at the live URL.</strong> A live subdomain may not resolve from a sandboxed/CI network, and the same WAF that blocks bad User-Agents can reset headless-browser traffic too. A direct <code>curl</code>/<code>fetch</code> of the returned <code>live_url</code>/<code>staging_url</code>, or reading files back via <a href="#deploy-browse">Browse deployed files</a>, is more reliable from an automated environment.</li>
   <li><strong>Design within the Limitations above</strong> rather than discovering them by trial and error — most "I need X" cases (auth, simple CRUD, storage) are already covered by this API; the limits are a stable design constraint, not a bug to route around.</li>
 </ul>
 
@@ -340,10 +347,11 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
     <span class="desc">Get current user profile</span>
   </div>
   <div class="endpoint-body">
-    <p>Requires a valid user JWT or PAT. Returns <code>id</code>, <code>email</code>, <code>role</code>, <code>created_at</code>.</p>
+    <p>Requires a valid user JWT or PAT. Returns <code>id</code>, <code>email</code>, <code>role</code>, <code>created_at</code>, <code>project_id</code>, and <code>project_name</code>.</p>
     <div class="code-wrap"><pre class="code" id="c-me">curl "https://your-domain/api/v1/auth/me" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-me',this)">Copy</button></div>
+    <div class="callout">For an account-wide token, <code>project_id</code> is <code>null</code>. For a <a href="#tokens-create">project-scoped PAT</a>, this is the one endpoint that works without already knowing the project id — <code>project_id</code>/<code>project_name</code> tell you which project the token belongs to, so a scoped token never has to brute-force project ids to find out where it's supposed to work.</div>
   </div>
 </div>
 
@@ -867,9 +875,12 @@ curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
   <div class="endpoint-body">
     <p>Copies <code>staging/</code> to <code>current/</code>, sets <code>current_deploy_id</code>, and clears <code>staging_deploy_id</code> on the site. The deploy must be the current staging deploy (its ID must match <code>site.staging_deploy_id</code>). Returns the updated site object including <code>live_url</code> and <code>staging_url</code>.</p>
     <div class="code-wrap"><pre class="code" id="c-publish">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/5/publish" \
-  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'</pre>
     <button class="copy-btn" onclick="copyEl('c-publish',this)">Copy</button></div>
     <p>Response includes <code>live_url</code> (the public URL) and <code>staging_url</code> for immediate use — no need to construct URLs manually.</p>
+    <div class="callout warn">⚠ Always send <code>Content-Type: application/json</code> and a body, even an empty <code>{}</code>, on POSTs with no real payload. Some hosting-level WAFs (this one included) flag a truly bodyless/content-type-less POST as suspicious and return a generic HTML 403 instead of a JSON error — indistinguishable from an auth failure unless you know to look for it.</div>
   </div>
 </div>
 
@@ -881,7 +892,9 @@ curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
   </div>
   <div class="endpoint-body">
     <div class="code-wrap"><pre class="code" id="c-rb">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/3/rollback" \
-  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'</pre>
     <button class="copy-btn" onclick="copyEl('c-rb',this)">Copy</button></div>
   </div>
 </div>
@@ -907,7 +920,9 @@ done
 
 # 3. Finalize (go live)
 curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finalize" \
-  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'</pre>
 <button class="copy-btn" onclick="copyEl('c-cicd',this)">Copy</button></div>
 
 <div class="endpoint" id="deploy-open">
@@ -984,7 +999,9 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
   <div class="endpoint-body">
     <p>Writes the hardening <code>.htaccess</code>, moves files to the <strong>staging</strong> directory, and marks the deploy <code>ready</code>. Returns <code>422</code> if no files were uploaded (empty deploy). The site is <strong>not live yet</strong> — call <a href="#deploy-publish">Publish to live</a> to promote it.</p>
     <div class="code-wrap"><pre class="code" id="c-finalize">curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys/7/finalize" \
-  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'</pre>
     <button class="copy-btn" onclick="copyEl('c-finalize',this)">Copy</button></div>
     <p>Returns the updated deploy record with <code>status: "ready"</code> and <code>staging_url</code>.</p>
   </div>
@@ -1010,6 +1027,42 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
   "unchanged": 12
 }</pre>
     <button class="copy-btn" onclick="copyEl('c-diff-resp',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-browse">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:project_id/sites/:site_id/browse?path=</span>
+    <span class="desc">Read one file's content, or list a directory, from the live deploy</span>
+  </div>
+  <div class="endpoint-body">
+    <p>This is how you <strong>read the actual source of an already-deployed app</strong> — the deploy-list and diff endpoints only ever give you file names and sizes, never content. Omit <code>path</code> (or use <code>/</code>) to list the site root; point <code>path</code> at a file to read it.</p>
+    <div class="code-wrap"><pre class="code" id="c-browse-dir">## List a directory
+curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+
+## Read a file's content
+curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-browse-dir',this)">Copy</button></div>
+    <p>Directory response: <code>{"path", "type": "dir", "items": [{"name", "type", "size"}, ...]}</code>. File response: <code>{"path", "type": "file", "size", "content", "truncated"}</code> — <code>content</code> is the raw file text, <code>null</code> with <code>truncated: true</code> for files over 512&nbsp;KB.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="deploy-download">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/download</span>
+    <span class="desc">Download an entire deploy (current, staging, or historical) as a zip</span>
+  </div>
+  <div class="endpoint-body">
+    <p>Faster than browsing file-by-file when you need the whole app at once — e.g. before editing an existing project. Works on any past deploy, not just the live one.</p>
+    <div class="code-wrap"><pre class="code" id="c-download">curl "https://your-domain/api/v1/projects/1/sites/1/deploys/7/download" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -o deploy.zip</pre>
+    <button class="copy-btn" onclick="copyEl('c-download',this)">Copy</button></div>
+    <p>Returns the zip as a binary response (<code>Content-Type: application/zip</code>), not JSON.</p>
   </div>
 </div>
 

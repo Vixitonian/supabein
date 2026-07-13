@@ -114,6 +114,14 @@ const PAT_PROJECT_SCOPED_ROUTES = [
     '/v1/projects/:id/test-status',
 ];
 
+// Routes with no project-id URL param at all, safe for any scoped PAT to
+// call unconditionally — they only ever describe the token/account calling
+// them, never another project's data. This is how a scoped PAT discovers
+// which project it belongs to (GET /v1/auth/me) without brute-forcing IDs.
+const PAT_SELF_DESCRIBING_ROUTES = [
+    '/v1/auth/me',
+];
+
 /**
  * Confines a project-scoped PAT ($auth['project_id'] !== null, role owner) to
  * the allowlisted routes above and to the one project it was minted for.
@@ -127,6 +135,9 @@ function enforce_pat_project_scope(array $req, array $auth): void
     }
 
     $pattern = $req['route_pattern'] ?? '';
+    if (in_array($pattern, PAT_SELF_DESCRIBING_ROUTES, true)) {
+        return;
+    }
     if (!in_array($pattern, PAT_PROJECT_SCOPED_ROUTES, true)) {
         abort(403, 'This token is scoped to one project and cannot be used for this endpoint.');
     }
