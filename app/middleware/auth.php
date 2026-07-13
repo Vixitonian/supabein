@@ -138,13 +138,17 @@ function enforce_pat_project_scope(array $req, array $auth): void
     if (in_array($pattern, PAT_SELF_DESCRIBING_ROUTES, true)) {
         return;
     }
+    // The hint below is deliberately part of the error text, not just the
+    // docs — an agent that never read docs.html still hits this 403 on its
+    // first natural move (e.g. GET /v1/projects) and needs to learn its own
+    // project id from the response it's already looking at.
     if (!in_array($pattern, PAT_PROJECT_SCOPED_ROUTES, true)) {
-        abort(403, 'This token is scoped to one project and cannot be used for this endpoint.');
+        abort(403, 'This token is scoped to one project and cannot be used for this endpoint. Call GET /v1/auth/me to see which project this token belongs to.');
     }
 
     $urlProjectId = $req['params']['id'] ?? $req['params']['project_id'] ?? null;
     if ($urlProjectId === null || (int)$urlProjectId !== (int)$auth['project_id']) {
-        abort(403, 'This token is not valid for this project.');
+        abort(403, 'This token is not valid for this project. Call GET /v1/auth/me to see which project this token belongs to.');
     }
 }
 
