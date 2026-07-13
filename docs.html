@@ -247,10 +247,11 @@ tr:last-child td{border-bottom:none}
 <h2 id="quickstart">Quick Start</h2>
 <p>Three steps to your first API call:</p>
 <ol style="color:var(--muted);padding-left:20px;line-height:2">
-  <li>Sign up → get a JWT token</li>
+  <li>Sign up → get a JWT token <em>(this creates a SupaBein <strong>operator</strong> account — the developer building the app, not one of your app's own end-users. There's no equivalent "signup"/"login" pair for your app's end-users — see the callout below.)</em></li>
   <li>Create a project → note the <code>service_key</code></li>
   <li>Create a table → call the data API (no auth needed for public/anon access)</li>
 </ol>
+<div class="callout">Building end-user auth for your own app (not this operator account)? There's no <code>/auth/signup</code>-style pair for that — it's table-based: create a table with exactly one <code>PASSWORD</code>-type column, "sign up" is a normal <a href="#data-insert">Data API insert</a> into it (SupaBein hashes the password server-side), and "sign in" is <a href="#data-login">POST .../login</a> against that same table.</div>
 
 <div class="code-wrap">
 <pre class="code" id="qs-code"># 1. Sign up
@@ -280,7 +281,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
   <tr><td>(no header)</td><td>Public/anonymous frontend access</td><td>Enforced (anon role)</td></tr>
   <tr><td>user JWT / PAT</td><td>Authenticated platform operators</td><td>Enforced (authenticated role)</td></tr>
 </table>
-<div class="callout warn">⚠ Never expose the <strong>service_key</strong> in client-side or publicly accessible code. Rotate it via <a href="#rotate-service-key">POST /v1/projects/:id/rotate-service-key</a> if compromised.</div>
+<div class="callout warn">⚠ Never expose the <strong>service_key</strong> in client-side or publicly accessible code. Rotate it via <a href="#rotate-service-key">POST /api/v1/projects/:id/rotate-service-key</a> if compromised.</div>
 <p>A <strong>Personal Access Token</strong> (PAT) acts as your login credential for the control plane (managing projects, tables, etc.) — useful in CI/CD. Create them in <a href="/dashboard/#/account">Account</a>. A PAT can optionally be <strong>scoped to a single project</strong> instead of your whole account — see <a href="#tokens-create">Create a PAT</a>.</p>
 
 <!-- ── Limitations ── -->
@@ -302,9 +303,9 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <h2 id="automated-builders">Notes for Automated Builders</h2>
 <p>If an AI or automated tool is building or editing a project against this API, these operating rules avoid the most common mistakes:</p>
 <ul style="color:var(--text);padding-left:20px;line-height:2">
-  <li><strong>Discover which project a scoped token belongs to via <code>GET /v1/auth/me</code>.</strong> A project-scoped PAT can call this even though it can't call <code>GET /v1/projects</code> — the response includes <code>project_id</code> and <code>project_name</code>. Call this first; don't brute-force project ids.</li>
+  <li><strong>Discover which project a scoped token belongs to via <code>GET /api/v1/auth/me</code>.</strong> A project-scoped PAT can call this even though it can't call <code>GET /api/v1/projects</code> — the response includes <code>project_id</code> and <code>project_name</code>. Call this first; don't brute-force project ids.</li>
   <li><strong>To read an existing app's code, don't guess from file lists</strong> — the <a href="#tables-list">tables/columns/policies</a> endpoints tell you the data model, and for the deployed frontend use <a href="#deploy-browse">Browse deployed files</a> (reads one file's actual content) or <a href="#deploy-download">Download a deploy as zip</a> (the whole file tree at once). A deploy's file list alone (names + sizes) is not enough to edit code safely — always read the real content first.</li>
-  <li><strong>Check existing state before creating.</strong> When editing an existing project, call <code>GET /v1/projects/:id/tables</code> (and list policies) first, and build additively — don't assume a clean slate.</li>
+  <li><strong>Check existing state before creating.</strong> When editing an existing project, call <code>GET /api/v1/projects/:id/tables</code> (and list policies) first, and build additively — don't assume a clean slate.</li>
   <li><strong>An unpolicied table is fully locked.</strong> A table with no policy rows set denies every operation to <code>anon</code> and <code>authenticated</code> — only the owner token/PAT or <code>service_key</code> can touch it. Set policies explicitly for every table you create.</li>
   <li><strong>Never expose <code>service_key</code> in client-side code.</strong> It bypasses every policy. Use it only from trusted server-side code, or not at all if the app is pure frontend + anon/authenticated policy access.</li>
   <li><strong>Deploys are staging-first by design.</strong> A zip/file upload always lands in <code>staging/</code>; call <a href="#deploy-publish">Publish to live</a> only when explicitly instructed to make it the live version.</li>
@@ -321,7 +322,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="signup">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/auth/signup</span>
+    <span class="path">/api/v1/auth/signup</span>
     <span class="desc">Create an account</span>
   </div>
   <div class="endpoint-body">
@@ -340,7 +341,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="login">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/auth/login</span>
+    <span class="path">/api/v1/auth/login</span>
     <span class="desc">Sign in, get a JWT</span>
   </div>
   <div class="endpoint-body">
@@ -354,7 +355,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="me">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/auth/me</span>
+    <span class="path">/api/v1/auth/me</span>
     <span class="desc">Get current user profile</span>
   </div>
   <div class="endpoint-body">
@@ -369,7 +370,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="change-password">
   <div class="endpoint-head">
     <span class="method patch">PATCH</span>
-    <span class="path">/v1/auth/password</span>
+    <span class="path">/api/v1/auth/password</span>
     <span class="desc">Change your password (requires auth)</span>
   </div>
   <div class="endpoint-body">
@@ -388,7 +389,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="forgot">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/auth/forgot</span>
+    <span class="path">/api/v1/auth/forgot</span>
     <span class="desc">Generate a password-reset token (no auth required)</span>
   </div>
   <div class="endpoint-body">
@@ -404,7 +405,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="reset">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/auth/reset</span>
+    <span class="path">/api/v1/auth/reset</span>
     <span class="desc">Reset password with a token</span>
   </div>
   <div class="endpoint-body">
@@ -427,7 +428,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects</span>
+    <span class="path">/api/v1/projects</span>
     <span class="desc">List your projects</span>
   </div>
   <div class="endpoint-body">
@@ -440,7 +441,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="projects-create">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects</span>
+    <span class="path">/api/v1/projects</span>
     <span class="desc">Create a project</span>
   </div>
   <div class="endpoint-body">
@@ -456,7 +457,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="projects-delete">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/projects/:id</span>
+    <span class="path">/api/v1/projects/:id</span>
     <span class="desc">Delete a project and all its data</span>
   </div>
   <div class="endpoint-body">
@@ -470,7 +471,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="rotate-service-key">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/rotate-service-key</span>
+    <span class="path">/api/v1/projects/:id/rotate-service-key</span>
     <span class="desc">Issue a new service key (invalidates old one immediately)</span>
   </div>
   <div class="endpoint-body">
@@ -485,11 +486,11 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="projects-overview">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/overview  ·  /v1/projects/:id/overview</span>
+    <span class="path">/api/v1/overview  ·  /api/v1/projects/:id/overview</span>
     <span class="desc">Summary stats — across all projects, or one</span>
   </div>
   <div class="endpoint-body">
-    <p><code>GET /v1/overview</code> summarizes every project you own (table counts, live sites). <code>GET /v1/projects/:id/overview</code> gives one project's tables, sites, and a recent-activity feed (deploys, project creation). Useful for a quick "what's already here" check before editing an existing project.</p>
+    <p><code>GET /api/v1/overview</code> summarizes every project you own (table counts, live sites). <code>GET /api/v1/projects/:id/overview</code> gives one project's tables, sites, and a recent-activity feed (deploys, project creation). Useful for a quick "what's already here" check before editing an existing project.</p>
     <div class="code-wrap"><pre class="code" id="c-overview">curl "https://your-domain/api/v1/projects/1/overview" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-overview',this)">Copy</button></div>
@@ -499,7 +500,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="projects-seed-clear">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/seed/clear</span>
+    <span class="path">/api/v1/projects/:id/seed/clear</span>
     <span class="desc">Delete all AI-generated seed/demo rows</span>
   </div>
   <div class="endpoint-body">
@@ -515,7 +516,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="projects-cleanup">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/cleanup</span>
+    <span class="path">/api/v1/projects/:id/cleanup</span>
     <span class="desc">Reconcile the table catalog against actual MySQL state</span>
   </div>
   <div class="endpoint-body">
@@ -534,7 +535,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/tables</span>
+    <span class="path">/api/v1/projects/:id/tables</span>
     <span class="desc">List tables in a project</span>
   </div>
   <div class="endpoint-body">
@@ -547,7 +548,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint" id="tables-create">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/tables</span>
+    <span class="path">/api/v1/projects/:id/tables</span>
     <span class="desc">Create a table</span>
   </div>
   <div class="endpoint-body">
@@ -567,7 +568,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/tables/:name/columns</span>
+    <span class="path">/api/v1/projects/:id/tables/:name/columns</span>
     <span class="desc">Add a column</span>
   </div>
   <div class="endpoint-body">
@@ -597,7 +598,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method put">PUT</span>
-    <span class="path">/v1/projects/:id/tables/:name/policies</span>
+    <span class="path">/api/v1/projects/:id/tables/:name/policies</span>
     <span class="desc">Create or update a policy (single or batch)</span>
   </div>
   <div class="endpoint-body">
@@ -640,7 +641,7 @@ curl -X PUT "https://your-domain/api/v1/projects/1/tables/posts/policies" \
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/data/:project_id/:table</span>
+    <span class="path">/api/v1/data/:project_id/:table</span>
     <span class="desc">List rows</span>
   </div>
   <div class="endpoint-body">
@@ -667,7 +668,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="data-insert">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/data/:project_id/:table</span>
+    <span class="path">/api/v1/data/:project_id/:table</span>
     <span class="desc">Insert a row</span>
   </div>
   <div class="endpoint-body">
@@ -682,7 +683,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="data-batch">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/data/:project_id/:table/batch</span>
+    <span class="path">/api/v1/data/:project_id/:table/batch</span>
     <span class="desc">Bulk insert rows (up to 500)</span>
   </div>
   <div class="endpoint-body">
@@ -703,7 +704,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="data-get">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/data/:project_id/:table/:id</span>
+    <span class="path">/api/v1/data/:project_id/:table/:id</span>
     <span class="desc">Get a single row by primary key</span>
   </div>
   <div class="endpoint-body">
@@ -715,7 +716,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="data-update">
   <div class="endpoint-head">
     <span class="method patch">PATCH</span>
-    <span class="path">/v1/data/:project_id/:table/:id</span>
+    <span class="path">/api/v1/data/:project_id/:table/:id</span>
     <span class="desc">Update a row (partial update)</span>
   </div>
   <div class="endpoint-body">
@@ -730,7 +731,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="data-delete">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/data/:project_id/:table/:id</span>
+    <span class="path">/api/v1/data/:project_id/:table/:id</span>
     <span class="desc">Delete a row</span>
   </div>
   <div class="endpoint-body">
@@ -743,7 +744,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="data-login">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/data/:project_id/:table/login</span>
+    <span class="path">/api/v1/data/:project_id/:table/login</span>
     <span class="desc">Authenticate a row via a PASSWORD column</span>
   </div>
   <div class="endpoint-body">
@@ -756,7 +757,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -H "Content-Type: application/json" \
   -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-dlogin',this)">Copy</button></div>
-    <p>Returns <code>{"token": "eyJ...", "row": {...}}</code> — the JWT carries <code>sub</code> (row id), <code>pid</code> (project id), and <code>type: "project_user"</code>. Use it as Bearer auth in subsequent data API calls to get the <code>authenticated</code> role.</p>
+    <p>Returns <code>{"token": "eyJ...", "user": {...}}</code> — <code>user</code> is the matched row (password field masked). The JWT carries <code>sub</code> (row id), <code>pid</code> (project id), and <code>type: "project_user"</code>. Use it as Bearer auth in subsequent data API calls to get the <code>authenticated</code> role.</p>
   </div>
 </div>
 
@@ -768,7 +769,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:project_id/storage/:bucket</span>
+    <span class="path">/api/v1/projects/:project_id/storage/:bucket</span>
     <span class="desc">Upload a file to a bucket</span>
   </div>
   <div class="endpoint-body">
@@ -784,7 +785,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="storage-list">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:project_id/storage/:bucket</span>
+    <span class="path">/api/v1/projects/:project_id/storage/:bucket</span>
     <span class="desc">List files in a bucket</span>
   </div>
   <div class="endpoint-body">
@@ -798,7 +799,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="storage-delete">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/projects/:project_id/storage/:bucket/:filename</span>
+    <span class="path">/api/v1/projects/:project_id/storage/:bucket/:filename</span>
     <span class="desc">Delete a file</span>
   </div>
   <div class="endpoint-body">
@@ -811,7 +812,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="storage-serve">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/storage/:project_id/:bucket/:filename</span>
+    <span class="path">/api/v1/storage/:project_id/:bucket/:filename</span>
     <span class="desc">Serve a file publicly (no auth)</span>
   </div>
   <div class="endpoint-body">
@@ -832,7 +833,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/sites</span>
+    <span class="path">/api/v1/projects/:id/sites</span>
     <span class="desc">List sites for a project</span>
   </div>
   <div class="endpoint-body">
@@ -846,7 +847,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="sites-get">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/sites/:site_id</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id</span>
     <span class="desc">Get a single site</span>
   </div>
   <div class="endpoint-body">
@@ -859,7 +860,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="sites-delete">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/projects/:id/sites/:site_id</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id</span>
     <span class="desc">Delete a site and all its deploys</span>
   </div>
   <div class="endpoint-body">
@@ -873,7 +874,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="sites-create">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites</span>
+    <span class="path">/api/v1/projects/:id/sites</span>
     <span class="desc">Create a site (one per project)</span>
   </div>
   <div class="endpoint-body">
@@ -889,7 +890,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="deploys-list">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys</span>
     <span class="desc">List deploy history</span>
   </div>
   <div class="endpoint-body">
@@ -903,7 +904,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <div class="endpoint" id="deploys">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys</span>
     <span class="desc">Deploy a zip file</span>
   </div>
   <div class="endpoint-body">
@@ -926,7 +927,7 @@ curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
 <div class="endpoint" id="deploy-publish">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/publish</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/publish</span>
     <span class="desc">Promote staged deploy to live</span>
   </div>
   <div class="endpoint-body">
@@ -944,7 +945,7 @@ curl -X POST "https://your-domain/api/v1/projects/1/sites/1/deploys" \
 <div class="endpoint" id="rollback">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/rollback</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/rollback</span>
     <span class="desc">Roll back to a previous deploy</span>
   </div>
   <div class="endpoint-body">
@@ -985,7 +986,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-open">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/open</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/open</span>
     <span class="desc">Open a new pending deploy</span>
   </div>
   <div class="endpoint-body">
@@ -1005,7 +1006,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-put-file">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
     <span class="desc">Upload a single file into the staging deploy</span>
   </div>
   <div class="endpoint-body">
@@ -1021,7 +1022,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-list-files">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files</span>
     <span class="desc">List all staged files in a deploy</span>
   </div>
   <div class="endpoint-body">
@@ -1035,7 +1036,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-delete-file">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/files?path=</span>
     <span class="desc">Remove a staged file from a pending deploy</span>
   </div>
   <div class="endpoint-body">
@@ -1050,7 +1051,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-finalize">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/finalize</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/finalize</span>
     <span class="desc">Finalize a pending deploy (moves to staging)</span>
   </div>
   <div class="endpoint-body">
@@ -1067,7 +1068,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-diff">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/sites/:site_id/deploys/:deploy_id/diff?vs=:other_id</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id/deploys/:deploy_id/diff?vs=:other_id</span>
     <span class="desc">Compare two deploy snapshots</span>
   </div>
   <div class="endpoint-body">
@@ -1090,7 +1091,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 <div class="endpoint" id="deploy-browse">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:project_id/sites/:site_id/browse?path=</span>
+    <span class="path">/api/v1/projects/:project_id/sites/:site_id/browse?path=</span>
     <span class="desc">Read one file's content, or list a directory, from the live deploy</span>
   </div>
   <div class="endpoint-body">
@@ -1110,7 +1111,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint" id="deploy-download">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/download</span>
+    <span class="path">/api/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/download</span>
     <span class="desc">Download an entire deploy (current, staging, or historical) as a zip</span>
   </div>
   <div class="endpoint-body">
@@ -1126,7 +1127,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint" id="sites-debug">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:project_id/sites/:site_id/debug</span>
+    <span class="path">/api/v1/projects/:project_id/sites/:site_id/debug</span>
     <span class="desc">Filesystem diagnostics — did the deploy actually land where it should?</span>
   </div>
   <div class="endpoint-body">
@@ -1144,7 +1145,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/errors</span>
+    <span class="path">/api/v1/projects/:id/errors</span>
     <span class="desc">List logged client-side errors, most recent first</span>
   </div>
   <div class="endpoint-body">
@@ -1159,7 +1160,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint" id="errors-download">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/projects/:id/errors/download</span>
+    <span class="path">/api/v1/projects/:id/errors/download</span>
     <span class="desc">Same data as a downloadable JSON file</span>
   </div>
   <div class="endpoint-body">
@@ -1173,7 +1174,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint" id="errors-clear">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/projects/:id/errors</span>
+    <span class="path">/api/v1/projects/:id/errors</span>
     <span class="desc">Clear all logged errors for a project</span>
   </div>
   <div class="endpoint-body">
@@ -1191,7 +1192,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint">
   <div class="endpoint-head">
     <span class="method get">GET</span>
-    <span class="path">/v1/auth/tokens</span>
+    <span class="path">/api/v1/auth/tokens</span>
     <span class="desc">List your PATs</span>
   </div>
   <div class="endpoint-body">
@@ -1205,7 +1206,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <div class="endpoint" id="tokens-create">
   <div class="endpoint-head">
     <span class="method post">POST</span>
-    <span class="path">/v1/auth/tokens</span>
+    <span class="path">/api/v1/auth/tokens</span>
     <span class="desc">Create a PAT</span>
   </div>
   <div class="endpoint-body">
@@ -1233,7 +1234,7 @@ curl -X POST "https://your-domain/api/v1/auth/tokens" \
 <div class="endpoint" id="tokens-delete">
   <div class="endpoint-head">
     <span class="method delete">DELETE</span>
-    <span class="path">/v1/auth/tokens/:id</span>
+    <span class="path">/api/v1/auth/tokens/:id</span>
     <span class="desc">Revoke a PAT</span>
   </div>
   <div class="endpoint-body">
