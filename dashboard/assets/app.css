@@ -850,13 +850,31 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .pat-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 6px 12px;
   padding: 8px 0;
   border-bottom: 1px solid var(--border);
 }
 .pat-row:last-of-type { border-bottom: none; }
 .pat-name { font-size: 0.85rem; font-weight: 500; }
-.pat-meta { font-size: 0.75rem; flex: 1; }
+.pat-meta { font-size: 0.75rem; flex: 1 1 auto; min-width: 0; }
+
+/* PAT creation row — name + scope select + button */
+.pat-create-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+.pat-create-field { flex: 1 1 180px; min-width: 0; }
+.pat-create-btn { flex: 0 0 auto; }
+
+@media (max-width: 560px) {
+  .pat-row { gap: 4px 12px; }
+  .pat-row .btn { margin-left: auto; }
+  .pat-create-row { flex-direction: column; }
+  .pat-create-field, .pat-create-btn { flex: 1 1 auto; width: 100%; }
+}
 
 /* ─── AI Panel ───────────────────────────────────────────────────────────── */
 .ai-panel {

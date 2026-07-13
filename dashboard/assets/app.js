@@ -6659,12 +6659,12 @@ async function renderAccount() {
   }
   renderPatList();
 
-  const nameInput    = el('input', { type: 'text', class: 'form-control', placeholder: 'Token name (e.g. "CI deploy")…', style: 'flex:1' });
-  const scopeSelect  = el('select', { class: 'form-control', style: 'flex:1' },
+  const nameInput    = el('input', { type: 'text', class: 'form-control pat-create-field', placeholder: 'Token name (e.g. "CI deploy")…' });
+  const scopeSelect  = el('select', { class: 'form-control pat-create-field' },
     el('option', { value: '' }, 'Account-wide (all projects)'),
     ...projects.map(p => el('option', { value: String(p.id) }, `Scoped to: ${p.name}`))
   );
-  const createBtn    = el('button', { class: 'btn btn-primary' }, '+ New Token');
+  const createBtn    = el('button', { class: 'btn btn-primary pat-create-btn' }, '+ New Token');
   const tokenDisplay = el('div', { style: 'display:none;margin-top:12px' });
 
   createBtn.onclick = async () => {
@@ -6700,7 +6700,7 @@ async function renderAccount() {
       'PATs authenticate as you — account-wide by default, or scope one to a single project (e.g. to hand to an external tool or AI builder that should only touch that project). Token values are shown only once at creation.'
     ),
     listEl,
-    el('div', { style: 'display:flex;gap:8px;margin-top:14px;flex-wrap:wrap' }, nameInput, scopeSelect, createBtn),
+    el('div', { class: 'pat-create-row' }, nameInput, scopeSelect, createBtn),
     tokenDisplay
   );
 
