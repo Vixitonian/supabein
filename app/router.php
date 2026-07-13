@@ -57,6 +57,7 @@ class Router
             }
 
             $request['params'] = $params;
+            $request['route_pattern'] = $route['pattern'];
 
             // Build middleware pipeline
             $handler = $route['handler'];

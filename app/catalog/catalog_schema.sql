@@ -96,9 +96,14 @@ CREATE TABLE IF NOT EXISTS `personal_access_tokens` (
     `user_id`      INT UNSIGNED NOT NULL,
     `name`         VARCHAR(128) NOT NULL,
     `token_hash`   VARCHAR(64) NOT NULL,
+    -- NULL = account-wide (original behavior). Set = scoped to one project;
+    -- enforced generically wherever resolved auth carries project_id
+    -- (see Crud::resolve() and auth_middleware()'s route allowlist).
+    `project_id`   INT UNSIGNED DEFAULT NULL,
     `created_at`   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `last_used_at` TIMESTAMP NULL DEFAULT NULL,
     FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_token_hash` (`token_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

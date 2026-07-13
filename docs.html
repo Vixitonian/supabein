@@ -158,6 +158,8 @@ tr:last-child td{border-bottom:none}
     <span class="sb-label">Getting Started</span>
     <a class="sb-link" href="#quickstart">Quick Start</a>
     <a class="sb-link" href="#keys">API Keys</a>
+    <a class="sb-link" href="#limitations">Limitations</a>
+    <a class="sb-link" href="#automated-builders">Notes for Automated Builders</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Platform Auth</span>
@@ -266,7 +268,33 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
   <tr><td>user JWT / PAT</td><td>Authenticated platform operators</td><td>Enforced (authenticated role)</td></tr>
 </table>
 <div class="callout warn">⚠ Never expose the <strong>service_key</strong> in client-side or publicly accessible code. Rotate it via <a href="#rotate-service-key">POST /v1/projects/:id/rotate-service-key</a> if compromised.</div>
-<p>A <strong>Personal Access Token</strong> (PAT) acts as your login credential for the control plane (managing projects, tables, etc.) — useful in CI/CD. Create them in <a href="/dashboard/#/account">Account</a>.</p>
+<p>A <strong>Personal Access Token</strong> (PAT) acts as your login credential for the control plane (managing projects, tables, etc.) — useful in CI/CD. Create them in <a href="/dashboard/#/account">Account</a>. A PAT can optionally be <strong>scoped to a single project</strong> instead of your whole account — see <a href="#tokens-create">Create a PAT</a>.</p>
+
+<!-- ── Limitations ── -->
+<h2 id="limitations">Limitations</h2>
+<p>SupaBein is a constrained, whitelist-based layer over MySQL, not a general SQL front-end. This is deliberate — it's what makes it safe to generate an API and access-control model automatically. Design within these limits rather than working around them; there is no endpoint that accepts arbitrary SQL.</p>
+<ul style="color:var(--text);padding-left:20px;line-height:2">
+  <li><strong>Column types</strong> are limited to <code>INT BIGINT SMALLINT TINYINT VARCHAR(255/128/64/36/32) TEXT/MEDIUMTEXT/LONGTEXT BOOLEAN DECIMAL(10,2)/DECIMAL(15,4) FLOAT DOUBLE DATETIME DATE TIMESTAMP JSON PASSWORD</code>. No <code>ENUM</code>, <code>SET</code>, spatial types, or native UUID.</li>
+  <li><strong>No foreign keys, composite primary/unique keys, generated columns, CHECK constraints, views, or triggers.</strong> Every table only ever gets an auto <code>id</code> primary key plus <code>created_at</code>. Model relationships with a plain integer column and enforce them at the application layer or via <code>constraint_sql</code> — there's no DB-enforced referential integrity.</li>
+  <li><strong>Data API filters are AND-only.</strong> There are no <code>OR</code> groups and no <code>in</code> / <code>is null</code> operators — only <code>eq neq gt gte lt lte like</code>, all combined with AND. Make separate requests or restructure the model if you need an OR condition.</li>
+  <li><strong>No joins, embedding, or aggregates.</strong> A list request can't pull in a related table's rows in the same call, and there's no <code>COUNT</code>/<code>SUM</code>/<code>GROUP BY</code>. Aggregate client-side or across multiple requests.</li>
+  <li><strong>1000-row hard cap</strong> on any list request, regardless of the <code>limit</code> value requested.</li>
+  <li><strong>Policies are table + role + operation scoped, not column scoped</strong> — you can't grant <code>SELECT</code> on some columns of a table and deny others for the same role.</li>
+  <li><strong><code>constraint_sql</code> is a single opaque WHERE-fragment string</strong>, not a structured expression. Only <code>:current_user_id</code> is substituted — there are no other placeholders. A broken constraint fails at request time (403/500), not at save time, so test it.</li>
+  <li><strong>One site per project.</strong></li>
+  <li><strong>No server-executable file types</strong> in file storage or static-site deploys (<code>.php .py .sh .exe .cgi .rb .pl .bat .cmd .htaccess</code> and related extensions are blocked, and deployed sites have PHP execution force-disabled at the directory level). This isn't configurable — dynamic server-side logic belongs in the Data API, not in a deployed site.</li>
+</ul>
+
+<!-- ── Notes for automated builders ── -->
+<h2 id="automated-builders">Notes for Automated Builders</h2>
+<p>If an AI or automated tool is building or editing a project against this API, these operating rules avoid the most common mistakes:</p>
+<ul style="color:var(--text);padding-left:20px;line-height:2">
+  <li><strong>Check existing state before creating.</strong> When editing an existing project, call <code>GET /v1/projects/:id/tables</code> (and list policies) first, and build additively — don't assume a clean slate.</li>
+  <li><strong>An unpolicied table is fully locked.</strong> A table with no policy rows set denies every operation to <code>anon</code> and <code>authenticated</code> — only the owner token/PAT or <code>service_key</code> can touch it. Set policies explicitly for every table you create.</li>
+  <li><strong>Never expose <code>service_key</code> in client-side code.</strong> It bypasses every policy. Use it only from trusted server-side code, or not at all if the app is pure frontend + anon/authenticated policy access.</li>
+  <li><strong>Deploys are staging-first by design.</strong> A zip/file upload always lands in <code>staging/</code>; call <a href="#deploy-publish">Publish to live</a> only when explicitly instructed to make it the live version.</li>
+  <li><strong>Design within the Limitations above</strong> rather than discovering them by trial and error — most "I need X" cases (auth, simple CRUD, storage) are already covered by this API; the limits are a stable design constraint, not a bug to route around.</li>
+</ul>
 
 <!-- ── Auth ── -->
 <h2 id="signup">Platform Authentication</h2>
@@ -987,7 +1015,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
 
 <!-- ── Tokens ── -->
 <h2 id="tokens-list">Personal Access Tokens</h2>
-<p>PATs authenticate as your user account across all projects. Use them in scripts or CI/CD pipelines instead of storing your password.</p>
+<p>PATs authenticate as your user account. By default they're account-wide (all your projects); optionally scope one to a single project. Use them in scripts, CI/CD pipelines, or when handing an external tool/AI builder access to just one project, instead of storing your password.</p>
 
 <div class="endpoint">
   <div class="endpoint-head">
@@ -999,7 +1027,7 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
     <div class="code-wrap"><pre class="code" id="c-tklist">curl "https://your-domain/api/v1/auth/tokens" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-tklist',this)">Copy</button></div>
-    <p>Token values are never returned after creation. Only <code>id</code>, <code>name</code>, <code>created_at</code>, and <code>last_used_at</code> are shown.</p>
+    <p>Token values are never returned after creation. Only <code>id</code>, <code>name</code>, <code>project_id</code> (<code>null</code> for account-wide), <code>created_at</code>, and <code>last_used_at</code> are shown.</p>
   </div>
 </div>
 
@@ -1010,12 +1038,24 @@ curl -sX POST "https://your-domain/api/v1/projects/1/sites/1/deploys/$DID/finali
     <span class="desc">Create a PAT</span>
   </div>
   <div class="endpoint-body">
-    <div class="code-wrap"><pre class="code" id="c-tkcreate">curl -X POST "https://your-domain/api/v1/auth/tokens" \
+    <table><tr><th>Body field</th><th>Type</th><th>Description</th></tr>
+      <tr><td>name</td><td>string</td><td>Required. Label for the token.</td></tr>
+      <tr><td>project_id</td><td>int</td><td>Optional. Scopes the token to one project you own. Omit for an account-wide token (original behavior).</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-tkcreate">## Account-wide (default)
+curl -X POST "https://your-domain/api/v1/auth/tokens" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "CI deploy"}'</pre>
+  -d '{"name": "CI deploy"}'
+
+## Scoped to one project — e.g. handing this to an external AI builder
+curl -X POST "https://your-domain/api/v1/auth/tokens" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "AI builder — project 12", "project_id": 12}'</pre>
     <button class="copy-btn" onclick="copyEl('c-tkcreate',this)">Copy</button></div>
-    <p>Returns <code>{"token": "sb_pat_..."}</code>. The raw token value is shown <strong>only once</strong> — store it immediately.</p>
+    <p>Returns <code>{"token": "sb_pat_...", "project_id": 12 | null}</code>. The raw token value is shown <strong>only once</strong> — store it immediately.</p>
+    <div class="callout">A project-scoped token is confined to that project's tables, columns, policies, data, sites/deploys, storage, and error logs — it cannot list/create other projects, manage account settings or other tokens, or be used on a different project. It still has full owner-level power <em>within</em> its one project (bypasses that project's policies, same as an account-wide token would).</div>
   </div>
 </div>
 

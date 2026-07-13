@@ -19,7 +19,15 @@ function resolve_token(string $token): ?array
         if (!$pat) {
             return null;
         }
-        return ['user_id' => (int)$pat['user_id'], 'role' => 'owner', 'email' => ''];
+        return [
+            'user_id'    => (int)$pat['user_id'],
+            'role'       => 'owner',
+            'email'      => '',
+            // NULL = account-wide PAT (unchanged legacy behavior). Set = a
+            // project-scoped PAT, confined by enforce_pat_project_scope()
+            // below to the routes/project it was minted for.
+            'project_id' => $pat['project_id'] ?? null,
+        ];
     }
 
     // 2. JWT (user login, anon_key, or service_key)
@@ -65,6 +73,70 @@ function resolve_token(string $token): ?array
     ];
 }
 
+// Control-plane routes a project-scoped PAT may call — deny-by-default so a
+// route added later that forgets to consider PAT scoping fails closed (403)
+// rather than silently granting a scoped token access it was never meant to
+// have. The data-plane (/v1/data/...) needs no entry here: Crud::resolve()
+// already enforces project_id match generically for every auth type that
+// carries one. AI build/edit/plan/apply routes are deliberately excluded —
+// they take project_id from the request body, not the URL, so a project-
+// scoped PAT can't safely be matched against them yet; it 403s instead of
+// silently ignoring the scope.
+const PAT_PROJECT_SCOPED_ROUTES = [
+    '/v1/projects/:id',
+    '/v1/projects/:id/overview',
+    '/v1/projects/:id/cleanup',
+    '/v1/projects/:id/rotate-service-key',
+    '/v1/projects/:id/seed/clear',
+    '/v1/projects/:id/tables',
+    '/v1/projects/:id/tables/:name',
+    '/v1/projects/:id/tables/:name/columns',
+    '/v1/projects/:id/tables/:name/columns/:col',
+    '/v1/projects/:id/tables/:name/policies',
+    '/v1/projects/:id/sites',
+    '/v1/projects/:id/sites/:site_id',
+    '/v1/projects/:project_id/sites/:site_id/deploys',
+    '/v1/projects/:project_id/sites/:site_id/deploys/open',
+    '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/files',
+    '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/finalize',
+    '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/publish',
+    '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/rollback',
+    '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/diff',
+    '/v1/projects/:project_id/sites/:site_id/deploys/:deploy_id/download',
+    '/v1/projects/:project_id/sites/:site_id/browse',
+    '/v1/projects/:project_id/sites/:site_id/debug',
+    '/v1/projects/:project_id/storage/:bucket',
+    '/v1/projects/:project_id/storage/:bucket/:filename',
+    '/v1/projects/:id/errors',
+    '/v1/projects/:id/errors/download',
+    '/v1/projects/:id/requirements',
+    '/v1/projects/:id/test-accounts',
+    '/v1/projects/:id/test-status',
+];
+
+/**
+ * Confines a project-scoped PAT ($auth['project_id'] !== null, role owner) to
+ * the allowlisted routes above and to the one project it was minted for.
+ * No-op for everything else (plain JWTs, account-wide PATs, service_role,
+ * project_user) — those already carry their own, separate access rules.
+ */
+function enforce_pat_project_scope(array $req, array $auth): void
+{
+    if (($auth['role'] ?? '') !== 'owner' || ($auth['project_id'] ?? null) === null) {
+        return;
+    }
+
+    $pattern = $req['route_pattern'] ?? '';
+    if (!in_array($pattern, PAT_PROJECT_SCOPED_ROUTES, true)) {
+        abort(403, 'This token is scoped to one project and cannot be used for this endpoint.');
+    }
+
+    $urlProjectId = $req['params']['id'] ?? $req['params']['project_id'] ?? null;
+    if ($urlProjectId === null || (int)$urlProjectId !== (int)$auth['project_id']) {
+        abort(403, 'This token is not valid for this project.');
+    }
+}
+
 /**
  * Strict auth middleware — aborts 401 if no valid user-level token.
  * Accepts user JWTs, PATs, and service_key. Rejects anon_key.
@@ -84,6 +156,8 @@ function auth_middleware(array $req, callable $next): void
     if ($auth === null) {
         abort(401, 'Invalid or expired token');
     }
+
+    enforce_pat_project_scope($req, $auth);
 
     // Sliding renewal for platform-user JWTs — renew on every request so the session
     // never expires while the user is active (no logout until explicit sign-out).
