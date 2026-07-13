@@ -646,20 +646,20 @@ class Catalog
     public function listPats(int $userId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, name, created_at, last_used_at FROM personal_access_tokens WHERE user_id = ? ORDER BY created_at DESC'
+            'SELECT id, name, project_id, created_at, last_used_at FROM personal_access_tokens WHERE user_id = ? ORDER BY created_at DESC'
         );
         $stmt->execute([$userId]);
-        return self::castRows($stmt->fetchAll(), ['id']);
+        return self::castRows($stmt->fetchAll(), ['id', 'project_id']);
     }
 
-    public function createPat(int $userId, string $name): string
+    public function createPat(int $userId, string $name, ?int $projectId = null): string
     {
         $raw  = 'sb_pat_' . bin2hex(random_bytes(32));
         $hash = hash('sha256', $raw);
         $stmt = $this->pdo->prepare(
-            'INSERT INTO personal_access_tokens (user_id, name, token_hash) VALUES (?, ?, ?)'
+            'INSERT INTO personal_access_tokens (user_id, name, token_hash, project_id) VALUES (?, ?, ?, ?)'
         );
-        $stmt->execute([$userId, $name, $hash]);
+        $stmt->execute([$userId, $name, $hash, $projectId]);
         return $raw;
     }
 
@@ -675,7 +675,7 @@ class Catalog
     public function findPatByHash(string $hash): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, user_id FROM personal_access_tokens WHERE token_hash = ?'
+            'SELECT id, user_id, project_id FROM personal_access_tokens WHERE token_hash = ?'
         );
         $stmt->execute([$hash]);
         $row = $stmt->fetch() ?: null;
@@ -683,7 +683,7 @@ class Catalog
             $this->pdo->prepare('UPDATE personal_access_tokens SET last_used_at = NOW() WHERE id = ?')
                       ->execute([$row['id']]);
         }
-        return $row ? self::castRow($row, ['id', 'user_id']) : null;
+        return $row ? self::castRow($row, ['id', 'user_id', 'project_id']) : null;
     }
 
     // ─── AI Sessions ─────────────────────────────────────────────────────────

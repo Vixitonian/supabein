@@ -6554,11 +6554,12 @@ async function renderAccount() {
   if (!requireAuth()) return;
   renderLayout(null, 'account', [el('p', { class: 'text-muted' }, 'Loading…')]);
 
-  let user = null, pats = [];
+  let user = null, pats = [], projects = [];
   try {
-    [user, pats] = await Promise.all([
+    [user, pats, projects] = await Promise.all([
       Api.get('/v1/auth/me'),
       Api.get('/v1/auth/tokens'),
+      Api.get('/v1/projects'),
     ]);
   } catch (e) {
     renderLayout(null, 'account', [el('div', { class: 'alert alert-error' }, e.message)]);
@@ -6643,10 +6644,14 @@ async function renderAccount() {
         } catch (e) { alert(e.message); }
       };
       const lastUsed = pat.last_used_at ? (parseServerDate(pat.last_used_at)?.toLocaleDateString() || 'Never') : 'Never';
+      const scopeProject = pat.project_id ? projects.find(p => p.id === pat.project_id) : null;
+      const scopeLabel = pat.project_id
+        ? `Scoped to: ${scopeProject ? scopeProject.name : `project #${pat.project_id}`}`
+        : 'Account-wide';
       listEl.appendChild(
         el('div', { class: 'pat-row' },
           el('span', { class: 'pat-name' }, pat.name),
-          el('span', { class: 'text-muted pat-meta' }, `Created ${parseServerDate(pat.created_at)?.toLocaleDateString() || '—'} · Last used: ${lastUsed}`),
+          el('span', { class: 'text-muted pat-meta' }, `${scopeLabel} · Created ${parseServerDate(pat.created_at)?.toLocaleDateString() || '—'} · Last used: ${lastUsed}`),
           revokeBtn
         )
       );
@@ -6655,6 +6660,10 @@ async function renderAccount() {
   renderPatList();
 
   const nameInput    = el('input', { type: 'text', class: 'form-control', placeholder: 'Token name (e.g. "CI deploy")…', style: 'flex:1' });
+  const scopeSelect  = el('select', { class: 'form-control', style: 'flex:1' },
+    el('option', { value: '' }, 'Account-wide (all projects)'),
+    ...projects.map(p => el('option', { value: String(p.id) }, `Scoped to: ${p.name}`))
+  );
   const createBtn    = el('button', { class: 'btn btn-primary' }, '+ New Token');
   const tokenDisplay = el('div', { style: 'display:none;margin-top:12px' });
 
@@ -6663,7 +6672,9 @@ async function renderAccount() {
     if (!name) { nameInput.focus(); return; }
     try {
       createBtn.disabled = true;
-      const res = await Api.post('/v1/auth/tokens', { name });
+      const body = { name };
+      if (scopeSelect.value) body.project_id = Number(scopeSelect.value);
+      const res = await Api.post('/v1/auth/tokens', body);
       nameInput.value = '';
       const tokenPre = el('pre', { class: 'api-code-block' }, res.token);
       const copyBtn2 = el('button', { class: 'copy-btn btn btn-sm' }, 'Copy');
@@ -6686,10 +6697,10 @@ async function renderAccount() {
   const patCard = el('div', { class: 'api-table-card' },
     el('div', { class: 'api-table-title' }, 'Personal Access Tokens'),
     el('p', { class: 'text-muted', style: 'font-size:0.82rem;margin:6px 0 14px' },
-      'PATs authenticate as you across all projects — use them in scripts or CI/CD instead of your password. Token values are shown only once at creation.'
+      'PATs authenticate as you — account-wide by default, or scope one to a single project (e.g. to hand to an external tool or AI builder that should only touch that project). Token values are shown only once at creation.'
     ),
     listEl,
-    el('div', { style: 'display:flex;gap:8px;margin-top:14px' }, nameInput, createBtn),
+    el('div', { style: 'display:flex;gap:8px;margin-top:14px;flex-wrap:wrap' }, nameInput, scopeSelect, createBtn),
     tokenDisplay
   );
 

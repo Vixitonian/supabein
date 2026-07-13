@@ -164,15 +164,20 @@ function register_auth_routes(\SupaBein\Router $router): void
         json_out($catalog->listPats($req['auth']['user_id']));
     }, ['auth_middleware']);
 
-    // POST /v1/auth/tokens — create PAT, returns raw token once
+    // POST /v1/auth/tokens — create PAT, returns raw token once. Optional
+    // project_id scopes the token to one project instead of the account.
     $router->post('/v1/auth/tokens', function (array $req): void {
         $name = trim($req['body']['name'] ?? '');
         if ($name === '') {
             abort(422, 'Token name is required');
         }
-        $catalog = \SupaBein\Catalog::getInstance();
-        $raw     = $catalog->createPat($req['auth']['user_id'], $name);
-        json_out(['token' => $raw, 'name' => $name], 201);
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
+        if ($projectId !== null && !$catalog->getProjectById($projectId, $req['auth']['user_id'])) {
+            abort(404, 'Project not found');
+        }
+        $raw = $catalog->createPat($req['auth']['user_id'], $name, $projectId);
+        json_out(['token' => $raw, 'name' => $name, 'project_id' => $projectId], 201);
     }, ['auth_middleware']);
 
     // DELETE /v1/auth/tokens/:id — revoke PAT
