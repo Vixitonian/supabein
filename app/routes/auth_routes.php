@@ -127,6 +127,16 @@ function register_auth_routes(\SupaBein\Router $router): void
         if (!$user) {
             abort(404);
         }
+        // Lets a project-scoped PAT discover which project it belongs to
+        // without brute-forcing project ids — see enforce_pat_project_scope().
+        $projectId = $req['auth']['project_id'] ?? null;
+        $user['project_id']   = $projectId;
+        $user['project_name'] = null;
+        if ($projectId !== null) {
+            $catalog = \SupaBein\Catalog::getInstance();
+            $project = $catalog->getProjectById((int)$projectId, (int)$req['auth']['user_id']);
+            $user['project_name'] = $project['name'] ?? null;
+        }
         json_out($user);
     }, ['auth_middleware']);
 
