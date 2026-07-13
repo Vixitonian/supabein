@@ -1077,6 +1077,13 @@ curl -X POST "https://your-domain/api/v1/auth/tokens" \
 </div>
 
 <script>
+// Replace the "https://your-domain" placeholder with the domain this page is
+// actually being served from, so every example is copy-paste correct — and
+// stays correct automatically if the docs ever move to a different domain.
+document.querySelectorAll('pre.code').forEach(pre => {
+  pre.textContent = pre.textContent.replaceAll('https://your-domain', location.origin);
+});
+
 function copyEl(id, btn) {
   const text = document.getElementById(id).textContent;
   navigator.clipboard.writeText(text).then(() => {
