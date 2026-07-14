@@ -142,7 +142,18 @@ function register_table_routes(\SupaBein\Router $router): void
 
         $pdo = \App::get('db');
         $ddl = \SupaBein\Schema::dropTableDDL($table['physical_name']);
-        \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
+        try {
+            \SupaBein\Schema::applyDDL($pdo, $project['id'], $ddl);
+        } catch (\PDOException $e) {
+            // errno 1451: another table's column still has a live FK
+            // pointing at this one (auto-applied on *_id columns) --
+            // deliberately not force-dropped, unlike the whole-project
+            // delete/cleanup paths where every table goes together.
+            if (str_contains($e->getMessage(), '1451')) {
+                abort(409, "Cannot delete table '{$table['table_name']}' — another table still has a foreign key referencing it. Delete or repoint that column first.");
+            }
+            throw $e;
+        }
 
         $catalog->deleteTable($project['id'], $table['table_name']);
         json_out(['deleted' => true]);

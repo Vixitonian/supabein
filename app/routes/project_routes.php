@@ -100,9 +100,23 @@ function register_project_routes(\SupaBein\Router $router): void
         $pdo    = \App::get('db');
         $config = \App::get('config');
 
-        // Drop all physical MySQL tables for this project
-        foreach ($catalog->listTables($projectId) as $tbl) {
-            $pdo->exec(\SupaBein\Schema::dropTableDDL($tbl['physical_name']));
+        // Drop all physical MySQL tables for this project. FK checks are
+        // disabled for just this loop: every table in the project is being
+        // removed together, so mid-loop referential integrity doesn't
+        // matter (there's no intermediate state anyone can observe) --
+        // without this, dropping a table that another project table still
+        // has a live FK against (e.g. "customers" before "invoices") fails
+        // with errno 1451, since FKs are now applied automatically on
+        // *_id columns. Scoped to this loop only: a single-table delete
+        // via DELETE /v1/projects/:id/tables/:name deliberately keeps
+        // failing loudly if something still references it.
+        $pdo->exec('SET FOREIGN_KEY_CHECKS=0');
+        try {
+            foreach ($catalog->listTables($projectId) as $tbl) {
+                $pdo->exec(\SupaBein\Schema::dropTableDDL($tbl['physical_name']));
+            }
+        } finally {
+            $pdo->exec('SET FOREIGN_KEY_CHECKS=1');
         }
 
         // Delete all site directories from disk
@@ -232,12 +246,22 @@ function register_project_routes(\SupaBein\Router $router): void
             }
         }
 
-        // Orphan tables: in MySQL but not in catalog → DROP
-        foreach ($mysqlTables as $mysqlName) {
-            if (!in_array($mysqlName, $catalogPhysical, true)) {
-                $pdo->exec(\SupaBein\Schema::dropTableDDL($mysqlName));
-                $tablesDropped[] = $mysqlName;
+        // Orphan tables: in MySQL but not in catalog → DROP. FK checks off
+        // for the same reason as the whole-project delete: an orphan table
+        // being dropped here might still have a live FK pointing at it
+        // (from another orphan, or from a still-catalogued table), and
+        // this loop's whole point is removing exactly this kind of stale
+        // state, not being blocked by it.
+        $pdo->exec('SET FOREIGN_KEY_CHECKS=0');
+        try {
+            foreach ($mysqlTables as $mysqlName) {
+                if (!in_array($mysqlName, $catalogPhysical, true)) {
+                    $pdo->exec(\SupaBein\Schema::dropTableDDL($mysqlName));
+                    $tablesDropped[] = $mysqlName;
+                }
             }
+        } finally {
+            $pdo->exec('SET FOREIGN_KEY_CHECKS=1');
         }
 
         // ── Deploy sync: catalog ↔ disk ──────────────────────────────────────
