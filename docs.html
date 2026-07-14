@@ -202,6 +202,8 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#storage-list">GET (list files)</a>
     <a class="sb-link" href="#storage-delete">DELETE (delete file)</a>
     <a class="sb-link" href="#storage-serve">GET (public serve)</a>
+    <a class="sb-link" href="#storage-end-user">End-user uploads</a>
+    <a class="sb-link" href="#storage-policy-set">PUT (bucket policy)</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Sites &amp; Deploys</span>
@@ -765,7 +767,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 
 <!-- ── File Storage ── -->
 <h2 id="storage-upload">File Storage</h2>
-<p>Store files (images, documents, assets) per project inside named <strong>buckets</strong>. Files are served publicly via a read-only URL — no auth needed to fetch them. Management endpoints (upload, list, delete) require operator auth.</p>
+<p>Store files (images, documents, assets) per project inside named <strong>buckets</strong>. Files are served publicly via a read-only URL — no auth needed to fetch them. Uploading/listing/deleting requires either operator auth (JWT/PAT/<code>service_key</code>, full bucket access) <strong>or</strong> an end-user's <code>project_user</code> JWT (from a table's <a href="#data-login">login endpoint</a>) — see below.</p>
 <div class="callout">Bucket names: 1–63 characters, lowercase letters/numbers/hyphens/underscores. Max file size: 50 MB. Blocked extensions: <code>.php .py .sh .exe .cgi .rb .pl .bat .cmd .htaccess</code></div>
 
 <div class="endpoint">
@@ -825,8 +827,36 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   </div>
 </div>
 
+<h3 id="storage-end-user">End-user uploads (profile pictures, product images, etc.)</h3>
+<p>A logged-in end-user — someone authenticated via a table's <a href="#data-login">login endpoint</a>, not the project owner — can upload/list/delete files too, once the project owner explicitly enables it per bucket. Every upload/list/delete an end-user makes is transparently confined to <strong>their own files only</strong>, computed server-side from their JWT (never from anything the client sends) — user A can never see, overwrite, or delete user B's files, even if they guess B's filenames. Public read (the serve endpoint above) is unaffected — anyone's uploaded avatar or product image is still publicly viewable once uploaded, exactly like operator-uploaded files.</p>
+<div class="callout"><strong>Off by default.</strong> A bucket accepts <em>only</em> operator uploads until you explicitly opt it in — the same "unpolicied = locked" default as table policies. Enabling this for one bucket (e.g. <code>avatars</code>) has no effect on any other bucket.</div>
+
+<div class="endpoint" id="storage-policy-set">
+  <div class="endpoint-head">
+    <span class="method put">PUT</span>
+    <span class="path">/api/v1/projects/:project_id/storage/:bucket/policy</span>
+    <span class="desc">Enable (or disable) end-user uploads for one bucket — owner only</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-spolicy">curl -X PUT "https://your-domain/api/v1/projects/1/storage/avatars/policy" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"authenticated_upload": true}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-spolicy',this)">Copy</button></div>
+    <p>Returns <code>{"project_id", "bucket", "allow_authenticated_upload"}</code>. There's a matching <code>GET</code> on the same path to check the current setting.</p>
+  </div>
+</div>
+
+<p>Once enabled, an end-user calls the exact same upload/list/delete endpoints above — just with their own <code>project_user</code> JWT instead of an operator token:</p>
+<div class="code-wrap"><pre class="code" id="c-senduser">## The logged-in end-user's own upload -- lands in their own scoped space,
+## automatically. No path or user id to pass -- it comes from their token.
+curl -X POST "https://your-domain/api/v1/projects/1/storage/avatars" \
+  -H "Authorization: Bearer END_USER_PROJECT_USER_JWT" \
+  -F "file=@my-photo.jpg"</pre>
+<button class="copy-btn" onclick="copyEl('c-senduser',this)">Copy</button></div>
+
 <!-- Rate limit note -->
-<div class="callout warn" style="margin-bottom:32px"><strong>Rate limiting:</strong> The data API enforces a limit of 600 requests per minute per project. Excess requests receive <code>429 Too Many Requests</code> with a <code>Retry-After: 60</code> header. The file storage and auth endpoints are not rate-limited.</div>
+<div class="callout warn" style="margin-bottom:32px"><strong>Rate limiting:</strong> The data API enforces a limit of 600 requests per minute per project (<code>429</code> + <code>Retry-After: 60</code> on excess). End-user (<code>project_user</code>) storage uploads/deletes have their own, tighter limit (60/minute per project) — reachable by any signed-up visitor, not just the operator, so it needs a lower ceiling than real operator traffic. Operator storage calls, and auth endpoints, are not rate-limited.</div>
 
 <!-- ── Sites ── -->
 <h2 id="sites-list">Sites &amp; Deploys</h2>

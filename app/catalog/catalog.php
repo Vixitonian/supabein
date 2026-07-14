@@ -662,6 +662,27 @@ class Catalog
         return self::castRows($stmt->fetchAll(), ['id', 'site_id', 'size_bytes']);
     }
 
+    // ─── Storage bucket policies ─────────────────────────────────────────────
+
+    public function getStorageBucketPolicy(int $projectId, string $bucket): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT project_id, bucket, allow_authenticated_upload FROM storage_bucket_policies WHERE project_id = ? AND bucket = ?'
+        );
+        $stmt->execute([$projectId, $bucket]);
+        $row = $stmt->fetch() ?: null;
+        return $row ? self::castRow($row, ['project_id', 'allow_authenticated_upload']) : null;
+    }
+
+    public function setStorageBucketPolicy(int $projectId, string $bucket, bool $allowAuthenticatedUpload): array
+    {
+        $this->pdo->prepare(
+            'INSERT INTO storage_bucket_policies (project_id, bucket, allow_authenticated_upload) VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE allow_authenticated_upload = VALUES(allow_authenticated_upload)'
+        )->execute([$projectId, $bucket, $allowAuthenticatedUpload ? 1 : 0]);
+        return ['project_id' => $projectId, 'bucket' => $bucket, 'allow_authenticated_upload' => $allowAuthenticatedUpload];
+    }
+
     // ─── Personal Access Tokens ──────────────────────────────────────────────
 
     public function listPats(int $userId): array

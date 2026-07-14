@@ -32,6 +32,14 @@ class RateLimit
         self::checkBucket('ai_error_log_limits', $projectId, $limit);
     }
 
+    // End-user (project_user) storage writes -- reachable by anyone signed
+    // up in the app, not just the operator, so it gets its own tighter
+    // ceiling and its own bucket (same reasoning as checkProjectErrors).
+    public static function checkProjectStorage(int $projectId, int $limit = self::DEFAULT_ERROR_LOG_LIMIT): void
+    {
+        self::checkBucket('storage_rate_limits', $projectId, $limit);
+    }
+
     private static function checkBucket(string $table, int $projectId, int $limit): void
     {
         $pdo    = \App::get('db');

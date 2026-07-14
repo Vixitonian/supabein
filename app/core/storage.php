@@ -30,6 +30,13 @@ class Storage
         return $name;
     }
 
+    // Public wrapper for routes that need to validate a bucket name outside
+    // an upload/list/delete call (the bucket-policy endpoints).
+    public static function validateBucketName(string $name): string
+    {
+        return self::validBucket($name);
+    }
+
     private static function validFilename(string $raw): string
     {
         $name = basename(str_replace(['..', "\0"], '', $raw));
@@ -79,7 +86,25 @@ class Storage
         ];
     }
 
-    public static function upload(array $req): void
+    // A project_user's own row id, prefixed onto every filename they write
+    // (never a subdirectory the client could influence). This is what makes
+    // per-user isolation hold regardless of what the caller sends: the
+    // prefix always comes from their own JWT `sub`, computed server-side.
+    private static function scopedFilename(?string $userScope, string $filename): string
+    {
+        return $userScope !== null ? $userScope . '__' . $filename : $filename;
+    }
+
+    // Strips the scope prefix back off for display -- an end-user's own
+    // client code shouldn't need to know its files are prefixed at all.
+    private static function displayName(?string $userScope, string $storedName): string
+    {
+        if ($userScope === null) return $storedName;
+        $prefix = $userScope . '__';
+        return str_starts_with($storedName, $prefix) ? substr($storedName, strlen($prefix)) : $storedName;
+    }
+
+    public static function upload(array $req, ?string $userScope = null): void
     {
         $projectId = (int)$req['params']['project_id'];
         $bucket    = self::validBucket($req['params']['bucket']);
@@ -93,7 +118,7 @@ class Storage
             abort(413, 'File exceeds the 50 MB limit');
         }
 
-        $filename = self::validFilename($file['name']);
+        $filename = self::scopedFilename($userScope, self::validFilename($file['name']));
         $dir      = self::bucketDir($projectId, $bucket);
 
         if (!is_dir($dir) && !mkdir($dir, 0755, true) && !is_dir($dir)) {
@@ -106,7 +131,7 @@ class Storage
         }
 
         json_out([
-            'name'   => $filename,
+            'name'   => self::displayName($userScope, $filename),
             'bucket' => $bucket,
             'size'   => (int)$file['size'],
             'url'    => self::publicUrl($projectId, $bucket, $filename),
@@ -115,7 +140,7 @@ class Storage
 
     // ── List ──────────────────────────────────────────────────────────────────
 
-    public static function listFiles(array $req): void
+    public static function listFiles(array $req, ?string $userScope = null): void
     {
         $projectId = (int)$req['params']['project_id'];
         $bucket    = self::validBucket($req['params']['bucket']);
@@ -126,14 +151,20 @@ class Storage
             return;
         }
 
-        $files = [];
+        $prefix = $userScope !== null ? $userScope . '__' : null;
+        $files  = [];
         foreach (new \DirectoryIterator($dir) as $f) {
             if ($f->isDot() || !$f->isFile()) {
                 continue;
             }
-            $name    = $f->getFilename();
+            $name = $f->getFilename();
+            // An end-user only ever sees their own files -- filtered by the
+            // server-computed prefix, never anything the client can steer.
+            if ($prefix !== null && !str_starts_with($name, $prefix)) {
+                continue;
+            }
             $files[] = [
-                'name'         => $name,
+                'name'         => self::displayName($userScope, $name),
                 'size'         => (int)$f->getSize(),
                 'last_modified'=> date('Y-m-d H:i:s', (int)$f->getMTime()),
                 'url'          => self::publicUrl($projectId, $bucket, $name),
@@ -147,11 +178,11 @@ class Storage
 
     // ── Delete ────────────────────────────────────────────────────────────────
 
-    public static function deleteFile(array $req): void
+    public static function deleteFile(array $req, ?string $userScope = null): void
     {
         $projectId = (int)$req['params']['project_id'];
         $bucket    = self::validBucket($req['params']['bucket']);
-        $filename  = self::validFilename(rawurldecode($req['params']['filename']));
+        $filename  = self::scopedFilename($userScope, self::validFilename(rawurldecode($req['params']['filename'])));
         $path      = self::bucketDir($projectId, $bucket) . '/' . $filename;
 
         if (!file_exists($path) || !is_file($path)) {

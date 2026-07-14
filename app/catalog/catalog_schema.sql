@@ -194,6 +194,30 @@ CREATE TABLE IF NOT EXISTS `ai_error_log_limits` (
     PRIMARY KEY (`project_id`, `window_start`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Per-project rate limiting for end-user (project_user) storage writes --
+-- separate bucket from the general data-API limit for the same reason
+-- ai_error_log_limits is separate: a burst on one shouldn't eat into or
+-- trip the other's quota.
+CREATE TABLE IF NOT EXISTS `storage_rate_limits` (
+    `project_id`   INT UNSIGNED NOT NULL,
+    `window_start` INT UNSIGNED NOT NULL,
+    `count`        INT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (`project_id`, `window_start`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Per-project, per-bucket opt-in for end-user storage writes. No row (or
+-- allow_authenticated_upload=0) means the bucket stays operator-only --
+-- same "unpolicied = locked" default as table policies.
+CREATE TABLE IF NOT EXISTS `storage_bucket_policies` (
+    `id`                         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`                 INT UNSIGNED NOT NULL,
+    `bucket`                     VARCHAR(64) NOT NULL,
+    `allow_authenticated_upload` TINYINT(1) NOT NULL DEFAULT 0,
+    `created_at`                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_bucket` (`project_id`, `bucket`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
 
 -- ─── Migration: project_requirements (run once on existing installs) ─────────
