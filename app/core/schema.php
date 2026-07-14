@@ -137,6 +137,9 @@ class Schema
 
         foreach ($columns as $col) {
             $defs[] = self::buildColumnDef($col);
+            if (!empty($col['references'])) {
+                $defs[] = self::foreignKeyConstraintClause($physicalName, $col['name'], $col['references']);
+            }
         }
 
         return sprintf(
@@ -147,13 +150,42 @@ class Schema
     }
 
     /**
-     * Build ALTER TABLE ... ADD COLUMN DDL.
+     * Build ALTER TABLE ... ADD COLUMN DDL. If $col['references'] (a
+     * physical table name) is set, also adds a FOREIGN KEY constraint in
+     * the same ALTER TABLE statement.
      */
     public static function addColumnDDL(string $physicalName, array $col): string
     {
         self::validateIdentifier($physicalName);
-        $def = self::buildColumnDef($col);
-        return sprintf('ALTER TABLE %s ADD COLUMN %s', self::q($physicalName), $def);
+        $clauses = ['ADD COLUMN ' . self::buildColumnDef($col)];
+        if (!empty($col['references'])) {
+            $clauses[] = 'ADD ' . self::foreignKeyConstraintClause($physicalName, $col['name'], $col['references']);
+        }
+        return sprintf('ALTER TABLE %s %s', self::q($physicalName), implode(', ', $clauses));
+    }
+
+    // Deterministic constraint name so re-running column creation (or the
+    // one-time live-data FK backfill this scheme was first used for) never
+    // collides with an already-applied constraint.
+    private static function fkConstraintName(string $childPhysical, string $col): string
+    {
+        return 'fk_' . substr(md5($childPhysical . '_' . $col), 0, 12);
+    }
+
+    // FK columns must exactly match the type of every table's fixed `id`
+    // PK (INT UNSIGNED AUTO_INCREMENT) -- MySQL rejects a constraint on a
+    // mismatched signedness/width, which is why buildColumnDef() forces
+    // INT UNSIGNED whenever $col['references'] is set (see below).
+    private static function foreignKeyConstraintClause(string $childPhysical, string $col, string $parentPhysical): string
+    {
+        self::validateIdentifier($childPhysical);
+        self::validateIdentifier($col);
+        self::validateIdentifier($parentPhysical);
+        $name = self::fkConstraintName($childPhysical, $col);
+        return sprintf(
+            'CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(id) ON DELETE CASCADE',
+            self::q($name), self::q($col), self::q($parentPhysical)
+        );
     }
 
     /**
@@ -197,8 +229,16 @@ class Schema
         $default  = $col['default'] ?? null;
         $unique   = (bool)($col['unique'] ?? false);
 
-        // PASSWORD is stored as a bcrypt hash in VARCHAR(255)
-        $ddlType = ($type === 'PASSWORD') ? 'VARCHAR(255)' : $type;
+        if (!empty($col['references'])) {
+            // Every table's `id` PK is INT UNSIGNED AUTO_INCREMENT (see
+            // createTableDDL) -- a FK column must match that exactly or
+            // MySQL rejects the constraint (errno 150), regardless of
+            // what type was originally requested for this column.
+            $ddlType = 'INT UNSIGNED';
+        } else {
+            // PASSWORD is stored as a bcrypt hash in VARCHAR(255)
+            $ddlType = ($type === 'PASSWORD') ? 'VARCHAR(255)' : $type;
+        }
         $def = self::q($name) . ' ' . $ddlType;
         $def .= $nullable ? ' NULL' : ' NOT NULL';
         if ($unique) $def .= ' UNIQUE';
