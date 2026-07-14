@@ -365,6 +365,27 @@ class Catalog
         return self::castRows($stmt->fetchAll(), ['id', 'project_id']);
     }
 
+    // Naming-convention FK auto-detection: a column named e.g. "user_id"
+    // matches a same-project table named "user" or "users". Validated
+    // empirically against live data before being wired into column creation
+    // (see the fk-audit that found real orphans this heuristic correctly
+    // predicted). $excludeTableId keeps a table from matching its own column.
+    public function findForeignKeyTarget(int $projectId, string $colName, int $excludeTableId = 0): ?array
+    {
+        if (!preg_match('/^(.+)_id$/i', $colName, $m)) {
+            return null;
+        }
+        $prefix = $m[1];
+        $candidates = array_map('strtolower', [$prefix, $prefix . 's', rtrim($prefix, 's')]);
+        foreach ($this->listTables($projectId) as $t) {
+            if ((int)$t['id'] === $excludeTableId) continue;
+            if (in_array(strtolower($t['table_name']), $candidates, true)) {
+                return $t;
+            }
+        }
+        return null;
+    }
+
     // Exact row count for one physical table. $physicalName always originates
     // from a project_tables row (assigned via Schema::validateIdentifier at
     // creation, never user-supplied here), so it's safe to backtick-quote and
