@@ -107,6 +107,7 @@ const PAT_PROJECT_SCOPED_ROUTES = [
     '/v1/projects/:project_id/sites/:site_id/debug',
     '/v1/projects/:project_id/storage/:bucket',
     '/v1/projects/:project_id/storage/:bucket/:filename',
+    '/v1/projects/:project_id/storage/:bucket/policy',
     '/v1/projects/:id/errors',
     '/v1/projects/:id/errors/download',
     '/v1/projects/:id/requirements',
