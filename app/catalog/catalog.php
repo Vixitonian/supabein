@@ -6,6 +6,50 @@ namespace SupaBein;
 
 class Catalog
 {
+    // Subdomain labels no project or end-user (e.g. a Zera business) may
+    // claim under the platform's own domain -- keeps common infra/service
+    // names, account/auth pages, and generic words free for first-party or
+    // future use instead of being permanently squatted by whoever asks
+    // first. Only applies to labels under the platform's own base domain;
+    // an unrelated external custom domain isn't checked against this list.
+    private const RESERVED_SUBDOMAINS = [
+        // Infra / service
+        'www', 'mail', 'smtp', 'imap', 'ftp', 'sftp', 'ns1', 'ns2', 'dns',
+        'cdn', 'static', 'assets', 'media', 'cache', 'edge', 'proxy',
+        'gateway', 'lb', 'vpn', 'ssl', 'secure', 'cpanel', 'whm', 'webmail',
+        'autodiscover', 'autoconfig',
+        // Core platform
+        'api', 'apiv1', 'apiv2', 'graphql', 'ws', 'websocket', 'socket',
+        'stream', 'webhook', 'webhooks', 'sdk', 'cli', 'console', 'docs',
+        'swagger', 'status', 'health', 'ping', 'metrics', 'monitor', 'logs',
+        'ci', 'cd', 'git', 'backup', 'db', 'database', 'sql', 'redis',
+        'queue', 'jobs', 'cron',
+        // Auth / account
+        'auth', 'oauth', 'sso', 'login', 'logout', 'signup', 'register',
+        'account', 'accounts', 'profile', 'user', 'users', 'admin', 'root',
+        'dashboard', 'portal', 'panel', 'settings', 'billing', 'payment',
+        'payments', 'checkout', 'cart',
+        // Content / marketing
+        'blog', 'news', 'press', 'about', 'contact', 'careers', 'help',
+        'support', 'faq', 'wiki', 'terms', 'privacy', 'legal', 'changelog',
+        'roadmap', 'feedback', 'community', 'forum', 'chat', 'partners',
+        'developers',
+        // Commerce
+        'shop', 'store', 'market', 'marketplace', 'orders', 'invoice',
+        // Media
+        'images', 'video', 'audio', 'files', 'download', 'upload',
+        // Generic / system
+        'home', 'index', 'default', 'null', 'localhost', 'internal',
+        'private', 'public', 'system', 'config', 'server', 'service',
+        'services', 'host', 'master', 'main', 'test', 'staging', 'dev',
+        'demo', 'beta', 'sandbox', 'preview', 'app', 'apps', 'mobile', 'web',
+    ];
+
+    public static function isReservedSubdomain(string $label): bool
+    {
+        return in_array(strtolower($label), self::RESERVED_SUBDOMAINS, true);
+    }
+
     private static ?self $instance = null;
     private \PDO $pdo;
 

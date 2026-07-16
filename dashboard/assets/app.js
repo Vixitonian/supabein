@@ -5056,15 +5056,16 @@ function showNewProjectModal() {
 
 
 // Project overview
-async function renderProject({ id }) {
+const PROJECT_TAB_NAMES = ['overview', 'tables', 'api', 'deploy', 'domain', 'errors'];
+
+async function renderProject({ id }, initialTab) {
   if (!requireAuth()) return;
   renderLayout(id, '', [el('p', { class: 'text-muted' }, 'Loading…')]);
 
   try {
     const project = await Api.get(`/v1/projects/${id}`);
 
-
-    const tabOverview = el('div', { class: 'tab active' }, 'Overview');
+    const tabOverview = el('div', { class: 'tab' }, 'Overview');
     const tabTables   = el('div', { class: 'tab' }, 'Tables');
     const tabApi      = el('div', { class: 'tab' }, 'API');
     const tabDeploy   = el('div', { class: 'tab' }, 'Deploy');
@@ -5081,53 +5082,31 @@ async function renderProject({ id }) {
     const allTabs  = [tabOverview, tabTables, tabApi, tabDeploy, tabDomain, tabErrors];
     const allPanes = [paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneDomainEl, paneErrorsEl];
 
+    // Lazy-loads each pane's content the first time it's shown, and-- this is
+    // the fix for "Publish" landing on an empty Deploy tab -- it does that
+    // loading regardless of *how* a tab became active (a real click, or a
+    // button elsewhere calling switchProjectTab(3) directly), instead of only
+    // when the tab's own click listener fires.
+    const paneLoaders = [
+      () => loadOverviewPane(id, paneOverviewEl, switchProjectTab),
+      () => loadTablesPane(id, paneTablesEl),
+      () => loadApiPane(id, paneApiEl),
+      () => loadDeployPane(id, paneDeployEl),
+      () => loadDomainPane(id, paneDomainEl),
+      () => loadErrorsPane(id, paneErrorsEl),
+    ];
+
     function switchProjectTab(idx) {
       allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
       allPanes.forEach((p, i) => p.classList.toggle('hidden', i !== idx));
+      const pane = allPanes[idx];
+      if (!pane.dataset.loaded) {
+        pane.dataset.loaded = '1';
+        paneLoaders[idx]();
+      }
     }
 
-    tabOverview.addEventListener('click', () => {
-      switchProjectTab(0);
-      if (!paneOverviewEl.dataset.loaded) {
-        paneOverviewEl.dataset.loaded = '1';
-        loadOverviewPane(id, paneOverviewEl, switchProjectTab);
-      }
-    });
-    tabTables.addEventListener('click', () => {
-      switchProjectTab(1);
-      if (!paneTablesEl.dataset.loaded) {
-        paneTablesEl.dataset.loaded = '1';
-        loadTablesPane(id, paneTablesEl);
-      }
-    });
-    tabApi.addEventListener('click', () => {
-      switchProjectTab(2);
-      if (!paneApiEl.dataset.loaded) {
-        paneApiEl.dataset.loaded = '1';
-        loadApiPane(id, paneApiEl);
-      }
-    });
-    tabDeploy.addEventListener('click', () => {
-      switchProjectTab(3);
-      if (!paneDeployEl.dataset.loaded) {
-        paneDeployEl.dataset.loaded = '1';
-        loadDeployPane(id, paneDeployEl);
-      }
-    });
-    tabDomain.addEventListener('click', () => {
-      switchProjectTab(4);
-      if (!paneDomainEl.dataset.loaded) {
-        paneDomainEl.dataset.loaded = '1';
-        loadDomainPane(id, paneDomainEl);
-      }
-    });
-    tabErrors.addEventListener('click', () => {
-      switchProjectTab(5);
-      if (!paneErrorsEl.dataset.loaded) {
-        paneErrorsEl.dataset.loaded = '1';
-        loadErrorsPane(id, paneErrorsEl);
-      }
-    });
+    allTabs.forEach((tab, idx) => tab.addEventListener('click', () => switchProjectTab(idx)));
 
     const content = [
       el('div', { class: 'page-header' },
@@ -5143,9 +5122,8 @@ async function renderProject({ id }) {
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
-    // Eagerly load the default (Overview) tab
-    paneOverviewEl.dataset.loaded = '1';
-    loadOverviewPane(id, paneOverviewEl, switchProjectTab);
+    const startIdx = Math.max(0, PROJECT_TAB_NAMES.indexOf(initialTab || 'overview'));
+    switchProjectTab(startIdx);
   } catch (e) {
     setApp(`<div class="alert alert-danger">${e.message}</div>`);
   }
@@ -5318,7 +5296,7 @@ async function loadTablesPane(projectId, container) {
     const tables = await Api.get(`/v1/projects/${projectId}/tables`);
 
     const newTableBtn = el('button', { class: 'btn btn-primary btn-sm' }, '+ New Table');
-    newTableBtn.addEventListener('click', () => showNewTableModal(projectId));
+    newTableBtn.addEventListener('click', () => showNewTableModal(projectId, () => loadTablesPane(projectId, container)));
 
     let tableContent;
     if (!tables.length) {
@@ -5425,15 +5403,8 @@ async function loadUsersPane(projectId, container) {
   }
 }
 
-async function renderApi({ id }, container) {
-  const projectId = id;
-  const useContainer = container || document.getElementById('app');
-  if (!container) {
-    if (!requireAuth()) return;
-    renderLayout(projectId, '', [el('p', { class: 'text-muted' }, 'Loading…')]);
-  } else {
-    container.innerHTML = '<div class="text-muted">Loading…</div>';
-  }
+async function loadApiPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
 
   try {
     const project = await Api.get(`/v1/projects/${projectId}`);
@@ -5518,23 +5489,11 @@ async function renderApi({ id }, container) {
       curlBlock(`curl "${base}/{table}" \\\n  -H "Authorization: Bearer ${sk}"`)
     );
 
-    const nodes = [keyCard, docsCard];
-
-    if (!container) {
-      renderLayout(projectId, '', [
-        el('div', { class: 'page-header' },
-          el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${projectId}` }, '← Project'),
-          el('h1', { class: 'page-title' }, 'API')
-        ),
-        ...nodes
-      ]);
-    } else {
-      container.innerHTML = '';
-      nodes.forEach(n => container.appendChild(n));
-    }
+    container.innerHTML = '';
+    container.appendChild(keyCard);
+    container.appendChild(docsCard);
   } catch (e) {
-    (container || document.getElementById('app')).innerHTML =
-      `<div class="alert alert-danger">${e.message}</div>`;
+    container.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
   }
 }
 
@@ -5618,10 +5577,6 @@ async function loadErrorsPane(projectId, container) {
   } catch (e) {
     container.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
   }
-}
-
-async function loadApiPane(projectId, container) {
-  return renderApi({ id: projectId }, container);
 }
 
 async function loadDeployPane(projectId, container) {
@@ -5778,73 +5733,7 @@ async function loadDomainPane(projectId, container) {
   }
 }
 
-// Tables list
-async function renderTables({ id }) {
-  if (!requireAuth()) return;
-
-  renderLayout(id, 'tables', [
-    el('div', { class: 'page-header' },
-      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
-      el('h1', { class: 'page-title' }, 'Tables'),
-      el('button', { class: 'btn btn-primary', id: 'new-table' }, '+')
-    ),
-    el('div', { id: 'table-list' }, 'Loading...')
-  ]);
-
-  document.getElementById('new-table').addEventListener('click', () => showNewTableModal(id));
-
-  try {
-    const tables = await Api.get(`/v1/projects/${id}/tables`);
-    const list   = document.getElementById('table-list');
-
-    if (!tables.length) {
-      list.innerHTML = '<div class="text-muted">No tables yet.</div>';
-      return;
-    }
-
-    const tbl = el('table', { class: 'data-table' },
-      el('thead', {}, el('tr', {},
-        el('th', {}, 'Name'), el('th', { class: 'col-mobile-hide' }, 'Physical Name'), el('th', {}, 'Rows'), el('th', {}, '')
-      )),
-      el('tbody', {}, ...tables.map(t => {
-        const menuBtn = el('button', { class: 'proj-menu-btn', title: 'Table actions' }, '⋮');
-        // Combines .dropdown (visuals: background/border/shadow) with
-        // .proj-menu-drop (position + the global click-outside-closes-it
-        // listener already wired at the bottom of this file) so this needs
-        // no listener of its own beyond the toggle below — avoids adding a
-        // fresh document-level listener per row every time this list renders.
-        const dropdown = el('div', { class: 'dropdown proj-menu-drop hidden' },
-          el('button', { class: 'dropdown-item dropdown-item-danger' }, 'Drop table')
-        );
-        menuBtn.addEventListener('click', e => {
-          e.preventDefault(); e.stopPropagation();
-          document.querySelectorAll('.proj-menu-drop').forEach(d => { if (d !== dropdown) d.classList.add('hidden'); });
-          dropdown.classList.toggle('hidden');
-        });
-        dropdown.querySelector('button').addEventListener('click', async () => {
-          dropdown.classList.add('hidden');
-          if (!confirm(`Drop table "${t.table_name}"?`)) return;
-          await Api.delete(`/v1/projects/${id}/tables/${t.table_name}`);
-          renderTables({ id });
-        });
-
-        return el('tr', {},
-          el('td', {}, el('a', { href: `#/projects/${id}/tables/${t.table_name}` }, t.table_name)),
-          el('td', { class: 'text-muted text-sm col-mobile-hide' }, t.physical_name),
-          el('td', { class: 'text-muted text-sm' }, String(t.row_count ?? 0)),
-          el('td', { style: 'position:relative; text-align:right' }, menuBtn, dropdown)
-        );
-      }))
-    );
-
-    list.innerHTML = '';
-    list.appendChild(tbl);
-  } catch (e) {
-    document.getElementById('table-list').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
-  }
-}
-
-function showNewTableModal(projectId) {
+function showNewTableModal(projectId, onCreated) {
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
@@ -5865,7 +5754,7 @@ function showNewTableModal(projectId) {
     try {
       await Api.post(`/v1/projects/${projectId}/tables`, { name });
       modalElT.remove();
-      renderTables({ id: projectId });
+      if (onCreated) onCreated();
     } catch (e) { console.error('[SupaBein] Create table failed', e); alert(e.message); }
   });
   document.body.appendChild(modalElT);
@@ -6163,125 +6052,6 @@ async function renderPoliciesTab(projectId, tableName) {
   } catch (e) {
     content.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
-}
-
-// Sites
-async function renderSites({ id }) {
-  if (!requireAuth()) return;
-
-  // Show a minimal loading state while we check
-  renderLayout(id, 'sites', [
-    el('div', { class: 'page-header' }, el('h1', { class: 'page-title' }, 'Site')),
-    el('div', { id: 'site-list' }, 'Loading...')
-  ]);
-
-  try {
-    const sites = await Api.get(`/v1/projects/${id}/sites`);
-
-    // Any existing site → go straight to the manager
-    if (sites.length >= 1) {
-      Router.navigate(`/projects/${id}/sites/${sites[0].id}`);
-      return;
-    }
-
-    // No site yet — show create form
-    renderLayout(id, 'sites', [
-      el('div', { class: 'page-header' }, el('h1', { class: 'page-title' }, 'Site')),
-      el('div', { class: 'card' },
-        el('div', { class: 'card-title' }, 'Create your site'),
-        el('div', { class: 'form-group' },
-          el('label', {}, 'Subdomain'),
-          el('input', { type: 'text', id: 'subdomain', placeholder: 'my-app' })
-        ),
-        el('div', { class: 'form-group', style: 'display:flex;align-items:center;gap:8px' },
-          el('input', { type: 'checkbox', id: 'spa-mode', checked: true }),
-          el('label', { for: 'spa-mode' }, 'SPA Mode (React/Vue/etc — rewrites all paths to index.html)')
-        ),
-        el('button', { class: 'btn btn-primary', id: 'create-site' }, 'Create Site')
-      )
-    ]);
-
-    document.getElementById('create-site').addEventListener('click', async () => {
-      const subdomain = document.getElementById('subdomain').value.trim();
-      const spa_mode  = document.getElementById('spa-mode').checked;
-      if (!subdomain) return;
-      try {
-        const site = await Api.post(`/v1/projects/${id}/sites`, { subdomain, spa_mode });
-        Router.navigate(`/projects/${id}/sites/${site.id}`);
-      } catch (e) { alert(e.message); }
-    });
-  } catch (e) {
-    document.getElementById('site-list').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
-  }
-}
-
-function showNewSiteModal(projectId) {
-  const overlay = h(`
-    <div class="modal-overlay">
-      <div class="modal">
-        <div class="modal-title">New Site</div>
-        <div class="form-group"><label>Subdomain</label><input type="text" id="subdomain" placeholder="my-app"></div>
-        <div class="form-group" style="display:flex;align-items:center;gap:8px">
-          <input type="checkbox" id="spa-mode" checked>
-          <label for="spa-mode">SPA Mode (React/Vue/etc — rewrites all paths to index.html)</label>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" id="cancel">Cancel</button>
-          <button class="btn btn-primary" id="create">Create</button>
-        </div>
-      </div>
-    </div>
-  `);
-  const modalElS = overlay.firstElementChild;
-  modalElS.querySelector('#cancel').addEventListener('click', () => modalElS.remove());
-  modalElS.querySelector('#create').addEventListener('click', async () => {
-    const subdomain = modalElS.querySelector('#subdomain').value.trim();
-    const spa_mode  = modalElS.querySelector('#spa-mode').checked;
-    if (!subdomain) return;
-    try {
-      await Api.post(`/v1/projects/${projectId}/sites`, { subdomain, spa_mode });
-      modalElS.remove();
-      renderSites({ id: projectId });
-    } catch (e) { console.error('[SupaBein] Create site failed', e); alert(e.message); }
-  });
-  document.body.appendChild(modalElS);
-}
-
-// Site manager — deploy history + upload
-async function renderSiteManager({ id, site_id }) {
-  if (!requireAuth()) return;
-
-  const menuBtn = el('button', { class: 'btn btn-secondary btn-sm', id: 'site-menu-btn', style: 'position:relative' }, '•••');
-  const dropdown = el('div', { class: 'dropdown hidden', id: 'site-menu-dropdown' },
-    el('button', { class: 'dropdown-item dropdown-item-danger', id: 'delete-site-btn' }, 'Delete Site')
-  );
-  const menuWrap = el('div', { style: 'position:relative' }, menuBtn, dropdown);
-
-  renderLayout(id, 'sites', [
-    el('div', { class: 'page-header' },
-      el('a', { class: 'btn btn-secondary btn-sm', href: `#/projects/${id}` }, '← Project'),
-      el('h1', { class: 'page-title' }, 'Site'),
-      menuWrap
-    ),
-    el('div', { id: 'deploy-content' }, 'Loading...')
-  ]);
-
-  menuBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    dropdown.classList.toggle('hidden');
-  });
-  document.addEventListener('click', () => dropdown.classList.add('hidden'), { capture: false });
-
-  dropdown.querySelector('#delete-site-btn').addEventListener('click', async () => {
-    dropdown.classList.add('hidden');
-    if (!confirm('Delete this site and all its deploys? This cannot be undone.')) return;
-    try {
-      await Api.delete(`/v1/projects/${id}/sites/${site_id}`);
-      Router.navigate(`/projects/${id}/sites`);
-    } catch (e) { alert(e.message); }
-  });
-
-  await loadDeployContent(id, site_id);
 }
 
 // Latest test verdict for a project, phrased as a publish warning — null when
@@ -6869,11 +6639,14 @@ Router.add('logout', () => {
 Router.add('home',                                  renderHome);
 Router.add('projects',                              renderProjects);
 Router.add('projects/:id',                          renderProject);
-Router.add('projects/:id/tables',                   renderTables);
+// These used to be separate full pages, each duplicating a tab already on
+// the project page. Now they just open that page with the matching tab
+// pre-selected -- existing links/back-buttons to these URLs still work.
+Router.add('projects/:id/tables',                   (p) => renderProject(p, 'tables'));
 Router.add('projects/:id/tables/:name',             renderTableEditor);
-Router.add('projects/:id/sites',                    renderSites);
-Router.add('projects/:id/sites/:site_id',           renderSiteManager);
-Router.add('projects/:id/api',                      renderApi);
+Router.add('projects/:id/sites',                    (p) => renderProject(p, 'deploy'));
+Router.add('projects/:id/sites/:site_id',           (p) => renderProject(p, 'deploy'));
+Router.add('projects/:id/api',                      (p) => renderProject(p, 'api'));
 Router.add('account',                               renderAccount);
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────

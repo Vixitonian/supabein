@@ -38,6 +38,17 @@ function register_hostname_routes(\SupaBein\Router $router): void
             abort(422, 'Invalid hostname. Send {"hostname":"sub.example.com"}.');
         }
 
+        // Reserved-word check only applies under the platform's own domain --
+        // an unrelated external custom domain someone actually owns isn't
+        // squatting on anything by using a word from this list.
+        $baseDomain = platform_base_domain();
+        if (str_ends_with($hostname, '.' . $baseDomain)) {
+            $label = explode('.', substr($hostname, 0, -strlen('.' . $baseDomain)))[0];
+            if (\SupaBein\Catalog::isReservedSubdomain($label)) {
+                abort(403, "\"$label\" is a reserved subdomain and can't be claimed.");
+            }
+        }
+
         $config   = \App::get('config');
         $docroot  = rtrim($config['SITES_PATH'], '/') . '/s' . $site['id'] . '/current';
 
