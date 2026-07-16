@@ -11,8 +11,27 @@ function register_hostname_routes(\SupaBein\Router $router): void
 {
     $catalog = \SupaBein\Catalog::getInstance();
 
-    $ownProject = function (int $projectId, int $userId) use ($catalog): array {
-        $project = $catalog->getProjectById($projectId, $userId);
+    // Resolves the URL's :id to a project the caller may act on. Two auth
+    // shapes get here: an owner (platform JWT or PAT -- account-wide or
+    // project-scoped, all resolve to a real SupaBein account user_id, so the
+    // existing ownership lookup covers every one of them with no extra
+    // branching), or a project_user (an end-user JWT issued by one of this
+    // *project's own* tables' /login endpoint -- e.g. a Zera business owner
+    // logging into their own account). A project_user token's project_id is
+    // baked in at login time by the platform itself, not client-supplied, so
+    // it's trusted directly rather than re-checked against an owner_user_id
+    // that has no meaning for that identity space -- this is what lets an
+    // app like Zera register a hostname automatically, right at signup, using
+    // the business owner's own session instead of a separately-issued PAT.
+    $resolveProject = function (int $urlProjectId, array $auth) use ($catalog): array {
+        if (($auth['role'] ?? '') === 'project_user') {
+            if ((int)($auth['project_id'] ?? 0) !== $urlProjectId) {
+                abort(403, 'This token belongs to a different project.');
+            }
+            $project = $catalog->getProjectByIdInternal($urlProjectId);
+        } else {
+            $project = $catalog->getProjectById($urlProjectId, (int)$auth['user_id']);
+        }
         if (!$project) {
             abort(404, 'Project not found');
         }
@@ -29,8 +48,8 @@ function register_hostname_routes(\SupaBein\Router $router): void
     };
 
     // POST /v1/projects/:id/hostnames  { "hostname": "joes-store.dxinnovationhub.com" }
-    $router->post('/v1/projects/:id/hostnames', function (array $req) use ($catalog, $ownProject, $ownSite): void {
-        $project  = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+    $router->post('/v1/projects/:id/hostnames', function (array $req) use ($catalog, $resolveProject, $ownSite): void {
+        $project  = $resolveProject((int)$req['params']['id'], $req['auth']);
         $site     = $ownSite($project['id']);
         $hostname = strtolower(trim($req['body']['hostname'] ?? ''));
 
@@ -62,8 +81,8 @@ function register_hostname_routes(\SupaBein\Router $router): void
     }, ['auth_middleware']);
 
     // DELETE /v1/projects/:id/hostnames/:hostname
-    $router->delete('/v1/projects/:id/hostnames/:hostname', function (array $req) use ($catalog, $ownProject): void {
-        $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+    $router->delete('/v1/projects/:id/hostnames/:hostname', function (array $req) use ($catalog, $resolveProject): void {
+        $project = $resolveProject((int)$req['params']['id'], $req['auth']);
         $deleted = $catalog->deleteHostname(strtolower($req['params']['hostname']), $project['id']);
         if (!$deleted) {
             abort(404, 'Hostname not found for this project');
