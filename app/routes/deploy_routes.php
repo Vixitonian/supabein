@@ -15,6 +15,23 @@ function register_deploy_routes(\SupaBein\Router $router): void
         return $project;
     };
 
+    // Keeps the neutral site_registry (read by the wildcard vhost's router,
+    // site-server/router.php) in sync with a site's own subdomain/custom_domain
+    // -- without this, setting a site's domain here only ever updated SupaBein's
+    // own `sites` row and never actually became reachable through the wildcard.
+    $syncRegistry = function (array $site, int $projectId) use ($catalog): void {
+        $config  = \App::get('config');
+        $docroot = rtrim($config['SITES_PATH'], '/') . '/s' . $site['id'] . '/current';
+        $spaMode = (bool)$site['spa_mode'];
+
+        if (!empty($site['subdomain'])) {
+            $catalog->registerHostname($site['subdomain'] . '.' . platform_base_domain(), $docroot, $spaMode, $projectId);
+        }
+        if (!empty($site['custom_domain'])) {
+            $catalog->registerHostname($site['custom_domain'], $docroot, $spaMode, $projectId);
+        }
+    };
+
     // GET /v1/projects/:id/sites
     $router->get('/v1/projects/:id/sites', function (array $req) use ($catalog, $ownProject): void {
         $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
@@ -22,7 +39,7 @@ function register_deploy_routes(\SupaBein\Router $router): void
     }, ['auth_middleware']);
 
     // POST /v1/projects/:id/sites
-    $router->post('/v1/projects/:id/sites', function (array $req) use ($catalog, $ownProject): void {
+    $router->post('/v1/projects/:id/sites', function (array $req) use ($catalog, $ownProject, $syncRegistry): void {
         $project   = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
         $subdomain = trim($req['body']['subdomain'] ?? $req['body']['name'] ?? '');
         $spaMode   = (bool)($req['body']['spa_mode'] ?? false);
@@ -32,6 +49,9 @@ function register_deploy_routes(\SupaBein\Router $router): void
         }
         if (!preg_match('/^[a-z0-9][a-z0-9\-]{0,61}[a-z0-9]$/', $subdomain)) {
             abort(422, 'Invalid subdomain. Use 2-63 lowercase alphanumeric or hyphen characters.');
+        }
+        if (\SupaBein\Catalog::isReservedSubdomain($subdomain)) {
+            abort(403, "\"$subdomain\" is a reserved subdomain and can't be claimed.");
         }
 
         $existing = $catalog->listSites($project['id']);
@@ -48,6 +68,7 @@ function register_deploy_routes(\SupaBein\Router $router): void
             throw $e;
         }
 
+        $syncRegistry($site, $project['id']);
         json_out($site, 201);
     }, ['auth_middleware']);
 
@@ -64,9 +85,9 @@ function register_deploy_routes(\SupaBein\Router $router): void
     // PATCH /v1/projects/:id/sites/:site_id  { subdomain?, custom_domain? }
     // custom_domain may be sent as "" to clear it. Either field may be omitted
     // to leave it unchanged.
-    $router->patch('/v1/projects/:id/sites/:site_id', function (array $req) use ($catalog, $ownProject): void {
-        $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $site = $catalog->getSiteByProjectId((int)$req['params']['id'], (int)$req['params']['site_id']);
+    $router->patch('/v1/projects/:id/sites/:site_id', function (array $req) use ($catalog, $ownProject, $syncRegistry): void {
+        $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+        $site    = $catalog->getSiteByProjectId($project['id'], (int)$req['params']['site_id']);
         if (!$site) {
             abort(404, 'Site not found');
         }
@@ -75,6 +96,9 @@ function register_deploy_routes(\SupaBein\Router $router): void
         if ($subdomain !== null) {
             if (!preg_match('/^[a-z0-9][a-z0-9\-]{0,61}[a-z0-9]$/', $subdomain)) {
                 abort(422, 'Invalid subdomain. Use 2-63 lowercase alphanumeric or hyphen characters.');
+            }
+            if (\SupaBein\Catalog::isReservedSubdomain($subdomain)) {
+                abort(403, "\"$subdomain\" is a reserved subdomain and can't be claimed.");
             }
         }
 
@@ -86,6 +110,12 @@ function register_deploy_routes(\SupaBein\Router $router): void
             }
         }
 
+        // Capture the domains this site resolved at BEFORE the update, so any
+        // that changed or got cleared can be removed from site_registry --
+        // otherwise the old hostname would keep resolving here indefinitely.
+        $oldSubdomainHost = !empty($site['subdomain']) ? $site['subdomain'] . '.' . platform_base_domain() : null;
+        $oldCustomHost     = $site['custom_domain'] ?: null;
+
         try {
             $updated = $catalog->updateSiteDomain((int)$site['id'], $subdomain, $customDomain);
         } catch (\PDOException $e) {
@@ -95,16 +125,32 @@ function register_deploy_routes(\SupaBein\Router $router): void
             throw $e;
         }
 
+        $newSubdomainHost = !empty($updated['subdomain']) ? $updated['subdomain'] . '.' . platform_base_domain() : null;
+        if ($oldSubdomainHost !== null && $oldSubdomainHost !== $newSubdomainHost) {
+            $catalog->deleteHostname($oldSubdomainHost, $project['id']);
+        }
+        if ($oldCustomHost !== null && $oldCustomHost !== ($updated['custom_domain'] ?: null)) {
+            $catalog->deleteHostname($oldCustomHost, $project['id']);
+        }
+        $syncRegistry($updated, $project['id']);
+
         json_out($updated);
     }, ['auth_middleware']);
 
     // DELETE /v1/projects/:id/sites/:site_id
     $router->delete('/v1/projects/:id/sites/:site_id', function (array $req) use ($catalog, $ownProject): void {
-        $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
-        $deleted = $catalog->deleteSite((int)$req['params']['id'], (int)$req['params']['site_id']);
-        if (!$deleted) {
+        $project = $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+        $site    = $catalog->getSiteByProjectId($project['id'], (int)$req['params']['site_id']);
+        if (!$site) {
             abort(404, 'Site not found');
         }
+        if (!empty($site['subdomain'])) {
+            $catalog->deleteHostname($site['subdomain'] . '.' . platform_base_domain(), $project['id']);
+        }
+        if (!empty($site['custom_domain'])) {
+            $catalog->deleteHostname($site['custom_domain'], $project['id']);
+        }
+        $catalog->deleteSite($project['id'], (int)$site['id']);
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
 

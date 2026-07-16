@@ -104,6 +104,18 @@ function sb_log(string $context, string $message, array $data = []): void
     error_log('[SUPABEIN] [' . $context . '] ' . $message . $extra);
 }
 
+// The platform's own base domain (e.g. "dxinnovationhub.com"), derived from
+// whatever host this request actually arrived on rather than hardcoded --
+// this API always runs on a fixed subdomain of it (e.g.
+// supabein.dxinnovationhub.com), so stripping the leftmost label is reliable
+// and keeps this portable across different self-hosted installs.
+function platform_base_domain(): string
+{
+    $host  = strtolower(explode(':', $_SERVER['HTTP_HOST'] ?? '')[0]);
+    $parts = explode('.', $host);
+    return count($parts) > 1 ? implode('.', array_slice($parts, 1)) : $host;
+}
+
 function generate_project_key(string $type, int $projectId): string
 {
     $config  = App::get('config');
