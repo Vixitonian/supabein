@@ -24,6 +24,63 @@ declare(strict_types=1);
 $secretsPath = '/home/dxinethn/supabein.dxinnovationhub.com/config/secrets.php';
 $config = require $secretsPath;
 
+// Every deployed app calls its own API as `window.location.origin + '/api/v1'`
+// -- that only ever worked because every site used to share one domain with
+// the real API. Now that a site can be reached at its own subdomain/custom
+// domain, that origin is THIS wildcard vhost, which has no API of its own --
+// live-caught as every data call silently falling through to the SPA
+// fallback and getting index.html's HTML back instead of JSON ("Unexpected
+// token '<'"). Proxying /api/ here, transparently, fixes it for every
+// existing and future deployed app without editing a single one of them.
+$reqPathRaw = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) ?? '/';
+if (str_starts_with($reqPathRaw, '/api/')) {
+    $target = rtrim($config['API_BASE_URL'], '/') . $_SERVER['REQUEST_URI'];
+
+    $headers = [];
+    foreach ($_SERVER as $k => $v) {
+        if (str_starts_with($k, 'HTTP_') && $k !== 'HTTP_HOST') {
+            $headers[] = str_replace('_', '-', substr($k, 5)) . ': ' . $v;
+        }
+    }
+    if (isset($_SERVER['CONTENT_TYPE'])) $headers[] = 'Content-Type: ' . $_SERVER['CONTENT_TYPE'];
+
+    $ch = curl_init($target);
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST  => $_SERVER['REQUEST_METHOD'],
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER         => true,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_TIMEOUT        => 30,
+    ]);
+    if (in_array($_SERVER['REQUEST_METHOD'], ['POST', 'PATCH', 'PUT', 'DELETE'], true)) {
+        curl_setopt($ch, CURLOPT_POSTFIELDS, file_get_contents('php://input'));
+    }
+    $raw = curl_exec($ch);
+    if ($raw === false) {
+        http_response_code(502);
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Upstream API unreachable']);
+        exit;
+    }
+    $status     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    curl_close($ch);
+
+    http_response_code($status);
+    foreach (explode("\r\n", substr($raw, 0, $headerSize)) as $line) {
+        // Only forward headers the client actually needs -- skip hop-by-hop
+        // and framing headers (Transfer-Encoding etc.) that don't apply to
+        // this second response, and skip Content-Length since PHP recomputes
+        // it correctly for whatever we echo below regardless.
+        if (preg_match('/^(Content-Type|X-Refresh-Token|Cache-Control|ETag):/i', $line)) {
+            header(trim($line));
+        }
+    }
+    echo substr($raw, $headerSize);
+    exit;
+}
+
 try {
     $pdo = new PDO(
         $config['DB_DSN'],
