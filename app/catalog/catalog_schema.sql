@@ -79,6 +79,19 @@ CREATE TABLE IF NOT EXISTS `sites` (
     UNIQUE KEY `uq_subdomain` (`subdomain`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Neutral hostname -> docroot registry for the wildcard vhost's router.
+-- Deliberately NOT foreign-keyed to `projects`/`sites`: this table is meant
+-- to outlive any single product's schema (see site-server/router.php, which
+-- reads only this table and never touches SupaBein's own DB structures).
+-- `project_id` is stored for ownership checks on update/delete only.
+CREATE TABLE IF NOT EXISTS `site_registry` (
+    `hostname`   VARCHAR(255) NOT NULL PRIMARY KEY,
+    `docroot`    VARCHAR(512) NOT NULL,
+    `spa_mode`   TINYINT(1) NOT NULL DEFAULT 0,
+    `project_id` INT UNSIGNED NOT NULL,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `deploys` (
     `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `site_id`       INT UNSIGNED NOT NULL,

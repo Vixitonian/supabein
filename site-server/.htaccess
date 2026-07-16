@@ -1,0 +1,7 @@
+Options -Indexes
+RewriteEngine On
+
+# Every request that reaches this folder is routed by Host header, not by
+# path -- this folder only ever exists as the wildcard vhost's document
+# root, so unlike the main app there is no other kind of request to expect.
+RewriteRule ^ router.php [QSA,L]
