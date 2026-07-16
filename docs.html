@@ -211,6 +211,9 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#sites-get">Get site</a>
     <a class="sb-link" href="#sites-delete">Delete site</a>
     <a class="sb-link" href="#sites-create">Create site</a>
+    <a class="sb-link" href="#sites-update">Update domain</a>
+    <a class="sb-link" href="#hostnames-register">Register a hostname</a>
+    <a class="sb-link" href="#hostnames-delete">Unregister a hostname</a>
     <a class="sb-link" href="#deploys-list">List deploys</a>
     <a class="sb-link" href="#deploys">Deploy zip (to staging)</a>
     <a class="sb-link" href="#deploy-publish">Publish to live</a>
@@ -297,7 +300,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
   <li><strong>1000-row hard cap</strong> on any list request, regardless of the <code>limit</code> value requested.</li>
   <li><strong>Policies are table + role + operation scoped, not column scoped</strong> — you can't grant <code>SELECT</code> on some columns of a table and deny others for the same role.</li>
   <li><strong><code>constraint_sql</code> is a single opaque WHERE-fragment string</strong>, not a structured expression. Only <code>:current_user_id</code> is substituted — there are no other placeholders. A broken constraint fails at request time (403/500), not at save time, so test it.</li>
-  <li><strong>One site per project.</strong></li>
+  <li><strong>One site per project</strong> — but that one site can resolve at any number of hostnames via <a href="#hostnames-register">hostname registration</a>, not just its own <code>subdomain</code>/<code>custom_domain</code>.</li>
   <li><strong>No server-executable file types</strong> in file storage or static-site deploys (<code>.php .py .sh .exe .cgi .rb .pl .bat .cmd .htaccess</code> and related extensions are blocked, and deployed sites have PHP execution force-disabled at the directory level). This isn't configurable — dynamic server-side logic belongs in the Data API, not in a deployed site.</li>
 </ul>
 
@@ -315,6 +318,7 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
   <li><strong>The root <code>.htaccess</code> of a deployed site is managed by SupaBein and cannot be uploaded, changed, or removed</strong> — every deploy/finalize call overwrites it. If you need client-side routing (a SPA with pushState routes), set <code>spa_mode: true</code> when creating the site instead of trying to write rewrite rules yourself; hash-based routing (<code>#/path</code>) works with no server config at all.</li>
   <li><strong>To verify a deploy, prefer a plain request over driving a headless browser at the live URL.</strong> A live subdomain may not resolve from a sandboxed/CI network, and the same WAF that blocks bad User-Agents can reset headless-browser traffic too. A direct <code>curl</code>/<code>fetch</code> of the returned <code>live_url</code>/<code>staging_url</code>, or reading files back via <a href="#deploy-browse">Browse deployed files</a>, is more reliable from an automated environment. After a deploy, also check <a href="#errors-list">Error Logs</a> — every deployed app auto-reports its own client-side JS errors with zero setup, which is real evidence the app works for actual visitors, not just that the files are present.</li>
   <li><strong>Design within the Limitations above</strong> rather than discovering them by trial and error — most "I need X" cases (auth, simple CRUD, storage) are already covered by this API; the limits are a stable design constraint, not a bug to route around.</li>
+  <li><strong>Building a multi-tenant app (one deploy, many end-user-facing sites)?</strong> Register a hostname per tenant via <a href="#hostnames-register">POST /hostnames</a> instead of trying to deploy separately per tenant. The app itself is still responsible for reading <code>window.location.hostname</code> at runtime and rendering the right tenant — registering a hostname only makes it resolve, it doesn't change what gets rendered. Do this from the app's own mounted code (e.g. a redirect inside your router once it's running), not from a script that rewrites the URL before your JS bundle's own assets have loaded — if those assets are referenced with relative paths, rewriting the path first breaks their resolution.</li>
 </ul>
 
 <!-- ── Auth ── -->
@@ -916,6 +920,57 @@ curl -X POST "https://your-domain/api/v1/projects/1/storage/avatars" \
   -d '{"subdomain": "myapp", "spa_mode": false}'</pre>
     <button class="copy-btn" onclick="copyEl('c-site',this)">Copy</button></div>
     <p><code>subdomain</code> must be 2–63 lowercase alphanumeric characters or hyphens (e.g. <code>"my-app"</code>). <code>name</code> is accepted as an alias for <code>subdomain</code>. Set <code>spa_mode: true</code> for single-page apps — unknown paths will serve <code>index.html</code> instead of 404. Each project supports one site.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="sites-update">
+  <div class="endpoint-head">
+    <span class="method patch">PATCH</span>
+    <span class="path">/api/v1/projects/:id/sites/:site_id</span>
+    <span class="desc">Change a site's subdomain or set a custom domain</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-supd">curl -X PATCH "https://your-domain/api/v1/projects/1/sites/1" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"subdomain": "new-name", "custom_domain": "www.example.com"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-supd',this)">Copy</button></div>
+    <p>Both fields are optional — omit one to leave it unchanged. Send <code>custom_domain: ""</code> to remove a custom domain. Changing the subdomain does not free it up for anyone else to reuse until the change is saved. Also settable from the dashboard's project page, under the <strong>Domain</strong> tab.</p>
+    <p>This is separate from <a href="#hostnames-register">registering a hostname</a> below — a site's own <code>subdomain</code>/<code>custom_domain</code> is the one canonical domain shown in the dashboard, whereas hostname registration lets a project claim any number of additional hostnames (e.g. one per end-user storefront in a multi-tenant app). Setting either field here automatically keeps the registration in sync — nothing else needs to be called for a site's own subdomain to start resolving.</p>
+  </div>
+</div>
+
+<div class="callout" style="margin-bottom:24px" id="hostnames-register-callout"><strong>Reserved names:</strong> around 120 common words (<code>www</code>, <code>api</code>, <code>admin</code>, <code>shop</code>, <code>status</code>, etc.) can't be claimed as a subdomain or hostname label, by a project's own <code>subdomain</code> or via the hostname API below — they're kept free for platform/first-party use. This only applies to labels under the platform's own domain; an external custom domain you actually own is never checked against this list.</div>
+
+<div class="endpoint" id="hostnames-register">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/hostnames</span>
+    <span class="desc">Register an additional hostname for this project's site</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-hreg">curl -X POST "https://your-domain/api/v1/projects/1/hostnames" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"hostname": "joes-store.your-domain"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-hreg',this)">Copy</button></div>
+    <p>For apps that serve many end-user-facing sites from a single deploy — e.g. a store-builder project where every merchant gets their own storefront address. Register a hostname (a subdomain of the platform's own domain, or a fully external domain you control) and it immediately starts serving this project's current deploy, no redeploy needed.</p>
+    <p>The target is always this project's own current deploy — there is no way to point a hostname at another project's files, and no <code>docroot</code>/path parameter is accepted. One project can register any number of hostnames this way; there's no fixed limit.</p>
+    <p>Your app is responsible for reading <code>window.location.hostname</code> client-side and rendering the right content for it (e.g. looking up a merchant by slug) — registering the hostname only makes it resolve to your deploy, it doesn't change what your app renders.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="hostnames-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/hostnames/:hostname</span>
+    <span class="desc">Unregister a hostname</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-hdel">curl -X DELETE "https://your-domain/api/v1/projects/1/hostnames/joes-store.your-domain" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-hdel',this)">Copy</button></div>
+    <p>Only the project that registered a hostname can remove it. Do this whenever whatever the hostname pointed at (a merchant, a business, a tenant) is deleted or renamed — an unregistered hostname is freed up for anyone to claim.</p>
   </div>
 </div>
 
