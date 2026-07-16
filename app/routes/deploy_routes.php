@@ -19,18 +19,7 @@ function register_deploy_routes(\SupaBein\Router $router): void
     // site-server/router.php) in sync with a site's own subdomain/custom_domain
     // -- without this, setting a site's domain here only ever updated SupaBein's
     // own `sites` row and never actually became reachable through the wildcard.
-    $syncRegistry = function (array $site, int $projectId) use ($catalog): void {
-        $config  = \App::get('config');
-        $docroot = rtrim($config['SITES_PATH'], '/') . '/s' . $site['id'] . '/current';
-        $spaMode = (bool)$site['spa_mode'];
-
-        if (!empty($site['subdomain'])) {
-            $catalog->registerHostname($site['subdomain'] . '.' . platform_base_domain(), $docroot, $spaMode, $projectId);
-        }
-        if (!empty($site['custom_domain'])) {
-            $catalog->registerHostname($site['custom_domain'], $docroot, $spaMode, $projectId);
-        }
-    };
+    $syncRegistry = fn(array $site, int $projectId) => $catalog->syncSiteRegistry($site, $projectId);
 
     // GET /v1/projects/:id/sites
     $router->get('/v1/projects/:id/sites', function (array $req) use ($catalog, $ownProject): void {
