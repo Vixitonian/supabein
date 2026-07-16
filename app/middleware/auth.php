@@ -61,6 +61,12 @@ function resolve_token(string $token): ?array
             'role'       => 'project_user',
             'email'      => '',
             'project_id' => isset($decoded->pid) ? (int)$decoded->pid : null,
+            // Which table this identity logged in through (e.g. "users") --
+            // needed alongside user_id to identify a specific end-user for
+            // per-registrant checks (see Catalog::registerHostname), since a
+            // bare row id alone could collide across two different
+            // auth-capable tables in the same project.
+            'table'      => $decoded->table ?? null,
         ];
     }
 
