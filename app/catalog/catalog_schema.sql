@@ -84,12 +84,22 @@ CREATE TABLE IF NOT EXISTS `sites` (
 -- to outlive any single product's schema (see site-server/router.php, which
 -- reads only this table and never touches SupaBein's own DB structures).
 -- `project_id` is stored for ownership checks on update/delete only.
+--
+-- `registered_by_table`/`registered_by_user_id` identify which specific
+-- project_user (e.g. one Zera business owner, not just "someone in project
+-- 56") owns a given hostname -- both NULL means an owner/PAT registered it
+-- (the project's own default subdomain, or a manual override), which no
+-- project_user can ever touch regardless of project match. Without this,
+-- `project_id` alone let any authenticated end-user of a project delete or
+-- reassign any *other* end-user's hostname within that same project.
 CREATE TABLE IF NOT EXISTS `site_registry` (
-    `hostname`   VARCHAR(255) NOT NULL PRIMARY KEY,
-    `docroot`    VARCHAR(512) NOT NULL,
-    `spa_mode`   TINYINT(1) NOT NULL DEFAULT 0,
-    `project_id` INT UNSIGNED NOT NULL,
-    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    `hostname`              VARCHAR(255) NOT NULL PRIMARY KEY,
+    `docroot`               VARCHAR(512) NOT NULL,
+    `spa_mode`              TINYINT(1) NOT NULL DEFAULT 0,
+    `project_id`            INT UNSIGNED NOT NULL,
+    `registered_by_table`   VARCHAR(64) DEFAULT NULL,
+    `registered_by_user_id` INT UNSIGNED DEFAULT NULL,
+    `updated_at`            TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `deploys` (

@@ -689,32 +689,66 @@ class Catalog
 
     // Throws on a hostname already owned by a different project (caller should
     // catch the resulting PDOException / check the unique-key violation).
-    public function registerHostname(string $hostname, string $docroot, bool $spaMode, int $projectId): void
-    {
+    // $registrantTable/$registrantUserId identify the specific project_user
+    // making this call (null/null for an owner/PAT call, which represents
+    // the project itself rather than one end-user of it). An owner/PAT call
+    // may always create or update a hostname. A project_user call may only
+    // create a brand-new hostname, or update one it registered itself --
+    // never one that's unregistered-but-owner-controlled (registrant is
+    // null) or registered by a *different* project_user.
+    public function registerHostname(
+        string $hostname,
+        string $docroot,
+        bool $spaMode,
+        int $projectId,
+        ?string $registrantTable = null,
+        ?int $registrantUserId = null
+    ): void {
         $existing = $this->getHostnameRegistration($hostname);
-        if ($existing && (int)$existing['project_id'] !== $projectId) {
-            throw new \RuntimeException('Hostname is already registered to a different project');
+        if ($existing) {
+            if ((int)$existing['project_id'] !== $projectId) {
+                throw new \RuntimeException('Hostname is already registered to a different project');
+            }
+            if ($registrantTable !== null) {
+                $existingIsOwnerControlled = $existing['registered_by_user_id'] === null;
+                $existingIsDifferentUser = !$existingIsOwnerControlled && (
+                    $existing['registered_by_table'] !== $registrantTable
+                    || (int)$existing['registered_by_user_id'] !== $registrantUserId
+                );
+                if ($existingIsOwnerControlled || $existingIsDifferentUser) {
+                    throw new \RuntimeException('Hostname is already registered by someone else in this project');
+                }
+            }
         }
         $stmt = $this->pdo->prepare(
-            'INSERT INTO site_registry (hostname, docroot, spa_mode, project_id) VALUES (?, ?, ?, ?)
+            'INSERT INTO site_registry (hostname, docroot, spa_mode, project_id, registered_by_table, registered_by_user_id)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE docroot = VALUES(docroot), spa_mode = VALUES(spa_mode)'
         );
-        $stmt->execute([$hostname, $docroot, $spaMode ? 1 : 0, $projectId]);
+        $stmt->execute([$hostname, $docroot, $spaMode ? 1 : 0, $projectId, $registrantTable, $registrantUserId]);
     }
 
     public function getHostnameRegistration(string $hostname): ?array
     {
         $stmt = $this->pdo->prepare('SELECT * FROM site_registry WHERE hostname = ?');
         $stmt->execute([$hostname]);
-        return self::castRow($stmt->fetch() ?: null, ['spa_mode', 'project_id']);
+        return self::castRow($stmt->fetch() ?: null, ['spa_mode', 'project_id', 'registered_by_user_id']);
     }
 
-    public function deleteHostname(string $hostname, int $projectId): bool
+    // See registerHostname() for the registrant rules -- an owner/PAT call
+    // (both null) may delete any hostname in its project; a project_user
+    // call may only delete one it registered itself.
+    public function deleteHostname(string $hostname, int $projectId, ?string $registrantTable = null, ?int $registrantUserId = null): bool
     {
-        $stmt = $this->pdo->prepare(
-            'DELETE FROM site_registry WHERE hostname = ? AND project_id = ?'
-        );
-        $stmt->execute([$hostname, $projectId]);
+        $params = [$hostname, $projectId];
+        $sql    = 'DELETE FROM site_registry WHERE hostname = ? AND project_id = ?';
+        if ($registrantTable !== null) {
+            $sql .= ' AND registered_by_table = ? AND registered_by_user_id = ?';
+            $params[] = $registrantTable;
+            $params[] = $registrantUserId;
+        }
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
         return $stmt->rowCount() > 0;
     }
 

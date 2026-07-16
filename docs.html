@@ -957,6 +957,7 @@ curl -X POST "https://your-domain/api/v1/projects/1/storage/avatars" \
     <p>For apps that serve many end-user-facing sites from a single deploy — e.g. a store-builder project where every merchant gets their own storefront address. Register a hostname (a subdomain of the platform's own domain, or a fully external domain you control) and it immediately starts serving this project's current deploy, no redeploy needed.</p>
     <p>The target is always this project's own current deploy — there is no way to point a hostname at another project's files, and no <code>docroot</code>/path parameter is accepted. One project can register any number of hostnames this way; there's no fixed limit.</p>
     <p><strong>Accepts a <a href="#data-login">project_user token</a>, not just an owner JWT or PAT</strong> — this is what makes fully automatic registration practical: call this endpoint using the end-user's own session token, right at signup/onboarding time (e.g. the moment a merchant finishes creating their store), and their subdomain goes live with no separate owner-level credential involved. A project-user token is only ever trusted for the one project it was issued from — it can't be used to register a hostname for, or otherwise touch, any other project.</p>
+    <p><strong>Each hostname remembers which specific end-user registered it</strong>, not just which project — a second merchant's project_user token in the same app can't reassign or delete a hostname registered by a different merchant's token, even though both belong to the same project. A hostname registered by the project's own owner JWT or a PAT (e.g. the project's own default subdomain) can never be touched by any project_user at all, only by the owner. This exists specifically to stop one end-user from griefing another's storefront address — it's an availability protection, not a data one; your own row-level policies are still what protect the underlying business data.</p>
     <p>Your app is responsible for reading <code>window.location.hostname</code> client-side and rendering the right content for it (e.g. looking up a merchant by slug) — registering the hostname only makes it resolve to your deploy, it doesn't change what your app renders.</p>
   </div>
 </div>
@@ -971,7 +972,7 @@ curl -X POST "https://your-domain/api/v1/projects/1/storage/avatars" \
     <div class="code-wrap"><pre class="code" id="c-hdel">curl -X DELETE "https://your-domain/api/v1/projects/1/hostnames/joes-store.your-domain" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-hdel',this)">Copy</button></div>
-    <p>Only the project that registered a hostname can remove it. Do this whenever whatever the hostname pointed at (a merchant, a business, a tenant) is deleted or renamed — an unregistered hostname is freed up for anyone to claim.</p>
+    <p>An owner JWT or PAT can remove any hostname belonging to its project. A project_user token can only remove a hostname it registered itself — see the per-registrant note above. Do this whenever whatever the hostname pointed at (a merchant, a business, a tenant) is deleted or renamed — an unregistered hostname is freed up for anyone to claim.</p>
   </div>
 </div>
 

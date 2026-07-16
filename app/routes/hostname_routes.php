@@ -47,8 +47,17 @@ function register_hostname_routes(\SupaBein\Router $router): void
         return $sites[0];
     };
 
+    // null/null for an owner/PAT call (represents the project itself); the
+    // JWT's own table+user_id for a project_user call (one specific end-user).
+    $registrant = function (array $auth): array {
+        if (($auth['role'] ?? '') === 'project_user') {
+            return [$auth['table'] ?? null, (int)$auth['user_id']];
+        }
+        return [null, null];
+    };
+
     // POST /v1/projects/:id/hostnames  { "hostname": "joes-store.dxinnovationhub.com" }
-    $router->post('/v1/projects/:id/hostnames', function (array $req) use ($catalog, $resolveProject, $ownSite): void {
+    $router->post('/v1/projects/:id/hostnames', function (array $req) use ($catalog, $resolveProject, $ownSite, $registrant): void {
         $project  = $resolveProject((int)$req['params']['id'], $req['auth']);
         $site     = $ownSite($project['id']);
         $hostname = strtolower(trim($req['body']['hostname'] ?? ''));
@@ -70,9 +79,10 @@ function register_hostname_routes(\SupaBein\Router $router): void
 
         $config   = \App::get('config');
         $docroot  = rtrim($config['SITES_PATH'], '/') . '/s' . $site['id'] . '/current';
+        [$regTable, $regUserId] = $registrant($req['auth']);
 
         try {
-            $catalog->registerHostname($hostname, $docroot, (bool)$site['spa_mode'], $project['id']);
+            $catalog->registerHostname($hostname, $docroot, (bool)$site['spa_mode'], $project['id'], $regTable, $regUserId);
         } catch (\RuntimeException $e) {
             abort(409, $e->getMessage());
         }
@@ -81,12 +91,26 @@ function register_hostname_routes(\SupaBein\Router $router): void
     }, ['auth_middleware']);
 
     // DELETE /v1/projects/:id/hostnames/:hostname
-    $router->delete('/v1/projects/:id/hostnames/:hostname', function (array $req) use ($catalog, $resolveProject): void {
-        $project = $resolveProject((int)$req['params']['id'], $req['auth']);
-        $deleted = $catalog->deleteHostname(strtolower($req['params']['hostname']), $project['id']);
-        if (!$deleted) {
+    $router->delete('/v1/projects/:id/hostnames/:hostname', function (array $req) use ($catalog, $resolveProject, $registrant): void {
+        $project  = $resolveProject((int)$req['params']['id'], $req['auth']);
+        $hostname = strtolower($req['params']['hostname']);
+
+        $existing = $catalog->getHostnameRegistration($hostname);
+        if (!$existing || (int)$existing['project_id'] !== $project['id']) {
             abort(404, 'Hostname not found for this project');
         }
+
+        [$regTable, $regUserId] = $registrant($req['auth']);
+        if ($regTable !== null) {
+            $ownedByCaller = $existing['registered_by_user_id'] !== null
+                && $existing['registered_by_table'] === $regTable
+                && (int)$existing['registered_by_user_id'] === $regUserId;
+            if (!$ownedByCaller) {
+                abort(403, 'This hostname was registered by someone else and can only be removed by them or the project owner.');
+            }
+        }
+
+        $catalog->deleteHostname($hostname, $project['id'], $regTable, $regUserId);
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
 }
