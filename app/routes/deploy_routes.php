@@ -61,6 +61,43 @@ function register_deploy_routes(\SupaBein\Router $router): void
         json_out($site);
     }, ['auth_middleware']);
 
+    // PATCH /v1/projects/:id/sites/:site_id  { subdomain?, custom_domain? }
+    // custom_domain may be sent as "" to clear it. Either field may be omitted
+    // to leave it unchanged.
+    $router->patch('/v1/projects/:id/sites/:site_id', function (array $req) use ($catalog, $ownProject): void {
+        $ownProject((int)$req['params']['id'], $req['auth']['user_id']);
+        $site = $catalog->getSiteByProjectId((int)$req['params']['id'], (int)$req['params']['site_id']);
+        if (!$site) {
+            abort(404, 'Site not found');
+        }
+
+        $subdomain = array_key_exists('subdomain', $req['body']) ? trim((string)$req['body']['subdomain']) : null;
+        if ($subdomain !== null) {
+            if (!preg_match('/^[a-z0-9][a-z0-9\-]{0,61}[a-z0-9]$/', $subdomain)) {
+                abort(422, 'Invalid subdomain. Use 2-63 lowercase alphanumeric or hyphen characters.');
+            }
+        }
+
+        $customDomain = array_key_exists('custom_domain', $req['body']) ? trim((string)$req['body']['custom_domain']) : null;
+        if ($customDomain !== null && $customDomain !== '') {
+            $customDomain = strtolower($customDomain);
+            if (!preg_match('/^(?=.{1,255}$)[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?)+$/', $customDomain)) {
+                abort(422, 'Invalid custom domain. Send {"custom_domain":"www.example.com"}.');
+            }
+        }
+
+        try {
+            $updated = $catalog->updateSiteDomain((int)$site['id'], $subdomain, $customDomain);
+        } catch (\PDOException $e) {
+            if (str_contains($e->getMessage(), 'Duplicate')) {
+                abort(409, 'That subdomain or custom domain is already in use.');
+            }
+            throw $e;
+        }
+
+        json_out($updated);
+    }, ['auth_middleware']);
+
     // DELETE /v1/projects/:id/sites/:site_id
     $router->delete('/v1/projects/:id/sites/:site_id', function (array $req) use ($catalog, $ownProject): void {
         $ownProject((int)$req['params']['id'], $req['auth']['user_id']);

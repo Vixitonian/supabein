@@ -5068,16 +5068,18 @@ async function renderProject({ id }) {
     const tabTables   = el('div', { class: 'tab' }, 'Tables');
     const tabApi      = el('div', { class: 'tab' }, 'API');
     const tabDeploy   = el('div', { class: 'tab' }, 'Deploy');
+    const tabDomain   = el('div', { class: 'tab' }, 'Domain');
     const tabErrors   = el('div', { class: 'tab' }, 'Errors');
 
     const paneOverviewEl = el('div', { id: 'pane-proj-overview' });
     const paneTablesEl   = el('div', { id: 'pane-proj-tables', class: 'hidden' });
     const paneApiEl      = el('div', { id: 'pane-proj-api',    class: 'hidden' });
     const paneDeployEl   = el('div', { id: 'pane-proj-deploy', class: 'hidden' });
+    const paneDomainEl   = el('div', { id: 'pane-proj-domain', class: 'hidden' });
     const paneErrorsEl   = el('div', { id: 'pane-proj-errors', class: 'hidden' });
 
-    const allTabs  = [tabOverview, tabTables, tabApi, tabDeploy, tabErrors];
-    const allPanes = [paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneErrorsEl];
+    const allTabs  = [tabOverview, tabTables, tabApi, tabDeploy, tabDomain, tabErrors];
+    const allPanes = [paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneDomainEl, paneErrorsEl];
 
     function switchProjectTab(idx) {
       allTabs.forEach((t, i)  => t.classList.toggle('active', i === idx));
@@ -5112,8 +5114,15 @@ async function renderProject({ id }) {
         loadDeployPane(id, paneDeployEl);
       }
     });
-    tabErrors.addEventListener('click', () => {
+    tabDomain.addEventListener('click', () => {
       switchProjectTab(4);
+      if (!paneDomainEl.dataset.loaded) {
+        paneDomainEl.dataset.loaded = '1';
+        loadDomainPane(id, paneDomainEl);
+      }
+    });
+    tabErrors.addEventListener('click', () => {
+      switchProjectTab(5);
       if (!paneErrorsEl.dataset.loaded) {
         paneErrorsEl.dataset.loaded = '1';
         loadErrorsPane(id, paneErrorsEl);
@@ -5129,8 +5138,8 @@ async function renderProject({ id }) {
       ),
 
 
-      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabOverview, tabTables, tabApi, tabDeploy, tabErrors),
-      paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneErrorsEl,
+      el('div', { class: 'tabs', style: 'margin-top:24px' }, tabOverview, tabTables, tabApi, tabDeploy, tabDomain, tabErrors),
+      paneOverviewEl, paneTablesEl, paneApiEl, paneDeployEl, paneDomainEl, paneErrorsEl,
     ];
 
     renderLayout(id, '', content, { projectName: project.name });
@@ -5679,6 +5688,91 @@ async function loadDeployPane(projectId, container) {
     container.appendChild(deployContentEl);
 
     await loadDeployContent(projectId, siteId);
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function loadDomainPane(projectId, container) {
+  container.innerHTML = '<div class="text-muted">Loading…</div>';
+  try {
+    const sites = await Api.get(`/v1/projects/${projectId}/sites`);
+    if (!sites.length) {
+      container.innerHTML = '';
+      container.appendChild(el('div', { class: 'text-muted' },
+        'Create a site in the Deploy tab first — a domain can be set once a site exists.'
+      ));
+      return;
+    }
+    const site = sites[0];
+    // Derives the platform's own base domain from wherever the dashboard
+    // itself is being served (e.g. "supabein.example.com" -> "example.com")
+    // instead of hardcoding one specific deployment's domain.
+    const hostParts = location.hostname.split('.');
+    const baseDomain = hostParts.length > 1 ? hostParts.slice(1).join('.') : location.hostname;
+
+    container.innerHTML = '';
+
+    const subInp = el('input', { type: 'text', class: 'input', value: site.subdomain });
+    const subPreview = el('div', { class: 'text-muted', style: 'font-size:0.85rem;margin-top:4px' },
+      `→ ${site.subdomain}.${baseDomain}`
+    );
+    subInp.addEventListener('input', () => {
+      subPreview.textContent = `→ ${subInp.value.trim() || '…'}.${baseDomain}`;
+    });
+    const subSaveBtn = el('button', { class: 'btn btn-primary btn-sm' }, 'Save');
+    subSaveBtn.addEventListener('click', async () => {
+      const subdomain = subInp.value.trim();
+      if (!subdomain) return;
+      subSaveBtn.disabled = true;
+      try {
+        await Api.patch(`/v1/projects/${projectId}/sites/${site.id}`, { subdomain });
+        container.dataset.loaded = '';
+        loadDomainPane(projectId, container);
+      } catch (e) {
+        alert(e.message);
+        subSaveBtn.disabled = false;
+      }
+    });
+
+    const customInp = el('input', {
+      type: 'text', class: 'input', placeholder: 'www.yourdomain.com',
+      value: site.custom_domain || ''
+    });
+    const customSaveBtn = el('button', { class: 'btn btn-primary btn-sm' }, 'Save');
+    customSaveBtn.addEventListener('click', async () => {
+      customSaveBtn.disabled = true;
+      try {
+        await Api.patch(`/v1/projects/${projectId}/sites/${site.id}`, { custom_domain: customInp.value.trim() });
+        container.dataset.loaded = '';
+        loadDomainPane(projectId, container);
+      } catch (e) {
+        alert(e.message);
+        customSaveBtn.disabled = false;
+      }
+    });
+
+    container.appendChild(el('div', { class: 'card' },
+      el('div', { class: 'card-title' }, 'Default domain'),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Subdomain'),
+        subInp,
+        subPreview
+      ),
+      subSaveBtn
+    ));
+
+    container.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
+      el('div', { class: 'card-title' }, 'Custom domain'),
+      el('div', { class: 'text-muted', style: 'font-size:0.85rem;margin-bottom:8px' },
+        "Point your domain's DNS at this server, then set it here. Leave blank to remove it."
+      ),
+      el('div', { class: 'form-group' },
+        el('label', {}, 'Custom domain'),
+        customInp
+      ),
+      customSaveBtn
+    ));
   } catch (e) {
     container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
