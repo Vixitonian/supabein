@@ -626,6 +626,39 @@ class Catalog
         return $stmt->rowCount() > 0;
     }
 
+    // ─── Site registry (neutral hostname -> docroot, for the wildcard router) ──
+
+    // Throws on a hostname already owned by a different project (caller should
+    // catch the resulting PDOException / check the unique-key violation).
+    public function registerHostname(string $hostname, string $docroot, bool $spaMode, int $projectId): void
+    {
+        $existing = $this->getHostnameRegistration($hostname);
+        if ($existing && (int)$existing['project_id'] !== $projectId) {
+            throw new \RuntimeException('Hostname is already registered to a different project');
+        }
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO site_registry (hostname, docroot, spa_mode, project_id) VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE docroot = VALUES(docroot), spa_mode = VALUES(spa_mode)'
+        );
+        $stmt->execute([$hostname, $docroot, $spaMode ? 1 : 0, $projectId]);
+    }
+
+    public function getHostnameRegistration(string $hostname): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM site_registry WHERE hostname = ?');
+        $stmt->execute([$hostname]);
+        return self::castRow($stmt->fetch() ?: null, ['spa_mode', 'project_id']);
+    }
+
+    public function deleteHostname(string $hostname, int $projectId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            'DELETE FROM site_registry WHERE hostname = ? AND project_id = ?'
+        );
+        $stmt->execute([$hostname, $projectId]);
+        return $stmt->rowCount() > 0;
+    }
+
     // ─── Deploys ─────────────────────────────────────────────────────────────
 
     public function createDeploy(int $siteId, string $versionLabel, int $sizeBytes): array
