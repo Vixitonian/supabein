@@ -570,6 +570,21 @@ class Catalog
         return $this->getSiteById($id);
     }
 
+    // Both fields optional so the dashboard's Domain tab can update either
+    // independently -- pass null to leave a field unchanged.
+    public function updateSiteDomain(int $siteId, ?string $subdomain, ?string $customDomain): array
+    {
+        if ($subdomain !== null) {
+            $stmt = $this->pdo->prepare('UPDATE sites SET subdomain = ? WHERE id = ?');
+            $stmt->execute([$subdomain, $siteId]);
+        }
+        if ($customDomain !== null) {
+            $stmt = $this->pdo->prepare('UPDATE sites SET custom_domain = ? WHERE id = ?');
+            $stmt->execute([$customDomain === '' ? null : $customDomain, $siteId]);
+        }
+        return $this->getSiteById($siteId);
+    }
+
     public function listSites(int $projectId): array
     {
         $stmt = $this->pdo->prepare(
