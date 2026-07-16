@@ -308,6 +308,27 @@ function fmtDate(d) {
 }
 
 
+// Builds the real, working URL for a project's LIVE site -- prefers its
+// custom_domain, then its subdomain (derived against whatever base domain
+// this dashboard itself is served from, e.g. "supabein.example.com" ->
+// "example.com", same approach as the Domain tab's preview), and only falls
+// back to the old path-based /sites/s{id}/current/ URL if neither is set
+// (shouldn't happen once a site exists, since a subdomain is required at
+// creation -- kept as a defensive fallback, not the expected case).
+// `site` may be a raw site row, a project-list/overview entry, or an AI job
+// result's site/staging object -- all of them now carry these same fields.
+function liveSiteUrl(site) {
+  if (!site) return null;
+  if (site.custom_domain) return `https://${site.custom_domain}/`;
+  if (site.subdomain) {
+    const hostParts = location.hostname.split('.');
+    const baseDomain = hostParts.length > 1 ? hostParts.slice(1).join('.') : location.hostname;
+    return `https://${site.subdomain}.${baseDomain}/`;
+  }
+  const siteId = site.site_id ?? site.id;
+  return siteId ? `/sites/s${siteId}/current/` : null;
+}
+
 function downloadText(filename, content) {
   const blob = new Blob([content], { type: 'text/plain' });
   const url  = URL.createObjectURL(blob);
@@ -3326,7 +3347,7 @@ const AiPanel = (() => {
     // live site (no staging block); builds now always stage first, so this
     // only applies to any future/legacy live-direct path.
     if (data.site && data.site.id && !data.staging) {
-      const siteUrl = `/sites/s${data.site.id}/current/`;
+      const siteUrl = liveSiteUrl(data.site);
       actions.appendChild(el('a', {
         class: 'btn btn-secondary btn-sm',
         href: siteUrl,
@@ -3362,7 +3383,7 @@ const AiPanel = (() => {
           saveSessions();
           publishBtn.replaceWith(el('a', {
             class: 'btn btn-secondary btn-sm',
-            href: `/sites/s${site_id}/current/`, target: '_blank', rel: 'noopener'
+            href: liveSiteUrl(data.staging), target: '_blank', rel: 'noopener'
           }, '✓ Live — View Site →'));
         } catch (err) {
           publishBtn.disabled = false;
@@ -3371,7 +3392,7 @@ const AiPanel = (() => {
         }
       });
       if (data.staging.published) {
-        actions.appendChild(el('a', { class: 'btn btn-secondary btn-sm', href: `/sites/s${data.staging.site_id}/current/`, target: '_blank', rel: 'noopener' }, '✓ Live — View Site →'));
+        actions.appendChild(el('a', { class: 'btn btn-secondary btn-sm', href: liveSiteUrl(data.staging), target: '_blank', rel: 'noopener' }, '✓ Live — View Site →'));
       } else {
         actions.appendChild(publishBtn);
       }
@@ -4823,7 +4844,7 @@ async function renderHome() {
     o.recent_projects.forEach(p => {
       const links = el('div', { class: 'home-proj-links' });
       links.appendChild(el('a', { class: 'home-proj-link', href: `#/projects/${p.id}` }, 'Open'));
-      if (p.live && p.site_id) links.appendChild(el('a', { class: 'home-proj-link', href: `/sites/s${p.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View site'));
+      if (p.live && p.site_id) links.appendChild(el('a', { class: 'home-proj-link', href: liveSiteUrl(p), target: '_blank', rel: 'noopener' }, 'View site'));
       const card = el('div', { class: 'home-proj-card' },
         el('a', { class: 'home-proj-main', href: `#/projects/${p.id}` },
           el('div', { class: 'proj-initial' }, (p.name || '?')[0].toUpperCase()),
@@ -4870,7 +4891,7 @@ function buildProjectCard(p) {
     el('a', { class: 'home-proj-link', href: `#/projects/${p.id}` }, 'Open')
   ];
   if (p.live && p.site_id) {
-    footerLinks.push(el('a', { class: 'home-proj-link', href: `/sites/s${p.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View site'));
+    footerLinks.push(el('a', { class: 'home-proj-link', href: liveSiteUrl(p), target: '_blank', rel: 'noopener' }, 'View site'));
   }
 
   const card = el('div', { class: 'proj-card' },
@@ -5190,7 +5211,7 @@ async function loadOverviewPane(projectId, container, switchTab) {
       el('button', { class: 'btn btn-ai', onClick: () => AiPanel.open({ projectId: parseInt(projectId) }) }, '✦ Edit with AI')
     );
     if (o.stats.live && o.site_id) {
-      ctas.appendChild(el('a', { class: 'btn btn-secondary', href: `/sites/s${o.site_id}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →'));
+      ctas.appendChild(el('a', { class: 'btn btn-secondary', href: liveSiteUrl(o), target: '_blank', rel: 'noopener' }, 'View Site →'));
     }
     if (o.stats.has_staging && o.site_id) {
       ctas.appendChild(el('a', { class: 'btn btn-secondary', href: `/sites/s${o.site_id}/staging/`, target: '_blank', rel: 'noopener' }, 'View Staging →'));
@@ -6160,7 +6181,7 @@ async function loadDeployContent(projectId, siteId) {
 
           const footerLinks = [];
           if (isCurrent && siteId) {
-            footerLinks.push(el('a', { class: 'home-proj-link', href: `/sites/s${siteId}/current/`, target: '_blank', rel: 'noopener' }, 'View Site →'));
+            footerLinks.push(el('a', { class: 'home-proj-link', href: liveSiteUrl(site), target: '_blank', rel: 'noopener' }, 'View Site →'));
           }
           if (isStaging && d.status === 'ready') {
             footerLinks.push(el('button', {

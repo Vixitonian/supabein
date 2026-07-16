@@ -122,17 +122,19 @@ class Catalog
         foreach ($st->fetchAll() as $r) $tablesByProject[(int)$r['project_id']] = (int)$r['c'];
 
         $sitesByProject = [];
-        $st = $this->pdo->prepare("SELECT id, project_id, current_deploy_id, staging_deploy_id FROM sites WHERE project_id IN ($in)");
+        $st = $this->pdo->prepare("SELECT id, project_id, subdomain, custom_domain, current_deploy_id, staging_deploy_id FROM sites WHERE project_id IN ($in)");
         $st->execute($ids);
         foreach ($st->fetchAll() as $r) $sitesByProject[(int)$r['project_id']] = $r;
 
         return array_map(function ($p) use ($tablesByProject, $sitesByProject) {
             $pid  = (int)$p['id'];
             $site = $sitesByProject[$pid] ?? null;
-            $p['tables']      = $tablesByProject[$pid] ?? 0;
-            $p['site_id']     = $site ? (int)$site['id'] : null;
-            $p['live']        = (bool)($site && !empty($site['current_deploy_id']));
-            $p['has_staging'] = (bool)($site && !empty($site['staging_deploy_id']));
+            $p['tables']       = $tablesByProject[$pid] ?? 0;
+            $p['site_id']      = $site ? (int)$site['id'] : null;
+            $p['subdomain']    = $site['subdomain'] ?? null;
+            $p['custom_domain'] = $site['custom_domain'] ?? null;
+            $p['live']         = (bool)($site && !empty($site['current_deploy_id']));
+            $p['has_staging']  = (bool)($site && !empty($site['staging_deploy_id']));
             return $p;
         }, $projects);
     }
@@ -172,7 +174,7 @@ class Catalog
             $st->execute($ids);
             foreach ($st->fetchAll() as $r) { $tablesByProject[(int)$r['project_id']] = (int)$r['c']; $tableCount += (int)$r['c']; }
 
-            $st = $pdo->prepare("SELECT id, project_id, subdomain, current_deploy_id, staging_deploy_id FROM sites WHERE project_id IN ($in)");
+            $st = $pdo->prepare("SELECT id, project_id, subdomain, custom_domain, current_deploy_id, staging_deploy_id FROM sites WHERE project_id IN ($in)");
             $st->execute($ids);
             foreach ($st->fetchAll() as $r) {
                 $sitesByProject[(int)$r['project_id']] = $r;
@@ -246,14 +248,16 @@ class Catalog
             $pid  = (int)$p['id'];
             $site = $sitesByProject[$pid] ?? null;
             return [
-                'id'          => $pid,
-                'name'        => $p['name'],
-                'created_at'  => $p['created_at'],
-                'updated_at'  => $lastActivity[$pid] ?? $p['created_at'],
-                'tables'      => $tablesByProject[$pid] ?? 0,
-                'site_id'     => $site ? (int)$site['id'] : null,
-                'live'        => (bool)($site && !empty($site['current_deploy_id'])),
-                'has_staging' => (bool)($site && !empty($site['staging_deploy_id'])),
+                'id'            => $pid,
+                'name'          => $p['name'],
+                'created_at'    => $p['created_at'],
+                'updated_at'    => $lastActivity[$pid] ?? $p['created_at'],
+                'tables'        => $tablesByProject[$pid] ?? 0,
+                'site_id'       => $site ? (int)$site['id'] : null,
+                'subdomain'     => $site['subdomain'] ?? null,
+                'custom_domain' => $site['custom_domain'] ?? null,
+                'live'          => (bool)($site && !empty($site['current_deploy_id'])),
+                'has_staging'   => (bool)($site && !empty($site['staging_deploy_id'])),
             ];
         }, $projects);
         usort($recentProjects, fn($a, $b) => strcmp((string)$b['updated_at'], (string)$a['updated_at']));
@@ -357,8 +361,10 @@ class Catalog
                 'has_seed_data'  => (bool)$seedStmt->fetchColumn(),
                 'user_count'     => $userCount,
             ],
-            'site_id'  => $site ? (int)$site['id'] : null,
-            'activity' => $this->capActivityWithSession($activity, 4),
+            'site_id'       => $site ? (int)$site['id'] : null,
+            'subdomain'     => $site['subdomain'] ?? null,
+            'custom_domain' => $site['custom_domain'] ?? null,
+            'activity'      => $this->capActivityWithSession($activity, 4),
         ];
     }
 
@@ -726,6 +732,27 @@ class Catalog
              ON DUPLICATE KEY UPDATE docroot = VALUES(docroot), spa_mode = VALUES(spa_mode)'
         );
         $stmt->execute([$hostname, $docroot, $spaMode ? 1 : 0, $projectId, $registrantTable, $registrantUserId]);
+    }
+
+    // Keeps site_registry in sync with a site's own subdomain/custom_domain --
+    // called both from the sites routes (deploy_routes.php) and directly from
+    // the AI build flow (ai_routes.php), which creates a site via createSite()
+    // without ever going through that HTTP route. Missing this second call
+    // site was a real bug: every newly AI-built project's subdomain silently
+    // never resolved through the wildcard vhost until this was added, same
+    // failure this was written to fix for pre-existing legacy projects.
+    public function syncSiteRegistry(array $site, int $projectId): void
+    {
+        $config  = \App::get('config');
+        $docroot = rtrim($config['SITES_PATH'], '/') . '/s' . $site['id'] . '/current';
+        $spaMode = (bool)$site['spa_mode'];
+
+        if (!empty($site['subdomain'])) {
+            $this->registerHostname($site['subdomain'] . '.' . \platform_base_domain(), $docroot, $spaMode, $projectId);
+        }
+        if (!empty($site['custom_domain'])) {
+            $this->registerHostname($site['custom_domain'], $docroot, $spaMode, $projectId);
+        }
     }
 
     public function getHostnameRegistration(string $hostname): ?array

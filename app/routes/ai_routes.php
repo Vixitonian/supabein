@@ -2463,12 +2463,14 @@ function ai_execute_build(array $plan, int $userId): array
 
     try {
         $site = $catalog->createSite($projectId, $subdomain, true);
+        $catalog->syncSiteRegistry($site, $projectId);
         $partial['site'] = $site;
     } catch (\PDOException $e) {
         if (str_contains($e->getMessage(), 'Duplicate')) {
             $subdomain = $subdomain . '-' . $projectId;
             try {
                 $site = $catalog->createSite($projectId, $subdomain, true);
+                $catalog->syncSiteRegistry($site, $projectId);
                 $partial['site'] = $site;
             } catch (\PDOException $e2) {
                 sb_log('ai_build', 'Site creation failed (non-fatal): ' . $e2->getMessage());
@@ -2500,10 +2502,12 @@ function ai_execute_build(array $plan, int $userId): array
             $apiBase = rtrim($config['API_BASE_URL'] ?? '', '/');
             $appBase = preg_replace('#/(api|v\d+)(/.*)?$#i', '', $apiBase);
             $staging = [
-                'project_id'  => $projectId,
-                'site_id'     => (int)$site['id'],
-                'deploy_id'   => (int)$deploy['id'],
-                'staging_url' => $appBase . '/sites/s' . $site['id'] . '/staging/',
+                'project_id'    => $projectId,
+                'site_id'       => (int)$site['id'],
+                'deploy_id'     => (int)$deploy['id'],
+                'staging_url'   => $appBase . '/sites/s' . $site['id'] . '/staging/',
+                'subdomain'     => $site['subdomain'] ?? null,
+                'custom_domain' => $site['custom_domain'] ?? null,
             ];
         }
     }
@@ -7821,10 +7825,12 @@ PROMPT;
                         $apiBase = rtrim($editConfig['API_BASE_URL'] ?? '', '/');
                         $appBase = preg_replace('#/(api|v\d+)(/.*)?$#i', '', $apiBase);
                         $result['staging'] = [
-                            'project_id'  => $projectId,
-                            'site_id'     => $editSiteId,
-                            'deploy_id'   => (int)$deployResult['deploy']['id'],
-                            'staging_url' => $appBase . '/sites/s' . $editSiteId . '/staging/',
+                            'project_id'    => $projectId,
+                            'site_id'       => $editSiteId,
+                            'deploy_id'     => (int)$deployResult['deploy']['id'],
+                            'staging_url'   => $appBase . '/sites/s' . $editSiteId . '/staging/',
+                            'subdomain'     => $editSites[0]['subdomain'] ?? null,
+                            'custom_domain' => $editSites[0]['custom_domain'] ?? null,
                         ];
                     } elseif (!empty($deployResult['error'])) {
                         $result['deploy_error'] = $deployResult['error'];

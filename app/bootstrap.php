@@ -105,14 +105,20 @@ function sb_log(string $context, string $message, array $data = []): void
 }
 
 // The platform's own base domain (e.g. "dxinnovationhub.com"), derived from
-// whatever host this request actually arrived on rather than hardcoded --
-// this API always runs on a fixed subdomain of it (e.g.
-// supabein.dxinnovationhub.com), so stripping the leftmost label is reliable
-// and keeps this portable across different self-hosted installs.
+// the configured API_BASE_URL rather than hardcoded -- this API always runs
+// on a fixed subdomain of it (e.g. supabein.dxinnovationhub.com), so
+// stripping the leftmost label is reliable and keeps this portable across
+// different self-hosted installs. Deliberately NOT derived from
+// $_SERVER['HTTP_HOST']: AI builds run in a detached CLI worker process
+// (ai_spawn_job_worker -> app/workers/ai_worker.php) with no HTTP request at
+// all, and that worker is exactly where a newly-built project's site first
+// needs this to register its subdomain -- a Host-header-based version would
+// silently break there.
 function platform_base_domain(): string
 {
-    $host  = strtolower(explode(':', $_SERVER['HTTP_HOST'] ?? '')[0]);
-    $parts = explode('.', $host);
+    $config = App::get('config');
+    $host   = strtolower(parse_url($config['API_BASE_URL'] ?? '', PHP_URL_HOST) ?? '');
+    $parts  = explode('.', $host);
     return count($parts) > 1 ? implode('.', array_slice($parts, 1)) : $host;
 }
 
