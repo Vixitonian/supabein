@@ -66,9 +66,17 @@ class FallbackAiClient
         return $this->fallbackEvents;
     }
 
+    // Proxies live to the currently active client, same as getLastRawText()
+    // below -- NOT the cached $this->lastUsage, which the call() loop only
+    // updates on a fully successful invoke(). A caller that catches an
+    // exception from generateJson()/generateJsonWithHistory() itself (e.g.
+    // to recover via getLastRawText() when the model's reply wasn't valid
+    // JSON) would otherwise see empty usage even though the underlying
+    // client captured real token counts before throwing -- live-caught as
+    // AI Assistant chat calls silently going unbilled.
     public function getLastUsage(): array
     {
-        return $this->lastUsage;
+        return method_exists($this->client, 'getLastUsage') ? $this->client->getLastUsage() : $this->lastUsage;
     }
 
     public function getLastRawText(): string
