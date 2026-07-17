@@ -1271,4 +1271,449 @@ class Catalog
         }
         return null;
     }
+
+    // ─── Secret encryption (integrations + webhooks) ───────────────────────────
+    //
+    // Registered secrets (an integration's API key, a webhook's signing
+    // secret) must be sent back out verbatim later -- to an upstream API, or
+    // used to verify an HMAC -- so, unlike the PASSWORD column type's
+    // one-way bcrypt hash, these need to be *reversible*. They're still
+    // never returned by any GET endpoint (see getIntegration()/listWebhooks()
+    // which only ever select the ciphertext column into internal-only
+    // lookups). The key is derived from JWT_SECRET via HMAC rather than a
+    // separate config value, so this ships without requiring every existing
+    // deployment to add a new secret to config/secrets.php first.
+
+    private function secretEncryptionKey(): string
+    {
+        $config = \App::get('config');
+        return hash_hmac('sha256', 'supabein-secret-store-v1', $config['JWT_SECRET'], true);
+    }
+
+    private function encryptSecret(string $plaintext): string
+    {
+        $iv  = random_bytes(12);
+        $tag = '';
+        $ciphertext = openssl_encrypt($plaintext, 'aes-256-gcm', $this->secretEncryptionKey(), OPENSSL_RAW_DATA, $iv, $tag);
+        if ($ciphertext === false) {
+            throw new \RuntimeException('Failed to encrypt secret');
+        }
+        return base64_encode($iv . $tag . $ciphertext);
+    }
+
+    private function decryptSecret(string $stored): string
+    {
+        $raw = base64_decode($stored, true);
+        if ($raw === false || strlen($raw) < 29) {
+            throw new \RuntimeException('Corrupt secret ciphertext');
+        }
+        $iv         = substr($raw, 0, 12);
+        $tag        = substr($raw, 12, 16);
+        $ciphertext = substr($raw, 28);
+        $plaintext  = openssl_decrypt($ciphertext, 'aes-256-gcm', $this->secretEncryptionKey(), OPENSSL_RAW_DATA, $iv, $tag);
+        if ($plaintext === false) {
+            throw new \RuntimeException('Failed to decrypt secret');
+        }
+        return $plaintext;
+    }
+
+    // ─── SSRF guards (shared by integration registration + proxy calls) ───────
+
+    // A resolved IP is disallowed if it's anything other than a normal public
+    // address -- loopback, link-local, RFC1918 private ranges, and the other
+    // IANA special-purpose blocks (this is what actually stops an integration
+    // from being pointed at e.g. 169.254.169.254, a cloud metadata endpoint,
+    // or an internal service on the host's own network).
+    private static function isPrivateOrReservedIp(string $ip): bool
+    {
+        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
+    }
+
+    private function resolveHostIps(string $host): array
+    {
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            return [$host];
+        }
+        $ips = gethostbynamel($host);
+        return $ips ?: [];
+    }
+
+    // ─── Integrations (registered secret + scoped outbound proxy) ─────────────
+
+    private const INTEGRATION_AUTH_STYLES_PREFIXES = ['header:', 'query:'];
+
+    public static function isValidAuthStyle(string $authStyle): bool
+    {
+        if ($authStyle === 'bearer') return true;
+        foreach (self::INTEGRATION_AUTH_STYLES_PREFIXES as $prefix) {
+            if (str_starts_with($authStyle, $prefix) && strlen($authStyle) > strlen($prefix)) return true;
+        }
+        return false;
+    }
+
+    // Validates and stores a new (or replaced) integration. Throws
+    // InvalidArgumentException for a bad base_url (wrong scheme, or one that
+    // resolves to a private/reserved address -- the same check re-run on
+    // every proxy call, since DNS can change after registration).
+    public function createIntegration(
+        int $projectId,
+        string $name,
+        string $baseUrl,
+        string $secret,
+        string $authStyle,
+        ?array $allowedProjectUserPaths
+    ): array {
+        $parsed = parse_url($baseUrl);
+        if (!$parsed || ($parsed['scheme'] ?? '') !== 'https' || empty($parsed['host'])) {
+            throw new \InvalidArgumentException('base_url must be an https:// URL with a host');
+        }
+        $ips = $this->resolveHostIps($parsed['host']);
+        if (empty($ips)) {
+            throw new \InvalidArgumentException('Could not resolve base_url host');
+        }
+        foreach ($ips as $ip) {
+            if (self::isPrivateOrReservedIp($ip)) {
+                throw new \InvalidArgumentException('base_url resolves to a disallowed address');
+            }
+        }
+
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO integrations (project_id, name, base_url, auth_style, secret_ciphertext, allowed_project_user_paths)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE base_url = VALUES(base_url), auth_style = VALUES(auth_style),
+                 secret_ciphertext = VALUES(secret_ciphertext), allowed_project_user_paths = VALUES(allowed_project_user_paths)'
+        );
+        $stmt->execute([
+            $projectId, $name, $baseUrl, $authStyle, $this->encryptSecret($secret),
+            $allowedProjectUserPaths !== null ? json_encode(array_values($allowedProjectUserPaths)) : null,
+        ]);
+
+        return $this->getIntegration($projectId, $name);
+    }
+
+    // Never selects secret_ciphertext -- this is the shape every list/get
+    // endpoint returns.
+    public function listIntegrations(int $projectId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_id, name, base_url, auth_style, allowed_project_user_paths, created_at, updated_at
+             FROM integrations WHERE project_id = ? ORDER BY name'
+        );
+        $stmt->execute([$projectId]);
+        return array_map([self::class, 'decodeIntegrationRow'], self::castRows($stmt->fetchAll(), ['id', 'project_id']));
+    }
+
+    public function getIntegration(int $projectId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_id, name, base_url, auth_style, allowed_project_user_paths, created_at, updated_at
+             FROM integrations WHERE project_id = ? AND name = ?'
+        );
+        $stmt->execute([$projectId, $name]);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
+        return $row === null ? null : self::decodeIntegrationRow($row);
+    }
+
+    private static function decodeIntegrationRow(array $row): array
+    {
+        $row['allowed_project_user_paths'] = $row['allowed_project_user_paths'] !== null
+            ? json_decode($row['allowed_project_user_paths'], true) : null;
+        return $row;
+    }
+
+    public function deleteIntegration(int $projectId, string $name): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM integrations WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // Whether a project_user (as opposed to an owner/PAT) may call this
+    // integration's proxy for the given request path. Deny-by-default: a
+    // NULL allowlist (the common case -- most integrations aren't meant to
+    // be end-user-triggerable) means "no project_user, ever". Deliberately
+    // simple prefix matching, not a full policy-row system -- each allowlist
+    // entry either matches the path exactly, or matches as a directory
+    // prefix (so "transaction/verify/" covers "transaction/verify/<ref>").
+    public static function integrationPathAllowedForProjectUser(?array $allowedPaths, string $path): bool
+    {
+        if ($allowedPaths === null) return false;
+        foreach ($allowedPaths as $entry) {
+            $entry = (string)$entry;
+            if ($entry === $path) return true;
+            if (str_ends_with($entry, '/') && str_starts_with($path, $entry)) return true;
+        }
+        return false;
+    }
+
+    // Makes the actual outbound call: resolves base_url + path, re-validates
+    // the resolved host against the SSRF guard (DNS can change between
+    // registration and now), pins the cURL connection to the address that
+    // was just validated (CURLOPT_RESOLVE) rather than trusting a second,
+    // separate DNS lookup at connect time -- closes the DNS-rebinding gap a
+    // "validate then connect" check would otherwise leave open -- injects
+    // the secret per auth_style, and never follows redirects (a redirect to
+    // an attacker-controlled host is exactly the kind of thing that would
+    // otherwise hand the secret to it via CURLOPT_FOLLOWLOCATION).
+    public function callIntegration(int $projectId, string $name, string $method, string $path, mixed $body): array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM integrations WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        $integration = $stmt->fetch() ?: null;
+        if ($integration === null) {
+            throw new \RuntimeException('Integration not found');
+        }
+        $secret = $this->decryptSecret($integration['secret_ciphertext']);
+
+        $target = rtrim($integration['base_url'], '/') . '/' . ltrim($path, '/');
+        $parsedTarget = parse_url($target);
+        if (!$parsedTarget || ($parsedTarget['scheme'] ?? '') !== 'https' || empty($parsedTarget['host'])) {
+            throw new \RuntimeException('Invalid resolved URL');
+        }
+
+        $host = $parsedTarget['host'];
+        $ips  = $this->resolveHostIps($host);
+        if (empty($ips)) {
+            throw new \RuntimeException('Could not resolve integration host');
+        }
+        foreach ($ips as $ip) {
+            if (self::isPrivateOrReservedIp($ip)) {
+                throw new \RuntimeException('Integration host resolves to a disallowed address');
+            }
+        }
+        $pinnedIp = $ips[0];
+        $port     = $parsedTarget['port'] ?? 443;
+
+        $headers = ['Content-Type: application/json'];
+        $authStyle = $integration['auth_style'];
+        if ($authStyle === 'bearer') {
+            $headers[] = 'Authorization: Bearer ' . $secret;
+        } elseif (str_starts_with($authStyle, 'header:')) {
+            $headers[] = substr($authStyle, 7) . ': ' . $secret;
+        } elseif (str_starts_with($authStyle, 'query:')) {
+            $paramName = substr($authStyle, 6);
+            $target .= (str_contains($target, '?') ? '&' : '?') . $paramName . '=' . urlencode($secret);
+        } else {
+            throw new \RuntimeException('Integration has an unsupported auth_style');
+        }
+
+        $ch = curl_init($target);
+        curl_setopt_array($ch, [
+            CURLOPT_CUSTOMREQUEST  => strtoupper($method),
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT        => 20,
+            CURLOPT_RESOLVE        => ["$host:$port:$pinnedIp"],
+            CURLOPT_PROTOCOLS      => \CURLPROTO_HTTPS,
+        ]);
+        if ($body !== null && in_array(strtoupper($method), ['POST', 'PATCH', 'PUT', 'DELETE'], true)) {
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($body, JSON_UNESCAPED_UNICODE));
+        }
+
+        $raw = curl_exec($ch);
+        if ($raw === false) {
+            $err = curl_error($ch);
+            curl_close($ch);
+            throw new \RuntimeException('Upstream request failed: ' . $err);
+        }
+        $status = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $decoded = json_decode($raw, true);
+        return ['status' => $status, 'body' => json_last_error() === JSON_ERROR_NONE ? $decoded : $raw];
+    }
+
+    // ─── Webhooks (signed inbound -> templated Data API write) ────────────────
+
+    private const WEBHOOK_SIGNATURE_ALGORITHMS = ['hmac-sha256', 'hmac-sha512'];
+
+    public static function isValidWebhookAlgorithm(string $algo): bool
+    {
+        return in_array($algo, self::WEBHOOK_SIGNATURE_ALGORITHMS, true);
+    }
+
+    public function createWebhook(
+        int $projectId,
+        string $name,
+        string $signatureHeader,
+        string $signatureAlgorithm,
+        string $signatureSecret,
+        ?array $match,
+        array $write
+    ): array {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO webhooks (project_id, name, signature_header, signature_algorithm, signature_secret_ciphertext, match_json, write_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE signature_header = VALUES(signature_header), signature_algorithm = VALUES(signature_algorithm),
+                 signature_secret_ciphertext = VALUES(signature_secret_ciphertext), match_json = VALUES(match_json), write_json = VALUES(write_json)'
+        );
+        $stmt->execute([
+            $projectId, $name, $signatureHeader, $signatureAlgorithm, $this->encryptSecret($signatureSecret),
+            $match !== null ? json_encode($match) : null,
+            json_encode($write),
+        ]);
+        return $this->getWebhook($projectId, $name);
+    }
+
+    // Never selects signature_secret_ciphertext.
+    public function listWebhooks(int $projectId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_id, name, signature_header, signature_algorithm, match_json, write_json, created_at, updated_at
+             FROM webhooks WHERE project_id = ? ORDER BY name'
+        );
+        $stmt->execute([$projectId]);
+        return array_map([self::class, 'decodeWebhookRow'], self::castRows($stmt->fetchAll(), ['id', 'project_id']));
+    }
+
+    public function getWebhook(int $projectId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_id, name, signature_header, signature_algorithm, match_json, write_json, created_at, updated_at
+             FROM webhooks WHERE project_id = ? AND name = ?'
+        );
+        $stmt->execute([$projectId, $name]);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
+        return $row === null ? null : self::decodeWebhookRow($row);
+    }
+
+    private static function decodeWebhookRow(array $row): array
+    {
+        $row['match_json'] = $row['match_json'] !== null ? json_decode($row['match_json'], true) : null;
+        $row['write_json'] = json_decode($row['write_json'], true);
+        return $row;
+    }
+
+    public function deleteWebhook(int $projectId, string $name): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM webhooks WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // Internal-only lookup that includes the decrypted signing secret, used
+    // solely by the public receiver route right before verifying a request's
+    // signature -- never exposed through any GET.
+    public function getWebhookForVerification(int $projectId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM webhooks WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        $row = $stmt->fetch() ?: null;
+        if ($row === null) return null;
+        $row['signature_secret'] = $this->decryptSecret($row['signature_secret_ciphertext']);
+        unset($row['signature_secret_ciphertext']);
+        $row['match_json'] = $row['match_json'] !== null ? json_decode($row['match_json'], true) : null;
+        $row['write_json'] = json_decode($row['write_json'], true);
+        return $row;
+    }
+
+    // Timing-safe HMAC check over the *raw* request body (not the re-encoded
+    // JSON -- whitespace/key-order differences would otherwise break every
+    // real sender, since the signature was computed over their exact bytes).
+    public static function verifyWebhookSignature(string $rawBody, string $providedSignature, string $algorithm, string $secret): bool
+    {
+        $algo = $algorithm === 'hmac-sha512' ? 'sha512' : 'sha256';
+        $expected = hash_hmac($algo, $rawBody, $secret);
+        $provided = strtolower(trim($providedSignature));
+        // Paystack and most providers send a bare hex digest; tolerate an
+        // optional "sha256=" style prefix some other providers use.
+        if (str_contains($provided, '=') && !ctype_xdigit(str_replace('=', '', $provided))) {
+            $provided = substr($provided, strpos($provided, '=') + 1);
+        }
+        return hash_equals($expected, $provided);
+    }
+
+    // Resolves a dot-path (e.g. "data.amount") into a decoded JSON payload.
+    // Public: also used by the webhook receiver route to evaluate `match`.
+    public static function resolveDotPath(array $payload, string $path): mixed
+    {
+        $cursor = $payload;
+        foreach (explode('.', $path) as $seg) {
+            if (!is_array($cursor) || !array_key_exists($seg, $cursor)) return null;
+            $cursor = $cursor[$seg];
+        }
+        return $cursor;
+    }
+
+    // Applies a webhook's `write` template to the one row it identifies.
+    // Runs with the same elevated, policy-bypassing write access the Data
+    // API already uses internally (this call is authorized by the
+    // already-verified signature, not by an end-user's own policy grant --
+    // an external payment provider has no "authenticated" role to check
+    // against). `set` values are always either a literal or a payload
+    // dot-path -- fixed, declarative, never an expression -- so this stays
+    // in the same "bounded but not arbitrary" category as constraint_sql.
+    //
+    // Returns ['applied' => bool, 'reason' => string] -- 'reason' explains a
+    // no-op (row not found, no match, already at the target value) for the
+    // caller to log without treating it as an error.
+    public function applyWebhookWrite(int $projectId, array $writeSpec, array $payload): array
+    {
+        $tableName    = (string)($writeSpec['table'] ?? '');
+        $matchColumn  = (string)($writeSpec['match_column'] ?? '');
+        $matchPath    = (string)($writeSpec['match_value_path'] ?? '');
+        $set          = $writeSpec['set'] ?? [];
+
+        $table = $this->getTable($projectId, $tableName);
+        if (!$table) {
+            return ['applied' => false, 'reason' => 'Configured table not found'];
+        }
+
+        $colRows     = $this->listColumns((int)$table['id']);
+        $allowedCols = array_column($colRows, 'col_name');
+        if (!in_array($matchColumn, $allowedCols, true)) {
+            return ['applied' => false, 'reason' => 'Configured match_column not found'];
+        }
+
+        $matchValue = self::resolveDotPath($payload, $matchPath);
+        if ($matchValue === null) {
+            return ['applied' => false, 'reason' => 'match_value_path not found in payload'];
+        }
+
+        $physTable = $table['physical_name'];
+        $stmt = $this->pdo->prepare('SELECT * FROM `' . $physTable . '` WHERE `' . $matchColumn . '` = ? LIMIT 1');
+        $stmt->execute([$matchValue]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return ['applied' => false, 'reason' => 'No row matched match_value'];
+        }
+
+        $sets       = [];
+        $params     = [];
+        $allSameYet = true;
+        foreach ($set as $col => $spec) {
+            if (!in_array($col, $allowedCols, true)) {
+                continue;
+            }
+            $value = array_key_exists('literal', (array)$spec)
+                ? $spec['literal']
+                : self::resolveDotPath($payload, (string)($spec['path'] ?? ''));
+
+            $current = $row[$col] ?? null;
+            // Loose comparison -- DB values come back as strings (e.g. "1"
+            // for an int column) while $value may be a native JSON type.
+            if ((string)$current !== (string)$value) {
+                $allSameYet = false;
+            }
+            $sets[]   = '`' . $col . '` = ?';
+            $params[] = is_array($value) ? json_encode($value) : $value;
+        }
+
+        if (empty($sets)) {
+            return ['applied' => false, 'reason' => 'No valid columns in write.set'];
+        }
+        // Idempotency: at-least-once delivery means a redelivered event must
+        // not blindly re-run -- skip once every target column already holds
+        // the value this write would set.
+        if ($allSameYet) {
+            return ['applied' => false, 'reason' => 'Row already at target value (idempotent no-op)'];
+        }
+
+        $params[] = $row['id'];
+        $sql = 'UPDATE `' . $physTable . '` SET ' . implode(', ', $sets) . ' WHERE `id` = ?';
+        $this->pdo->prepare($sql)->execute($params);
+
+        return ['applied' => true, 'reason' => 'ok'];
+    }
 }

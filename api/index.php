@@ -55,13 +55,17 @@ if ($rawBody && in_array($method, ['POST', 'PATCH', 'PUT'], true)) {
 }
 
 $request = [
-    'method'  => $method,
-    'uri'     => $uri,
-    'query'   => $_GET,
-    'body'    => $body,
-    'files'   => $_FILES,
-    'headers' => $rawHeaders,
-    'auth'    => null,
+    'method'   => $method,
+    'uri'      => $uri,
+    'query'    => $_GET,
+    'body'     => $body,
+    // Signature verification (webhook receiver) must hash the exact bytes
+    // the sender signed -- re-encoding the decoded $body as JSON can differ
+    // in whitespace/key order and would break every real signature.
+    'raw_body' => $rawBody,
+    'files'    => $_FILES,
+    'headers'  => $rawHeaders,
+    'auth'     => null,
 ];
 
 // Load router and routes
@@ -79,6 +83,8 @@ require_once SUPABEIN_ROOT . '/app/routes/deploy_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/storage_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/ai_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/hostname_routes.php';
+require_once SUPABEIN_ROOT . '/app/routes/integration_routes.php';
+require_once SUPABEIN_ROOT . '/app/routes/webhook_routes.php';
 
 register_auth_routes($router);
 register_project_routes($router);
@@ -88,6 +94,8 @@ register_deploy_routes($router);
 register_storage_routes($router);
 register_ai_routes($router);
 register_hostname_routes($router);
+register_integration_routes($router);
+register_webhook_routes($router);
 
 try {
     $router->dispatch($request);

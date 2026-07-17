@@ -241,6 +241,50 @@ CREATE TABLE IF NOT EXISTS `storage_bucket_policies` (
     UNIQUE KEY `uq_project_bucket` (`project_id`, `bucket`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Per-project registered outbound integration: a name-scoped external API
+-- base_url + a write-only secret (never returned by GET -- same trust model
+-- as the PASSWORD column type, settable, never readable). SupaBein injects
+-- the secret server-side per `auth_style` when proxying a call on the
+-- project's behalf; the caller never sees it. See
+-- app/routes/integration_routes.php.
+CREATE TABLE IF NOT EXISTS `integrations` (
+    `id`                          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`                  INT UNSIGNED NOT NULL,
+    `name`                        VARCHAR(64) NOT NULL,
+    `base_url`                    VARCHAR(255) NOT NULL,
+    `auth_style`                  VARCHAR(64) NOT NULL,
+    `secret_ciphertext`           TEXT NOT NULL,
+    -- NULL = proxy calls require a PAT/owner token. A JSON array of path
+    -- prefixes (e.g. ["bank/resolve","transaction/verify/"]) opts specific
+    -- request paths in for any authenticated project_user too -- deny by
+    -- default, the same posture as a table policy with no row.
+    `allowed_project_user_paths` TEXT DEFAULT NULL,
+    `created_at`                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_integration` (`project_id`, `name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Per-project registered inbound webhook: verifies a signed payload from an
+-- external service, then applies a fixed, declarative column-update template
+-- (`write_json` -- never arbitrary code, same "bounded but not arbitrary"
+-- reasoning as `constraint_sql`) to one row of one of the project's own
+-- tables. See app/routes/webhook_routes.php.
+CREATE TABLE IF NOT EXISTS `webhooks` (
+    `id`                           INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`                   INT UNSIGNED NOT NULL,
+    `name`                         VARCHAR(64) NOT NULL,
+    `signature_header`             VARCHAR(128) NOT NULL,
+    `signature_algorithm`          VARCHAR(32) NOT NULL,
+    `signature_secret_ciphertext`  TEXT NOT NULL,
+    `match_json`                   TEXT DEFAULT NULL,
+    `write_json`                   TEXT NOT NULL,
+    `created_at`                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_webhook` (`project_id`, `name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
 
 -- ─── Migration: project_requirements (run once on existing installs) ─────────
