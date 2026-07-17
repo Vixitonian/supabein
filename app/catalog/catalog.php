@@ -1636,6 +1636,44 @@ class Catalog
         return $cursor;
     }
 
+    // Resolves a declarative value spec against a flat/nested context array.
+    // Shared by webhook `write.set`, trigger `request`, the auth email
+    // provider's subject/text, and meta-resolver `meta` values -- the one
+    // place all four "fixed, declarative, no arbitrary code" templating
+    // needs go through:
+    //   {"literal": X}            -> X, verbatim
+    //   {"path": "a.b"}           -> resolveDotPath($context, "a.b")
+    //   {"template": "hi {{a.b}}"} -> "hi <value>", {{...}} substituted
+    public static function resolveValueSpec(array $spec, array $context): mixed
+    {
+        if (array_key_exists('literal', $spec)) {
+            return $spec['literal'];
+        }
+        if (array_key_exists('path', $spec)) {
+            return self::resolveDotPath($context, (string)$spec['path']);
+        }
+        if (array_key_exists('template', $spec)) {
+            return preg_replace_callback('/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/', function ($m) use ($context) {
+                $v = self::resolveDotPath($context, $m[1]);
+                if ($v === null) return '';
+                return is_scalar($v) ? (string)$v : json_encode($v);
+            }, (string)$spec['template']);
+        }
+        return null;
+    }
+
+    // Same, but falls back to a second spec (spec['fallback']) when the
+    // primary one resolves to null/empty -- used by meta-resolver values
+    // (e.g. og:description falling back to a shorter/older field).
+    public static function resolveValueSpecWithFallback(array $spec, array $context): mixed
+    {
+        $val = self::resolveValueSpec($spec, $context);
+        if (($val === null || $val === '') && isset($spec['fallback']) && is_array($spec['fallback'])) {
+            return self::resolveValueSpec($spec['fallback'], $context);
+        }
+        return $val;
+    }
+
     // Applies a webhook's `write` template to the one row it identifies.
     // Runs with the same elevated, policy-bypassing write access the Data
     // API already uses internally (this call is authorized by the
@@ -1686,9 +1724,7 @@ class Catalog
             if (!in_array($col, $allowedCols, true)) {
                 continue;
             }
-            $value = array_key_exists('literal', (array)$spec)
-                ? $spec['literal']
-                : self::resolveDotPath($payload, (string)($spec['path'] ?? ''));
+            $value = self::resolveValueSpec((array)$spec, $payload);
 
             $current = $row[$col] ?? null;
             // Loose comparison -- DB values come back as strings (e.g. "1"
@@ -1715,5 +1751,241 @@ class Catalog
         $this->pdo->prepare($sql)->execute($params);
 
         return ['applied' => true, 'reason' => 'ok'];
+    }
+
+    // ─── Project-table password reset (end-users of a project's own auth table) ─
+    //
+    // The project-scoped counterpart to the platform's own
+    // user_reset_tokens -- see app/routes/data_routes.php's /forgot and
+    // /reset routes. Deliberately mirrors that flow's shape (raw token
+    // handed to the caller only via email, hash stored, single-use,
+    // 1-hour expiry) rather than inventing a different one.
+
+    public function createProjectPasswordResetToken(int $projectId, string $tableName, int $rowId): string
+    {
+        $raw     = bin2hex(random_bytes(32));
+        $hash    = hash('sha256', $raw);
+        $expires = date('Y-m-d H:i:s', time() + 3600);
+
+        $this->pdo->prepare(
+            'DELETE FROM project_password_resets WHERE project_id = ? AND table_name = ? AND row_id = ?'
+        )->execute([$projectId, $tableName, $rowId]);
+        $this->pdo->prepare(
+            'INSERT INTO project_password_resets (project_id, table_name, row_id, token_hash, expires_at)
+             VALUES (?, ?, ?, ?, ?)'
+        )->execute([$projectId, $tableName, $rowId, $hash, $expires]);
+
+        return $raw;
+    }
+
+    // Validates a raw token against (project_id, table_name), marks it used,
+    // and returns the row_id it was issued for -- or null if invalid,
+    // expired, already used, or issued for a different project/table.
+    public function consumeProjectPasswordResetToken(int $projectId, string $tableName, string $rawToken): ?int
+    {
+        $hash = hash('sha256', $rawToken);
+        $stmt = $this->pdo->prepare(
+            'SELECT id, row_id FROM project_password_resets
+             WHERE project_id = ? AND table_name = ? AND token_hash = ? AND used_at IS NULL AND expires_at > NOW()
+             LIMIT 1'
+        );
+        $stmt->execute([$projectId, $tableName, $hash]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+        $this->pdo->prepare('UPDATE project_password_resets SET used_at = NOW() WHERE id = ?')->execute([$row['id']]);
+        return (int)$row['row_id'];
+    }
+
+    // ─── Auth email provider (dispatches a project's own /forgot email) ───────
+
+    public function createAuthEmailProvider(
+        int $projectId,
+        string $integrationName,
+        string $path,
+        ?string $fromAddress,
+        array $subjectSpec,
+        array $textSpec
+    ): array {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO auth_email_providers (project_id, integration_name, path, from_address, subject_spec, text_spec)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE integration_name = VALUES(integration_name), path = VALUES(path),
+                 from_address = VALUES(from_address), subject_spec = VALUES(subject_spec), text_spec = VALUES(text_spec)'
+        );
+        $stmt->execute([$projectId, $integrationName, $path, $fromAddress, json_encode($subjectSpec), json_encode($textSpec)]);
+        return $this->getAuthEmailProvider($projectId);
+    }
+
+    public function getAuthEmailProvider(int $projectId): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM auth_email_providers WHERE project_id = ?');
+        $stmt->execute([$projectId]);
+        $row = $stmt->fetch() ?: null;
+        if ($row === null) return null;
+        $row['subject_spec'] = json_decode($row['subject_spec'], true);
+        $row['text_spec']    = json_decode($row['text_spec'], true);
+        return self::castRow($row, ['project_id']);
+    }
+
+    public function deleteAuthEmailProvider(int $projectId): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM auth_email_providers WHERE project_id = ?');
+        $stmt->execute([$projectId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // Sends the reset email through the project's registered provider, if
+    // any. Silent no-op if none is registered (unchanged /forgot behavior).
+    // Any failure (bad integration, upstream error) is caught by the caller
+    // -- this never throws in a way that should change /forgot's response,
+    // per the doc's own constraint: response shape/timing must not leak
+    // whether the address existed or whether sending succeeded.
+    public function dispatchForgotPasswordEmail(int $projectId, string $email, string $token): void
+    {
+        $provider = $this->getAuthEmailProvider($projectId);
+        if ($provider === null) {
+            return;
+        }
+        $context = ['email' => $email, 'token' => $token];
+        $body = [
+            'to'      => [$email],
+            'subject' => self::resolveValueSpec((array)$provider['subject_spec'], $context),
+            'text'    => self::resolveValueSpec((array)$provider['text_spec'], $context),
+        ];
+        if (!empty($provider['from_address'])) {
+            $body['from'] = $provider['from_address'];
+        }
+        $this->callIntegration($projectId, $provider['integration_name'], 'POST', $provider['path'], $body);
+    }
+
+    // ─── Outbound triggers (row insert -> templated Integration call) ─────────
+
+    public function createTrigger(
+        int $projectId,
+        string $name,
+        string $tableName,
+        string $event,
+        string $integrationName,
+        array $request
+    ): array {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO triggers (project_id, name, table_name, event, integration_name, request_json)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE table_name = VALUES(table_name), event = VALUES(event),
+                 integration_name = VALUES(integration_name), request_json = VALUES(request_json)'
+        );
+        $stmt->execute([$projectId, $name, $tableName, $event, $integrationName, json_encode($request)]);
+        return $this->getTrigger($projectId, $name);
+    }
+
+    public function listTriggers(int $projectId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM triggers WHERE project_id = ? ORDER BY name');
+        $stmt->execute([$projectId]);
+        return array_map([self::class, 'decodeTriggerRow'], self::castRows($stmt->fetchAll(), ['id', 'project_id']));
+    }
+
+    public function getTrigger(int $projectId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM triggers WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
+        return $row === null ? null : self::decodeTriggerRow($row);
+    }
+
+    private static function decodeTriggerRow(array $row): array
+    {
+        $row['request_json'] = json_decode($row['request_json'], true);
+        return $row;
+    }
+
+    public function deleteTrigger(int $projectId, string $name): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM triggers WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // Fires every trigger registered for (project, table, event) against a
+    // just-inserted row. Best-effort, synchronous, inline with the request
+    // that caused the insert -- never throws, never blocks or fails the
+    // insert: each trigger's own failure is caught and logged individually
+    // so one broken trigger can't take another one (or the insert) down
+    // with it. See the `triggers` table's own comment for why this isn't
+    // at-least-once delivery.
+    public function fireTriggers(int $projectId, string $tableName, string $event, array $row): void
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT name, integration_name, request_json FROM triggers WHERE project_id = ? AND table_name = ? AND event = ?'
+        );
+        $stmt->execute([$projectId, $tableName, $event]);
+        $triggers = $stmt->fetchAll();
+        if (!$triggers) {
+            return;
+        }
+
+        $context = ['row' => $row];
+        foreach ($triggers as $t) {
+            try {
+                $spec   = json_decode($t['request_json'], true) ?? [];
+                $method = strtoupper((string)($spec['method'] ?? 'POST'));
+                $path   = (string)($spec['path'] ?? '');
+                $bodySpec = $spec['body'] ?? [];
+                $body = [];
+                foreach ((array)$bodySpec as $key => $valueSpec) {
+                    $body[$key] = is_array($valueSpec) ? self::resolveValueSpec($valueSpec, $context) : $valueSpec;
+                }
+                $this->callIntegration($projectId, $t['integration_name'], $method, $path, $body);
+            } catch (\Throwable $e) {
+                sb_log('trigger', 'delivery failed', [
+                    'project_id' => $projectId, 'trigger' => $t['name'], 'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
+    // ─── Bot-visible meta tag resolvers (registration only -- matching and ───
+    // ─── HTML injection happen in site-server/router.php, not here) ──────────
+
+    public function createMetaResolver(int $projectId, string $name, string $pathPattern, array $lookup, array $meta): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO meta_resolvers (project_id, name, path_pattern, lookup_json, meta_json)
+             VALUES (?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE path_pattern = VALUES(path_pattern), lookup_json = VALUES(lookup_json), meta_json = VALUES(meta_json)'
+        );
+        $stmt->execute([$projectId, $name, $pathPattern, json_encode($lookup), json_encode($meta)]);
+        return $this->getMetaResolver($projectId, $name);
+    }
+
+    public function listMetaResolvers(int $projectId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM meta_resolvers WHERE project_id = ? ORDER BY name');
+        $stmt->execute([$projectId]);
+        return array_map([self::class, 'decodeMetaResolverRow'], self::castRows($stmt->fetchAll(), ['id', 'project_id']));
+    }
+
+    public function getMetaResolver(int $projectId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM meta_resolvers WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_id']);
+        return $row === null ? null : self::decodeMetaResolverRow($row);
+    }
+
+    private static function decodeMetaResolverRow(array $row): array
+    {
+        $row['lookup_json'] = json_decode($row['lookup_json'], true);
+        $row['meta_json']   = json_decode($row['meta_json'], true);
+        return $row;
+    }
+
+    public function deleteMetaResolver(int $projectId, string $name): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM meta_resolvers WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        return $stmt->rowCount() > 0;
     }
 }

@@ -84,6 +84,108 @@ function register_data_routes(\SupaBein\Router $router): void
         json_out(['token' => $token, 'user' => $row]);
     });
 
+    // POST /v1/data/:project_id/:table_name/forgot — generate a reset token
+    // for a project's own end-user table (the project-scoped counterpart to
+    // the platform's own /v1/auth/forgot). Same identifier auto-detection as
+    // /login: whichever non-password column the caller sends becomes both
+    // the lookup key and, if an auth email provider is registered, the send-
+    // to address. Always the same generic response regardless of whether the
+    // identifier matched a row -- same enumeration protection as the
+    // platform's own /auth/forgot, deliberately not changed by whether an
+    // email provider is registered or whether dispatch succeeds.
+    $router->post('/v1/data/:project_id/:table_name/forgot', function (array $req): void {
+        $projectId = (int)$req['params']['project_id'];
+        $tableName = $req['params']['table_name'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+
+        $table = $catalog->getTable($projectId, $tableName);
+        if (!$table) abort(404, 'Table not found');
+
+        $colRows  = $catalog->listColumns((int)$table['id']);
+        $colTypes = array_column($colRows, 'data_type', 'col_name');
+
+        $passwordCol = null;
+        foreach ($colTypes as $col => $type) {
+            if ($type === 'PASSWORD') { $passwordCol = $col; break; }
+        }
+        if ($passwordCol === null) abort(400, 'This table has no PASSWORD column');
+
+        $allowedCols   = array_column($colRows, 'col_name');
+        $identifierCol = null;
+        foreach ($allowedCols as $col) {
+            if ($col !== $passwordCol && isset($req['body'][$col])) {
+                $identifierCol = $col;
+                break;
+            }
+        }
+        if ($identifierCol === null) abort(422, 'No identifier column found in request body');
+        $identVal = (string)($req['body'][$identifierCol] ?? '');
+        if ($identVal === '') abort(422, 'Identifier value is required');
+
+        \SupaBein\RateLimit::checkProject($projectId);
+
+        $generic = ['message' => 'If that account exists, a password reset link has been sent to it.'];
+
+        $stmt = \App::get('db')->prepare('SELECT id FROM `' . $table['physical_name'] . '` WHERE `' . $identifierCol . '` = ? LIMIT 1');
+        $stmt->execute([$identVal]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            json_out($generic);
+            return;
+        }
+
+        $token = $catalog->createProjectPasswordResetToken($projectId, $tableName, (int)$row['id']);
+        try {
+            $catalog->dispatchForgotPasswordEmail($projectId, $identVal, $token);
+        } catch (\Throwable $e) {
+            sb_log('auth-email', 'forgot-password dispatch failed', ['project_id' => $projectId, 'error' => $e->getMessage()]);
+        }
+
+        json_out($generic);
+    });
+
+    // POST /v1/data/:project_id/:table_name/reset — exchange a raw token
+    // (from the emailed link) for a new password, and log the user straight
+    // in with a fresh project_user token, mirroring /login's response shape.
+    $router->post('/v1/data/:project_id/:table_name/reset', function (array $req): void {
+        $projectId = (int)$req['params']['project_id'];
+        $tableName = $req['params']['table_name'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+
+        $token    = (string)($req['body']['token'] ?? '');
+        $password = (string)($req['body']['password'] ?? '');
+        if ($token === '' || $password === '') abort(422, 'token and password are required');
+        if (strlen($password) < 8) abort(422, 'Password must be at least 8 characters');
+
+        $table = $catalog->getTable($projectId, $tableName);
+        if (!$table) abort(404, 'Table not found');
+
+        $colRows  = $catalog->listColumns((int)$table['id']);
+        $colTypes = array_column($colRows, 'data_type', 'col_name');
+        $passwordCol = null;
+        foreach ($colTypes as $col => $type) {
+            if ($type === 'PASSWORD') { $passwordCol = $col; break; }
+        }
+        if ($passwordCol === null) abort(400, 'This table has no PASSWORD column');
+
+        $rowId = $catalog->consumeProjectPasswordResetToken($projectId, $tableName, $token);
+        if ($rowId === null) abort(401, 'Invalid or expired reset token');
+
+        $pdo = \App::get('db');
+        $pdo->prepare('UPDATE `' . $table['physical_name'] . '` SET `' . $passwordCol . '` = ? WHERE id = ?')
+            ->execute([password_hash($password, PASSWORD_BCRYPT), $rowId]);
+
+        $config = \App::get('config');
+        $now    = time();
+        $projectUserTtl = (int)($config['PROJECT_USER_JWT_TTL'] ?? 2592000);
+        $jwt = JWT::encode([
+            'sub' => $rowId, 'pid' => $projectId, 'table' => $tableName, 'type' => 'project_user',
+            'iat' => $now, 'exp' => $now + $projectUserTtl,
+        ], $config['JWT_SECRET'], $config['JWT_ALGO']);
+
+        json_out(['message' => 'Password updated successfully.', 'token' => $jwt]);
+    });
+
     $router->get(
         '/v1/data/:project_id/:table_name',
         [\SupaBein\Crud::class, 'handleList'],

@@ -228,8 +228,23 @@ class Crud
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
         if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
         if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
+        if ($row) self::fireInsertTriggers($projectId, $tableName, $row);
         if ($row) [$row] = self::castScalarCols([$row], $colTypes);
         json_out($row, 201);
+    }
+
+    // Best-effort, never allowed to affect the insert's own response --
+    // Catalog::fireTriggers() already catches per-trigger failures
+    // internally, this wraps the lookup query itself too. Runs against the
+    // already-password-masked, JSON-decoded row so a trigger's own template
+    // never sees a bcrypt hash and can address JSON columns by dot-path.
+    private static function fireInsertTriggers(int $projectId, string $tableName, array $row): void
+    {
+        try {
+            \SupaBein\Catalog::getInstance()->fireTriggers($projectId, $tableName, 'insert', $row);
+        } catch (\Throwable $e) {
+            sb_log('trigger', 'fireTriggers lookup failed', ['project_id' => $projectId, 'table' => $tableName, 'error' => $e->getMessage()]);
+        }
     }
 
     // ─── BATCH INSERT ────────────────────────────────────────────────────────
@@ -276,6 +291,7 @@ class Crud
             if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
             if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
             if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
+            if ($row) self::fireInsertTriggers($projectId, $tableName, $row);
             $inserted[] = $row;
         }
 
