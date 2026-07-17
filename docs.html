@@ -235,6 +235,20 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#errors-clear">DELETE (clear all)</a>
   </div>
   <div class="sb-group">
+    <span class="sb-label">Integrations</span>
+    <a class="sb-link" href="#integrations-create">Register an integration</a>
+    <a class="sb-link" href="#integrations-list">List integrations</a>
+    <a class="sb-link" href="#integrations-delete">Delete an integration</a>
+    <a class="sb-link" href="#integrations-proxy">Call it (proxy)</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Webhooks</span>
+    <a class="sb-link" href="#webhooks-create">Register a webhook</a>
+    <a class="sb-link" href="#webhooks-list">List webhooks</a>
+    <a class="sb-link" href="#webhooks-delete">Delete a webhook</a>
+    <a class="sb-link" href="#webhooks-receive">The public receiver</a>
+  </div>
+  <div class="sb-group">
     <span class="sb-label">Access Tokens</span>
     <a class="sb-link" href="#tokens-list">GET /auth/tokens</a>
     <a class="sb-link" href="#tokens-create">POST /auth/tokens</a>
@@ -1271,6 +1285,153 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
     <div class="code-wrap"><pre class="code" id="c-errclear">curl -X DELETE "https://your-domain/api/v1/projects/1/errors" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-errclear',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Integrations ── -->
+<h2 id="integrations-create">Integrations</h2>
+<p>A registered secret + a hard-locked <code>base_url</code> that SupaBein calls on your project's behalf, for the one thing a static, backend-less app can never do safely on its own: talk to a third-party API that requires a secret key (a payments provider, an SMS/WhatsApp provider, anything like that). The secret is <strong>write-only</strong>, the same trust model as the <code>PASSWORD</code> column type — no <code>GET</code> on this resource ever returns it, and it never touches the client bundle or a git repo.</p>
+
+<div class="endpoint" id="integrations-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/integrations</span>
+    <span class="desc">Register (or replace) an integration</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-intreg">curl -X POST "https://your-domain/api/v1/projects/1/integrations" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "paystack",
+    "base_url": "https://api.paystack.co/",
+    "secret": "sk_live_...",
+    "auth_style": "bearer",
+    "allowed_project_user_paths": ["bank/resolve"]
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-intreg',this)">Copy</button></div>
+    <p><strong>Owner JWT or PAT only</strong> — never a project_user token. <code>base_url</code> must be <code>https://</code> and is a hard prefix: the proxy only ever forwards requests whose resolved URL stays under it, and both registration and every call re-check that the host doesn't resolve to a private/internal address (blocks pointing an integration at your own infrastructure).</p>
+    <p><code>auth_style</code> is one of <code>bearer</code> (<code>Authorization: Bearer &lt;secret&gt;</code>), <code>header:X-Api-Key</code> (a literal header name of your choice), or <code>query:api_key</code> (a literal query param name) — enough to cover Paystack, most SMS/WhatsApp providers, and Meta's Graph API without needing arbitrary request-shaping logic.</p>
+    <p><code>allowed_project_user_paths</code> is optional and defaults to <code>null</code>, meaning <strong>no project_user may ever call this integration's proxy</strong> — only the project's own owner JWT/PAT can. List specific request paths (exact match, or ending in <code>/</code> to match everything under that prefix) to let any authenticated end-user trigger just those calls — e.g. letting a business owner resolve their own bank account before you save their payout details, without giving them the secret itself.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="integrations-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/projects/:id/integrations</span>
+    <span class="desc">List integrations (never includes the secret)</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-intlist">curl "https://your-domain/api/v1/projects/1/integrations" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-intlist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="integrations-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/integrations/:name</span>
+    <span class="desc">Delete an integration</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-intdel">curl -X DELETE "https://your-domain/api/v1/projects/1/integrations/paystack" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-intdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="integrations-proxy">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/integrations/:name/proxy</span>
+    <span class="desc">Call the integration</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-intproxy">curl -X POST "https://your-domain/api/v1/projects/1/integrations/paystack/proxy" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "POST",
+    "path": "subaccount",
+    "body": {"business_name": "Lois Stores", "settlement_bank": "058", "account_number": "0123456789", "percentage_charge": 2}
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-intproxy',this)">Copy</button></div>
+    <p>SupaBein resolves <code>base_url + path</code>, injects the stored secret per <code>auth_style</code>, makes the request server-side, and returns <code>{"status": &lt;upstream HTTP status&gt;, "body": &lt;upstream response, parsed if JSON&gt;}</code>. The caller never sees the secret. Redirects are never followed. <code>Authorization</code> accepts the project's own owner JWT/PAT, or a <a href="#data-login">project_user token</a> if this integration's <code>allowed_project_user_paths</code> opts the requested <code>path</code> in — otherwise a project_user call is rejected with 403.</p>
+  </div>
+</div>
+
+<!-- ── Webhooks ── -->
+<h2 id="webhooks-create">Signed Webhooks</h2>
+<p>Lets an external service (a payments provider confirming a charge, for example) tell your project something happened, automatically — no human, no separate hosting platform. On each verified delivery, SupaBein applies a fixed, declarative column-update template to one row of one of your project's own tables. This is a <strong>bounded, not arbitrary</strong>, mapping — the same reasoning that makes a policy's <code>constraint_sql</code> safe as an opaque-but-bounded string applies here too; a webhook can never run arbitrary code.</p>
+
+<div class="endpoint" id="webhooks-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/webhooks</span>
+    <span class="desc">Register (or replace) a webhook</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-whreg">curl -X POST "https://your-domain/api/v1/projects/1/webhooks" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "paystack-charge-success",
+    "signature_header": "x-paystack-signature",
+    "signature_algorithm": "hmac-sha512",
+    "signature_secret": "sk_live_...",
+    "match": { "event": "charge.success" },
+    "write": {
+      "table": "orders",
+      "match_column": "payment_reference",
+      "match_value_path": "data.reference",
+      "set": {
+        "payment_status": { "literal": "paid" },
+        "amount_confirmed_kobo": { "path": "data.amount" }
+      }
+    }
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-whreg',this)">Copy</button></div>
+    <p><strong>Owner JWT or PAT only.</strong> <code>signature_algorithm</code> is <code>hmac-sha256</code> or <code>hmac-sha512</code>. <code>match</code> is optional — if set, a delivery whose payload doesn't match every key (resolved as a dot-path, e.g. <code>"event"</code> or <code>"data.event"</code>) is a no-op, not an error. <code>write.table</code>/<code>match_column</code>/every key in <code>write.set</code> are validated against your project's real columns at registration time, so a typo fails loudly here instead of silently on every real delivery.</p>
+    <p>Each <code>write.set</code> value is either <code>{"literal": ...}</code> (a fixed value) or <code>{"path": "a.b"}</code> (pulled from the payload via dot-path) — never an expression. The write is <strong>idempotent</strong>: if every target column already holds the value the write would set, it's skipped — safe against the at-least-once redelivery every real webhook sender (Paystack included) does.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="webhooks-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/projects/:id/webhooks</span>
+    <span class="desc">List webhooks (never includes the signing secret)</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-whlist">curl "https://your-domain/api/v1/projects/1/webhooks" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-whlist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="webhooks-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/webhooks/:name</span>
+    <span class="desc">Delete a webhook</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-whdel">curl -X DELETE "https://your-domain/api/v1/projects/1/webhooks/paystack-charge-success" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-whdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="webhooks-receive">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/webhooks/:name</span>
+    <span class="desc">The public receiver — give this URL to the external service, no auth header needed</span>
+  </div>
+  <div class="endpoint-body">
+    <p>No <code>Authorization</code> header — the sender proves itself via the signature header you configured, verified over the exact raw request body. An invalid or missing signature gets <strong>401</strong> and no write is attempted. Anything else — including a payload <code>match</code> didn't match, or a row that couldn't be found — returns <strong>200</strong> with <code>{"received": true, "applied": &lt;bool&gt;, ...}</code>, by design: most senders retry aggressively on a non-2xx response, and a slow/erroring receiver causes duplicate-delivery storms, not safety. Check the response body (or your project's Error Logs) to see what actually happened, don't infer it from the status code.</p>
   </div>
 </div>
 
