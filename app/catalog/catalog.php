@@ -2147,7 +2147,22 @@ class Catalog
 
         $config = \App::get('config');
         $client = \make_ai_client($config, null, null);
-        $client->generateJsonWithHistory((string)($assistant['system_prompt'] ?? ''), $history, $lastUserMessage);
+        try {
+            $client->generateJsonWithHistory((string)($assistant['system_prompt'] ?? ''), $history, $lastUserMessage);
+        } catch (\RuntimeException $e) {
+            // These clients are built for the app-builder's structured-JSON
+            // contract and throw if the model's reply isn't itself valid
+            // JSON -- expected and common for a plain conversational chat
+            // reply ("Hello there!" is not JSON). Every provider client sets
+            // its raw text *before* that throw, so degrade gracefully to it
+            // instead of failing the whole chat turn -- but only for that
+            // specific, expected failure mode; a real network/API error
+            // (empty raw text) still propagates.
+            $raw = $client->getLastRawText();
+            if ($raw === '') {
+                throw $e;
+            }
+        }
 
         $reply    = $client->getLastRawText();
         $usage    = $client->getLastUsage();
