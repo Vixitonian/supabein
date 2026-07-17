@@ -5,12 +5,18 @@ SET NAMES utf8mb4;
 SET foreign_key_checks = 0;
 
 CREATE TABLE IF NOT EXISTS `users` (
-    `id`            INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    `email`         VARCHAR(255) NOT NULL,
-    `password_hash` VARCHAR(255) NOT NULL,
-    `role`          ENUM('owner','member') NOT NULL DEFAULT 'owner',
-    `country`       CHAR(2) DEFAULT NULL,
-    `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `id`                 INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `email`              VARCHAR(255) NOT NULL,
+    `password_hash`      VARCHAR(255) NOT NULL,
+    `role`                ENUM('owner','member') NOT NULL DEFAULT 'owner',
+    `country`             CHAR(2) DEFAULT NULL,
+    -- Platform operator flag, distinct from `role` (which is a per-account
+    -- thing every SupaBein user has). Gates /sb-admin and the admin API
+    -- only -- never granted through the API itself, only ever set directly
+    -- against the DB, the same way Zera's owning account's `ai_credits.
+    -- unlimited` grant is seeded as data rather than a code branch.
+    `is_platform_admin`  TINYINT(1) NOT NULL DEFAULT 0,
+    `created_at`          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY `uq_email` (`email`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -367,6 +373,40 @@ CREATE TABLE IF NOT EXISTS `meta_resolvers` (
     `updated_at`     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_project_resolver` (`project_id`, `name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Hosted-AI credit balance, one row per platform account (not per project --
+-- every project a user owns draws from the same pool, same as PATs are
+-- account-wide by default). `unlimited` is the free-access grant mechanism:
+-- checked instead of `balance`, never a hardcoded user_id check in code, so
+-- granting anyone (Zera's owning account first, others later) is the exact
+-- same operation -- setting a column, not shipping a new code path. Auto-
+-- vivified with balance=0 on first use rather than requiring pre-creation.
+CREATE TABLE IF NOT EXISTS `ai_credits` (
+    `user_id`     INT UNSIGNED NOT NULL PRIMARY KEY,
+    `balance`     BIGINT NOT NULL DEFAULT 0, -- micro-USD: 1,000,000 = $1.00 (same unit convention as Google Ads' billing API); signed, can go slightly negative after the call that crosses zero
+    `unlimited`   TINYINT(1) NOT NULL DEFAULT 0,
+    `updated_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Per-project registration of a named, hosted AI chat capability. Unlike
+-- Integrations, this holds no secret at all -- the provider key is
+-- SupaBein's own (see app/routes/ai_routes.php's make_ai_client()), reused
+-- exactly as the AI app-builder itself already does, metered against the
+-- calling project's owning account's `ai_credits` instead of a per-project
+-- secret. `system_prompt` is locked server-side -- a caller can only ever
+-- supply user-turn messages, never override it.
+CREATE TABLE IF NOT EXISTS `ai_assistants` (
+    `id`                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`          INT UNSIGNED NOT NULL,
+    `name`                VARCHAR(64) NOT NULL,
+    `system_prompt`       TEXT DEFAULT NULL,
+    `allow_project_user`  TINYINT(1) NOT NULL DEFAULT 0,
+    `created_at`          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_assistant` (`project_id`, `name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET foreign_key_checks = 1;

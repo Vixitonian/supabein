@@ -126,6 +126,9 @@ const PAT_PROJECT_SCOPED_ROUTES = [
     '/v1/projects/:id/triggers/:name',
     '/v1/projects/:id/meta-resolvers',
     '/v1/projects/:id/meta-resolvers/:name',
+    '/v1/projects/:id/ai-assistants',
+    '/v1/projects/:id/ai-assistants/:name',
+    '/v1/projects/:id/ai-assistants/:name/chat',
     '/v1/projects/:id/errors',
     '/v1/projects/:id/errors/download',
     '/v1/projects/:id/requirements',
@@ -217,6 +220,40 @@ function auth_middleware(array $req, callable $next): void
         } catch (\Throwable) {
             // resolve_token already validated it; ignore decode errors here
         }
+    }
+
+    $req['auth'] = $auth;
+    $next($req);
+}
+
+/**
+ * Gates /sb-admin's API (see admin_routes.php) to the platform operator
+ * only. Deliberately stricter than auth_middleware: rejects a PAT outright
+ * (a leaked automation token should never be able to grant AI credit or see
+ * every user on the platform) and requires a fresh DB check of
+ * `users.is_platform_admin` on every request rather than trusting a JWT
+ * claim — that flag is only ever set directly against the DB (see its own
+ * schema comment), so a stale cached claim in an old token could otherwise
+ * outlive a revoked grant.
+ */
+function platform_admin_middleware(array $req, callable $next): void
+{
+    $header = $req['headers']['Authorization'] ?? '';
+    if (!preg_match('/^Bearer\s+(.+)$/i', $header, $m)) {
+        abort(401, 'Missing or malformed Authorization header');
+    }
+    $rawToken = $m[1];
+    if (str_starts_with($rawToken, 'sb_pat_')) {
+        abort(403, 'Personal Access Tokens cannot access the admin API.');
+    }
+
+    $auth = resolve_token($rawToken);
+    if ($auth === null || ($auth['role'] ?? '') !== 'owner' || ($auth['project_id'] ?? null) !== null) {
+        abort(401, 'Invalid or expired token');
+    }
+
+    if (!\SupaBein\Catalog::getInstance()->isPlatformAdmin((int)$auth['user_id'])) {
+        abort(403, 'This account is not a platform admin.');
     }
 
     $req['auth'] = $auth;

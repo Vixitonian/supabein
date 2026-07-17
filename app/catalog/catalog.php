@@ -1988,4 +1988,204 @@ class Catalog
         $stmt->execute([$projectId, $name]);
         return $stmt->rowCount() > 0;
     }
+
+    // ─── Hosted AI credits (per platform account) ──────────────────────────────
+
+    // Rough, deliberately flat per-provider blended rate (input+output
+    // averaged, not tracked separately) in micro-USD per 1,000 tokens --
+    // an estimate for internal metering, not a reconciliation against real
+    // provider invoices. Easy to retune here as real usage patterns emerge;
+    // intentionally not a full per-model price table for v1 (FallbackAiClient
+    // can switch models turn-to-turn, which would make a precise per-model
+    // ledger meaningfully harder for very little accuracy gain right now).
+    private const AI_PRICE_MICRO_USD_PER_1K_TOKENS = [
+        'anthropic'  => 10000,  // ~$0.01 / 1K tokens
+        'gemini'     => 500,    // ~$0.0005 / 1K tokens
+        'nvidia'     => 500,
+        'openrouter' => 500,
+    ];
+    private const AI_PRICE_DEFAULT_MICRO_USD_PER_1K_TOKENS = 5000;
+
+    public function getOrCreateAiCredit(int $userId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM ai_credits WHERE user_id = ?');
+        $stmt->execute([$userId]);
+        $row = $stmt->fetch();
+        if ($row) {
+            return self::castRow($row, ['user_id', 'balance', 'unlimited']);
+        }
+        $this->pdo->prepare('INSERT IGNORE INTO ai_credits (user_id, balance, unlimited) VALUES (?, 0, 0)')->execute([$userId]);
+        $stmt->execute([$userId]);
+        return self::castRow($stmt->fetch(), ['user_id', 'balance', 'unlimited']);
+    }
+
+    public function hasAiCredit(int $userId): bool
+    {
+        $credit = $this->getOrCreateAiCredit($userId);
+        return (bool)$credit['unlimited'] || (int)$credit['balance'] > 0;
+    }
+
+    // Atomic, race-safe decrement -- a no-op for an unlimited account (never
+    // even touches the row, so an unlimited grant costs nothing to check on
+    // every call). Allowed to take balance slightly negative on the one call
+    // that crosses zero (the actual cost is only known after the provider
+    // responds) -- hasAiCredit() then blocks every call after that one.
+    public function debitAiCredit(int $userId, int $microUsd): void
+    {
+        if ($microUsd <= 0) return;
+        $this->pdo->prepare(
+            'UPDATE ai_credits SET balance = balance - ? WHERE user_id = ? AND unlimited = 0'
+        )->execute([$microUsd, $userId]);
+    }
+
+    // Admin-only (see platform_admin_middleware). Either field may be
+    // omitted to leave it unchanged.
+    public function setAiCreditGrant(int $userId, ?bool $unlimited, ?int $balance): array
+    {
+        $this->getOrCreateAiCredit($userId); // ensure the row exists first
+        $sets   = [];
+        $params = [];
+        if ($unlimited !== null) { $sets[] = 'unlimited = ?'; $params[] = $unlimited ? 1 : 0; }
+        if ($balance   !== null) { $sets[] = 'balance = ?';   $params[] = $balance; }
+        if ($sets) {
+            $params[] = $userId;
+            $this->pdo->prepare('UPDATE ai_credits SET ' . implode(', ', $sets) . ' WHERE user_id = ?')->execute($params);
+        }
+        return $this->getOrCreateAiCredit($userId);
+    }
+
+    // Estimates cost from FallbackAiClient's getLastUsage()/getActiveProvider()
+    // shape and debits it in one step -- the one place both concerns meet, so
+    // every caller (ai_assistant_routes.php today, anything else later) gets
+    // the same math without duplicating it.
+    public function debitAiUsage(int $userId, string $provider, array $usage): int
+    {
+        $totalTokens = (int)($usage['total_tokens'] ?? 0);
+        $rate = self::AI_PRICE_MICRO_USD_PER_1K_TOKENS[$provider] ?? self::AI_PRICE_DEFAULT_MICRO_USD_PER_1K_TOKENS;
+        $cost = (int)ceil(($totalTokens / 1000) * $rate);
+        $this->debitAiCredit($userId, $cost);
+        return $cost;
+    }
+
+    // ─── AI assistants (per-project, hosted -- no secret storage) ─────────────
+
+    public function createAiAssistant(int $projectId, string $name, ?string $systemPrompt, bool $allowProjectUser): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO ai_assistants (project_id, name, system_prompt, allow_project_user)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE system_prompt = VALUES(system_prompt), allow_project_user = VALUES(allow_project_user)'
+        );
+        $stmt->execute([$projectId, $name, $systemPrompt, $allowProjectUser ? 1 : 0]);
+        return $this->getAiAssistant($projectId, $name);
+    }
+
+    public function listAiAssistants(int $projectId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM ai_assistants WHERE project_id = ? ORDER BY name');
+        $stmt->execute([$projectId]);
+        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'allow_project_user']);
+    }
+
+    public function getAiAssistant(int $projectId, string $name): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT * FROM ai_assistants WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'allow_project_user']);
+    }
+
+    public function deleteAiAssistant(int $projectId, string $name): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM ai_assistants WHERE project_id = ? AND name = ?');
+        $stmt->execute([$projectId, $name]);
+        return $stmt->rowCount() > 0;
+    }
+
+    // Runs a chat turn through SupaBein's own hosted AI (the exact same
+    // make_ai_client()/FallbackAiClient the app-builder uses -- no per-
+    // project provider key, no new outbound-call machinery). The registered
+    // system_prompt is always prepended server-side; `messages` may only
+    // ever contribute user/assistant turns, never a system role, so a
+    // caller can't override the locked prompt. Throws RuntimeException on
+    // insufficient credit (caller maps that to 402) -- deliberately checked
+    // here, right before the real call, not earlier in the request
+    // lifecycle, so it reflects the balance at the moment of spend.
+    public function callAiAssistant(int $projectId, string $name, array $messages): array
+    {
+        $assistant = $this->getAiAssistant($projectId, $name);
+        if ($assistant === null) {
+            throw new \RuntimeException('AI assistant not found');
+        }
+        $project = $this->getProjectByIdInternal($projectId);
+        if ($project === null) {
+            throw new \RuntimeException('Project not found');
+        }
+        $ownerUserId = (int)$project['owner_user_id'];
+
+        if (!$this->hasAiCredit($ownerUserId)) {
+            throw new \RuntimeException('INSUFFICIENT_CREDIT');
+        }
+
+        $history = [];
+        $lastUserMessage = '';
+        foreach ($messages as $m) {
+            $role = ($m['role'] ?? '') === 'assistant' ? 'model' : 'user';
+            $text = (string)($m['content'] ?? '');
+            if ($text === '') continue;
+            if ($role === 'user') $lastUserMessage = $text;
+            $history[] = ['role' => $role, 'text' => $text];
+        }
+        // The client's own generateJsonWithHistory() appends one final user
+        // turn on top of history -- pop the last user message back off so it
+        // isn't duplicated.
+        if ($history && end($history)['role'] === 'user') {
+            array_pop($history);
+        }
+        if ($lastUserMessage === '') {
+            throw new \RuntimeException('At least one user message is required');
+        }
+
+        $config = \App::get('config');
+        $client = \make_ai_client($config, null, null);
+        $client->generateJsonWithHistory((string)($assistant['system_prompt'] ?? ''), $history, $lastUserMessage);
+
+        $reply    = $client->getLastRawText();
+        $usage    = $client->getLastUsage();
+        $provider = $client->getActiveProvider();
+        $model    = $client->getActiveModel();
+
+        $costMicroUsd = $this->debitAiUsage($ownerUserId, $provider, $usage);
+
+        return [
+            'reply'    => $reply,
+            'provider' => $provider,
+            'model'    => $model,
+            'usage'    => $usage,
+            'cost_micro_usd' => $costMicroUsd,
+        ];
+    }
+
+    // ─── Platform admin (see app/routes/admin_routes.php, /sb-admin) ──────────
+
+    public function isPlatformAdmin(int $userId): bool
+    {
+        $stmt = $this->pdo->prepare('SELECT is_platform_admin FROM users WHERE id = ?');
+        $stmt->execute([$userId]);
+        return (bool)$stmt->fetchColumn();
+    }
+
+    // One row per platform account, with its AI credit state and a project
+    // count -- everything /sb-admin's user list needs in one query.
+    public function listUsersForAdmin(): array
+    {
+        $stmt = $this->pdo->query(
+            'SELECT u.id, u.email, u.role, u.is_platform_admin, u.created_at,
+                    COALESCE(c.balance, 0) AS ai_balance, COALESCE(c.unlimited, 0) AS ai_unlimited,
+                    (SELECT COUNT(*) FROM projects p WHERE p.owner_user_id = u.id) AS project_count
+             FROM users u
+             LEFT JOIN ai_credits c ON c.user_id = u.id
+             ORDER BY u.id'
+        );
+        return self::castRows($stmt->fetchAll(), ['id', 'is_platform_admin', 'ai_balance', 'ai_unlimited', 'project_count']);
+    }
 }
