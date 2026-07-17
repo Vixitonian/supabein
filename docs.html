@@ -269,6 +269,13 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#meta-delete">Delete a resolver</a>
   </div>
   <div class="sb-group">
+    <span class="sb-label">AI Assistants</span>
+    <a class="sb-link" href="#ai-assistant-create">Register an assistant</a>
+    <a class="sb-link" href="#ai-assistant-list">List assistants</a>
+    <a class="sb-link" href="#ai-assistant-delete">Delete an assistant</a>
+    <a class="sb-link" href="#ai-assistant-chat">Chat with it</a>
+  </div>
+  <div class="sb-group">
     <span class="sb-label">Access Tokens</span>
     <a class="sb-link" href="#tokens-list">GET /auth/tokens</a>
     <a class="sb-link" href="#tokens-create">POST /auth/tokens</a>
@@ -1654,6 +1661,78 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
     <div class="code-wrap"><pre class="code" id="c-mrdel">curl -X DELETE "https://your-domain/api/v1/projects/1/meta-resolvers/storefront" \
   -H "Authorization: Bearer YOUR_TOKEN"</pre>
     <button class="copy-btn" onclick="copyEl('c-mrdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── AI Assistants ── -->
+<h2 id="ai-assistant-create">AI Assistants</h2>
+<p>A hosted AI chat capability for your project — unlike <a href="#integrations-create">Integrations</a>, you don't bring your own provider API key. SupaBein calls its own AI provider on your behalf, the same infrastructure the AI app-builder itself runs on, and meters usage against <strong>your account's AI credit balance</strong> (shared across every project you own — not a per-project budget).</p>
+<div class="callout">Every call is billed to the credit balance of the SupaBein account that owns the project, regardless of who or what actually calls it (your own token, a PAT, or an end-user's project_user token). A registered <code>system_prompt</code> is always enforced server-side — a caller can only ever supply conversation turns, never override it. Out of credit? Calls return <strong>402</strong> until your account is topped up.</div>
+
+<div class="endpoint" id="ai-assistant-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/ai-assistants</span>
+    <span class="desc">Register (or replace) an assistant</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aacreate">curl -X POST "https://your-domain/api/v1/projects/1/ai-assistants" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "support-bot",
+    "system_prompt": "You are Lois Stores'"'"' support assistant. Be concise and friendly.",
+    "allow_project_user": true
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-aacreate',this)">Copy</button></div>
+    <p><code>system_prompt</code> is optional (omit for a generic assistant with no special instructions) and locked — end users can never see or override it. <code>allow_project_user</code> defaults to <code>false</code> (owner/PAT-only); set it to let any authenticated end user of your project (a <a href="#data-login">project_user token</a>) chat with it directly — the natural setting for a customer-facing support/chat feature.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="ai-assistant-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/projects/:id/ai-assistants</span>
+    <span class="desc">List assistants</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aalist">curl "https://your-domain/api/v1/projects/1/ai-assistants" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-aalist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="ai-assistant-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/ai-assistants/:name</span>
+    <span class="desc">Delete an assistant</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aadel">curl -X DELETE "https://your-domain/api/v1/projects/1/ai-assistants/support-bot" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-aadel',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="ai-assistant-chat">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/ai-assistants/:name/chat</span>
+    <span class="desc">Send a chat turn, get a reply</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aachat">curl -X POST "https://your-domain/api/v1/projects/1/ai-assistants/support-bot/chat" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "What are your store hours?"}
+    ]
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-aachat',this)">Copy</button></div>
+    <p><code>messages</code> is the full conversation so far (send prior turns back each time — there's no server-side session) — each item is <code>{"role": "user"|"assistant", "content": "..."}</code>. The final item must be a <code>user</code> turn. Returns <code>{"reply": "...", "provider": "...", "model": "...", "usage": {...}, "cost_micro_usd": N}</code>. <code>cost_micro_usd</code> is what this one call was billed (1,000,000 = $1.00) — useful for your own usage display, though the source of truth is always the account's actual balance.</p>
+    <p>Callable by the project's own owner/PAT, or by a project_user token if the assistant's <code>allow_project_user</code> is set. <strong>402</strong> if the owning account is out of AI credit and not on an unlimited grant.</p>
   </div>
 </div>
 
