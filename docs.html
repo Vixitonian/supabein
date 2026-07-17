@@ -1633,8 +1633,38 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
     }
   }'</pre>
     <button class="copy-btn" onclick="copyEl('c-mrcreate',this)">Copy</button></div>
-    <p><code>path_pattern</code> uses the same <code>:name</code> capture syntax as everything else on the platform, plus an optional trailing <code>/*</code> to match (and ignore) anything after that point — e.g. <code>/store/:slug/*</code> matches <code>/store/lois-stores/products/42</code> with <code>params.slug = "lois-stores"</code>. <code>lookup.match_value_path</code> must reference a captured param (<code>"params.&lt;name&gt;"</code>). Each <code>meta</code> value is a declarative spec resolved against <code>{"row": &lt;looked-up row&gt;, "params": {...}}</code>, with an optional same-shaped <code>fallback</code> tried if the primary resolves empty. The key <code>"title"</code> is special-cased into <code>&lt;title&gt;</code>; keys starting with <code>og:</code> or <code>twitter:</code> become <code>&lt;meta property="..."&gt;</code>; anything else becomes <code>&lt;meta name="..."&gt;</code> (e.g. <code>"description"</code>).</p>
+    <p><code>path_pattern</code> uses the same <code>:name</code> capture syntax as everything else on the platform, plus an optional trailing <code>/*</code> to match (and ignore) anything after that point — e.g. <code>/store/:slug/*</code> matches <code>/store/lois-stores/products/42</code> with <code>params.slug = "lois-stores"</code>. Each <code>meta</code> value is a declarative spec resolved against <code>{"row": &lt;looked-up row&gt;, "params": {...}}</code>, with an optional same-shaped <code>fallback</code> tried if the primary resolves empty. The key <code>"title"</code> is special-cased into <code>&lt;title&gt;</code>; keys starting with <code>og:</code> or <code>twitter:</code> become <code>&lt;meta property="..."&gt;</code>; anything else becomes <code>&lt;meta name="..."&gt;</code> (e.g. <code>"description"</code>).</p>
     <p>Only ever runs for a request from a known crawler UA (WhatsApp, facebookexternalhit, Twitterbot, Slackbot, Discordbot, LinkedInBot, and a handful of others) landing on an HTML document — a real visitor's browser, and every asset request, is completely unaffected.</p>
+  </div>
+</div>
+
+<div class="endpoint">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/meta-resolvers</span>
+    <span class="desc">Hostname-based lookup — for a business/tenant on its own subdomain</span>
+  </div>
+  <div class="endpoint-body">
+    <p><code>lookup.match_value_path</code> is normally <code>"params.&lt;name&gt;"</code> — a value captured from <code>path_pattern</code>. It can also be one of two reserved values that read the request's <strong>Host header</strong> instead, for the case where there's no path segment to capture from at all — e.g. a business's own <code>&lt;slug&gt;.your-domain</code> subdomain, whose bare root (<code>GET /</code>) is the natural URL to share:</p>
+    <table><tr><th>Value</th><th>Resolves to</th></tr>
+      <tr><td><code>"host"</code></td><td>The full Host header — match against a <code>domain</code>-style column for a fully custom domain.</td></tr>
+      <tr><td><code>"host.label"</code></td><td>Just the first label (the subdomain) — match against a <code>subdomain</code>-style column, e.g. <code>lois-stores</code> from <code>lois-stores.your-domain</code>.</td></tr>
+    </table>
+    <div class="code-wrap"><pre class="code" id="c-mrhost">curl -X POST "https://your-domain/api/v1/projects/1/meta-resolvers" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "storefront-subdomain",
+    "path_pattern": "/*",
+    "lookup": { "table": "businesses", "match_column": "subdomain", "match_value_path": "host.label" },
+    "meta": {
+      "title": { "path": "row.name" },
+      "og:description": { "path": "row.home_tagline" }
+    }
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-mrhost',this)">Copy</button></div>
+    <p>The two lookup sources compose — register both a path-based resolver (for a shared domain serving many tenants under one path prefix) and a hostname-based one (for per-tenant subdomains) on the same project.</p>
+    <div class="callout"><strong>Precedence when more than one resolver matches the same request</strong> (e.g. <code>lois-stores.your-domain/store/lois-stores</code> matches both a hostname-only <code>/*</code> resolver and a path resolver on <code>/store/:slug/*</code>): the resolver with the more specific <code>path_pattern</code> wins — a hostname-only catch-all (<code>/*</code> or <code>/</code>) is always the lowest-precedence fallback, ranked below anything with at least one literal path segment. This is deterministic and doesn't depend on registration order.</div>
   </div>
 </div>
 

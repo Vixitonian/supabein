@@ -222,18 +222,42 @@ function site_server_match_path_pattern(string $pattern, string $path): ?array
     return $params;
 }
 
-// Finds the first meta_resolver (registered for this hostname's project)
+// Ranks resolvers so a request matching more than one (e.g. a hostname
+// catch-all "/*" AND a path-specific "/store/:slug/*") resolves
+// deterministically instead of depending on registration/row order --
+// requested after the hostname-lookup gap below made that ambiguity a real
+// case, not just a hypothetical one. Tier 0 is any hostname-only catch-all
+// ("/*" or "/"); everything else is tier 1+, ranked by how many literal
+// (non-":param") path segments it has, then by raw pattern length --
+// "/store/:slug/*" (1 literal segment) beats "/*" (tier 0), and
+// "/store/:slug/reviews" would beat "/store/:slug/*" if both existed. A
+// deliberately simple heuristic, not a full route-precedence engine.
+function site_server_meta_resolver_specificity(string $pattern): array
+{
+    $isCatchAll = ($pattern === '/*' || $pattern === '/');
+    $segments = array_values(array_filter(explode('/', trim($pattern, '/')), fn($s) => $s !== '' && $s !== '*'));
+    $literalCount = 0;
+    foreach ($segments as $seg) {
+        if (!str_starts_with($seg, ':')) $literalCount++;
+    }
+    return [$isCatchAll ? 0 : 1, $literalCount, strlen($pattern)];
+}
+
+// Finds the highest-precedence meta_resolver (registered for this
+// hostname's project, see site_server_meta_resolver_specificity() above)
 // whose path_pattern matches the real request path, looks up the row it
 // points at, and returns the resulting HTML with <title>/<meta> tags
 // injected -- or null if nothing matched or the looked-up row doesn't
 // exist, in which case the caller falls through to serving the file
 // completely unmodified.
-function site_server_render_crawler_meta(PDO $pdo, int $projectId, string $reqPath, string $indexPath): ?string
+function site_server_render_crawler_meta(PDO $pdo, int $projectId, string $reqPath, string $host, string $indexPath): ?string
 {
     $stmt = $pdo->prepare('SELECT path_pattern, lookup_json, meta_json FROM meta_resolvers WHERE project_id = ?');
     $stmt->execute([$projectId]);
     $resolvers = $stmt->fetchAll();
     if (!$resolvers) return null;
+
+    usort($resolvers, fn($a, $b) => site_server_meta_resolver_specificity($b['path_pattern']) <=> site_server_meta_resolver_specificity($a['path_pattern']));
 
     foreach ($resolvers as $resolver) {
         $params = site_server_match_path_pattern($resolver['path_pattern'], $reqPath);
@@ -243,8 +267,21 @@ function site_server_render_crawler_meta(PDO $pdo, int $projectId, string $reqPa
         $meta   = json_decode($resolver['meta_json'], true);
         if (!is_array($lookup) || !is_array($meta)) continue;
 
-        $matchValue = site_server_resolve_dot_path(['params' => $params], (string)($lookup['match_value_path'] ?? ''));
-        if ($matchValue === null) continue;
+        // "host"/"host.label" are reserved lookup sources, not path
+        // captures -- resolve them directly from the Host header this
+        // request actually came in on, rather than through params (there
+        // may be no path segments to capture from at all, e.g. a bare
+        // subdomain-root request). Everything else still goes through the
+        // normal params.* dot-path resolution.
+        $matchPath = (string)($lookup['match_value_path'] ?? '');
+        if ($matchPath === 'host') {
+            $matchValue = $host;
+        } elseif ($matchPath === 'host.label') {
+            $matchValue = explode('.', $host)[0] ?? $host;
+        } else {
+            $matchValue = site_server_resolve_dot_path(['params' => $params], $matchPath);
+        }
+        if ($matchValue === null || $matchValue === '') continue;
 
         $tableStmt = $pdo->prepare('SELECT physical_name FROM project_tables WHERE project_id = ? AND table_name = ?');
         $tableStmt->execute([$projectId, (string)($lookup['table'] ?? '')]);
@@ -319,7 +356,7 @@ if (
     && !empty($registration['project_id'])
     && site_server_is_crawler($_SERVER['HTTP_USER_AGENT'] ?? '')
 ) {
-    $crawlerHtml = site_server_render_crawler_meta($pdo, (int)$registration['project_id'], $reqPathRaw, $fullPath);
+    $crawlerHtml = site_server_render_crawler_meta($pdo, (int)$registration['project_id'], $reqPathRaw, $host, $fullPath);
     if ($crawlerHtml !== null) {
         http_response_code(200);
         header('Content-Type: text/html; charset=utf-8');

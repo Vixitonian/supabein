@@ -66,8 +66,14 @@ function register_meta_resolver_routes(\SupaBein\Router $router): void
         if (!in_array($matchColumn, $cols, true)) {
             abort(422, "lookup.match_column \"$matchColumn\" not found on $lookupTable");
         }
-        if (!str_starts_with($matchPath, 'params.')) {
-            abort(422, 'lookup.match_value_path must reference a ":name" captured from path_pattern, e.g. "params.slug"');
+        // "host"/"host.label" are reserved lookup sources for a hostname-
+        // based resolver (e.g. one business per subdomain, matched with no
+        // path capture at all -- a bare subdomain root has no path segment
+        // to capture from). Everything else must be a "params.<name>"
+        // capture from path_pattern.
+        $validMatchPath = str_starts_with($matchPath, 'params.') || $matchPath === 'host' || $matchPath === 'host.label';
+        if (!$validMatchPath) {
+            abort(422, 'lookup.match_value_path must be "params.<name>" (a ":name" captured from path_pattern), "host" (the full Host header), or "host.label" (the first label of the Host header, i.e. the subdomain)');
         }
         if (!is_array($meta) || empty($meta)) {
             abort(422, 'meta must be a non-empty object, e.g. {"title": {"path": "row.name"}}');
