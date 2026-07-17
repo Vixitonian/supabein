@@ -101,7 +101,7 @@ try {
 
 $host = strtolower(explode(':', $_SERVER['HTTP_HOST'] ?? '')[0]);
 
-$stmt = $pdo->prepare('SELECT docroot, spa_mode FROM site_registry WHERE hostname = ?');
+$stmt = $pdo->prepare('SELECT docroot, spa_mode, project_id FROM site_registry WHERE hostname = ?');
 $stmt->execute([$host]);
 $registration = $stmt->fetch();
 
@@ -142,6 +142,154 @@ if ($fullPath !== $base && !str_starts_with($fullPath, $base . '/')) {
     exit;
 }
 
+// ─── Bot-visible meta tag injection (registered via
+// app/routes/meta_resolver_routes.php, POST /v1/projects/:id/meta-resolvers) ──
+//
+// Short, well-known, stable list of link-preview crawler User-Agents --
+// deliberately not exhaustive, just the common ones. A plain substring
+// match is enough; these UAs don't vary in casing/formatting in practice.
+const SITE_SERVER_CRAWLER_UA_NEEDLES = [
+    'whatsapp', 'facebookexternalhit', 'twitterbot', 'slackbot', 'discordbot',
+    'linkedinbot', 'telegrambot', 'redditbot', 'applebot', 'pinterest',
+    'skypeuripreview', 'vkshare', 'embedly', 'iframely', 'quora link preview',
+    'w3c_validator',
+];
+
+function site_server_is_crawler(string $userAgent): bool
+{
+    $ua = strtolower($userAgent);
+    foreach (SITE_SERVER_CRAWLER_UA_NEEDLES as $needle) {
+        if (str_contains($ua, $needle)) return true;
+    }
+    return false;
+}
+
+// Standalone duplicate of Catalog::resolveDotPath()/resolveValueSpec() --
+// this file deliberately never depends on the main app (see the top-of-file
+// docblock), so the same tiny declarative-spec resolver is re-implemented
+// here rather than requiring app/catalog/catalog.php.
+function site_server_resolve_dot_path(array $ctx, string $path): mixed
+{
+    $cursor = $ctx;
+    foreach (explode('.', $path) as $seg) {
+        if (!is_array($cursor) || !array_key_exists($seg, $cursor)) return null;
+        $cursor = $cursor[$seg];
+    }
+    return $cursor;
+}
+
+function site_server_resolve_value_spec(array $spec, array $ctx): mixed
+{
+    if (array_key_exists('literal', $spec)) return $spec['literal'];
+    if (array_key_exists('path', $spec)) return site_server_resolve_dot_path($ctx, (string)$spec['path']);
+    if (array_key_exists('template', $spec)) {
+        return preg_replace_callback('/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/', function ($m) use ($ctx) {
+            $v = site_server_resolve_dot_path($ctx, $m[1]);
+            if ($v === null) return '';
+            return is_scalar($v) ? (string)$v : json_encode($v);
+        }, (string)$spec['template']);
+    }
+    return null;
+}
+
+function site_server_resolve_value_spec_with_fallback(array $spec, array $ctx): mixed
+{
+    $val = site_server_resolve_value_spec($spec, $ctx);
+    if (($val === null || $val === '') && isset($spec['fallback']) && is_array($spec['fallback'])) {
+        return site_server_resolve_value_spec($spec['fallback'], $ctx);
+    }
+    return $val;
+}
+
+// Matches a registered "/store/:slug/*" style pattern against the real
+// request path, the same ":name" capture-group convention app/router.php
+// already uses -- kept identical on purpose so one syntax works everywhere
+// on the platform. A trailing "/*" matches (and discards) anything after
+// that point in the path. Returns the captured params, or null if no match.
+function site_server_match_path_pattern(string $pattern, string $path): ?array
+{
+    $regex = preg_replace_callback('/:([a-zA-Z_][a-zA-Z0-9_]*)/', fn($m) => '(?P<' . $m[1] . '>[^/]+)', $pattern);
+    if (str_ends_with($regex, '/*')) {
+        $regex = substr($regex, 0, -2) . '(?:/.*)?';
+    }
+    if (!preg_match('#^' . $regex . '$#', $path, $m)) {
+        return null;
+    }
+    $params = [];
+    foreach ($m as $k => $v) {
+        if (is_string($k)) $params[$k] = $v;
+    }
+    return $params;
+}
+
+// Finds the first meta_resolver (registered for this hostname's project)
+// whose path_pattern matches the real request path, looks up the row it
+// points at, and returns the resulting HTML with <title>/<meta> tags
+// injected -- or null if nothing matched or the looked-up row doesn't
+// exist, in which case the caller falls through to serving the file
+// completely unmodified.
+function site_server_render_crawler_meta(PDO $pdo, int $projectId, string $reqPath, string $indexPath): ?string
+{
+    $stmt = $pdo->prepare('SELECT path_pattern, lookup_json, meta_json FROM meta_resolvers WHERE project_id = ?');
+    $stmt->execute([$projectId]);
+    $resolvers = $stmt->fetchAll();
+    if (!$resolvers) return null;
+
+    foreach ($resolvers as $resolver) {
+        $params = site_server_match_path_pattern($resolver['path_pattern'], $reqPath);
+        if ($params === null) continue;
+
+        $lookup = json_decode($resolver['lookup_json'], true);
+        $meta   = json_decode($resolver['meta_json'], true);
+        if (!is_array($lookup) || !is_array($meta)) continue;
+
+        $matchValue = site_server_resolve_dot_path(['params' => $params], (string)($lookup['match_value_path'] ?? ''));
+        if ($matchValue === null) continue;
+
+        $tableStmt = $pdo->prepare('SELECT physical_name FROM project_tables WHERE project_id = ? AND table_name = ?');
+        $tableStmt->execute([$projectId, (string)($lookup['table'] ?? '')]);
+        $physicalName = $tableStmt->fetchColumn();
+        if (!$physicalName) continue;
+
+        // match_column was validated against the project's real columns at
+        // registration time (see meta_resolver_routes.php) -- this regex
+        // check is defense in depth, not the primary safeguard.
+        $matchColumn = (string)($lookup['match_column'] ?? '');
+        if ($matchColumn === '' || !preg_match('/^[A-Za-z0-9_]+$/', $matchColumn)) continue;
+
+        $rowStmt = $pdo->prepare('SELECT * FROM `' . $physicalName . '` WHERE `' . $matchColumn . '` = ? LIMIT 1');
+        $rowStmt->execute([$matchValue]);
+        $row = $rowStmt->fetch();
+        if (!$row) continue;
+
+        $html = file_get_contents($indexPath);
+        if ($html === false) return null;
+
+        $ctx = ['row' => $row, 'params' => $params];
+        foreach ($meta as $key => $spec) {
+            if (!is_array($spec)) continue;
+            $value = site_server_resolve_value_spec_with_fallback($spec, $ctx);
+            if ($value === null || $value === '') continue;
+            $escaped = htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
+
+            if ($key === 'title') {
+                $html = preg_match('#<title>.*?</title>#is', $html)
+                    ? preg_replace('#<title>.*?</title>#is', '<title>' . $escaped . '</title>', $html, 1)
+                    : preg_replace('#</head>#i', '<title>' . $escaped . '</title></head>', $html, 1);
+                continue;
+            }
+
+            $attr = (str_starts_with($key, 'og:') || str_starts_with($key, 'twitter:')) ? 'property' : 'name';
+            $tag  = '<meta ' . $attr . '="' . htmlspecialchars($key, ENT_QUOTES, 'UTF-8') . '" content="' . $escaped . '">';
+            $html = preg_replace('#</head>#i', $tag . '</head>', $html, 1);
+        }
+
+        return $html;
+    }
+
+    return null;
+}
+
 // SPA fallback: if the exact file isn't there and this site opted into it,
 // serve index.html instead so client-side routing survives a hard refresh.
 if (!file_exists($fullPath) || is_dir($fullPath)) {
@@ -151,6 +299,37 @@ if (!file_exists($fullPath) || is_dir($fullPath)) {
     if (!file_exists($fullPath)) {
         http_response_code(404);
         echo 'Not found';
+        exit;
+    }
+}
+
+// Bot-visible meta tag injection: WhatsApp/Facebook/Twitter/Slack/etc. link
+// previews fetch a URL with a plain HTTP client and read the static HTML
+// only -- they never execute the deployed app's own client-side
+// document-title/meta-tag logic. Without this, every shared link previews
+// as whatever generic fallback is baked into the app's index.html,
+// regardless of which page was actually shared. Only runs for a known
+// crawler requesting an HTML document (never for a real asset request, and
+// never for a normal human visitor -- zero behavior/perf change for them);
+// see app/routes/meta_resolver_routes.php for registration and
+// site_server_render_crawler_meta() below for the actual lookup+injection.
+if (
+    strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET'
+    && str_ends_with($fullPath, '/index.html')
+    && !empty($registration['project_id'])
+    && site_server_is_crawler($_SERVER['HTTP_USER_AGENT'] ?? '')
+) {
+    $crawlerHtml = site_server_render_crawler_meta($pdo, (int)$registration['project_id'], $reqPathRaw, $fullPath);
+    if ($crawlerHtml !== null) {
+        http_response_code(200);
+        header('Content-Type: text/html; charset=utf-8');
+        // Never cache a bot-tailored response -- the next request to this
+        // exact URL could be a different business's crawler hit, or a real
+        // human browser that must get the unmodified SPA shell, not a
+        // stale copy of whichever business this particular bot request
+        // happened to resolve to.
+        header('Cache-Control: no-store');
+        echo $crawlerHtml;
         exit;
     }
 }

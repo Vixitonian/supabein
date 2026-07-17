@@ -285,6 +285,90 @@ CREATE TABLE IF NOT EXISTS `webhooks` (
     UNIQUE KEY `uq_project_webhook` (`project_id`, `name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Password-reset tokens for a *project's own* end-user tables (a PASSWORD
+-- column on any project table) -- the project-scoped counterpart to
+-- `user_reset_tokens`, which is only for SupaBein's own platform/operator
+-- accounts. Scoped by (project_id, table_name, row_id) rather than a users
+-- FK, since the target table is project-defined and varies per project. See
+-- app/routes/data_routes.php's /forgot and /reset routes.
+CREATE TABLE IF NOT EXISTS `project_password_resets` (
+    `id`          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`  INT UNSIGNED NOT NULL,
+    `table_name`  VARCHAR(64) NOT NULL,
+    `row_id`      INT UNSIGNED NOT NULL,
+    `token_hash`  VARCHAR(64) NOT NULL,
+    `expires_at`  DATETIME NOT NULL,
+    `used_at`     DATETIME NULL DEFAULT NULL,
+    `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_token_hash` (`token_hash`),
+    KEY `idx_project_table_row` (`project_id`, `table_name`, `row_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- One per project: lets /forgot dispatch its reset email through an already
+-- -registered Integration instead of going silent once the token is
+-- generated. `subject_spec`/`text_spec` are declarative value specs
+-- ({"literal":...} or {"template":"...{{token}}..."}) resolved against
+-- {email, token} -- never arbitrary code. No row = /forgot behaves exactly
+-- as it does without this feature (token generated, nothing sent).
+CREATE TABLE IF NOT EXISTS `auth_email_providers` (
+    `project_id`        INT UNSIGNED NOT NULL PRIMARY KEY,
+    `integration_name`  VARCHAR(64) NOT NULL,
+    `path`               VARCHAR(255) NOT NULL,
+    `from_address`       VARCHAR(255) DEFAULT NULL,
+    `subject_spec`       TEXT NOT NULL,
+    `text_spec`          TEXT NOT NULL,
+    `created_at`         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Outbound triggers: "when a row is inserted into `table_name`, call
+-- `integration_name` with this templated request." The reverse of Signed
+-- Webhooks, and deliberately reuses the same Integration (secret + proxy)
+-- rather than introducing new secret storage. `request_json` values are
+-- always {"literal":...}/{"path":"row.x"}/{"template":"...{{row.x}}..."} --
+-- never arbitrary code. Multiple triggers may target the same
+-- (table_name, event) -- all fire. Delivery is best-effort/synchronous,
+-- fired inline after a successful insert; a failure is logged (Error Logs)
+-- and never blocks or fails the insert itself -- there's no retry queue in
+-- this version, so this is NOT at-least-once delivery.
+CREATE TABLE IF NOT EXISTS `triggers` (
+    `id`                INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`        INT UNSIGNED NOT NULL,
+    `name`              VARCHAR(64) NOT NULL,
+    `table_name`        VARCHAR(64) NOT NULL,
+    `event`             ENUM('insert') NOT NULL DEFAULT 'insert',
+    `integration_name`  VARCHAR(64) NOT NULL,
+    `request_json`      TEXT NOT NULL,
+    `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_trigger` (`project_id`, `name`),
+    KEY `idx_project_table_event` (`project_id`, `table_name`, `event`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Bot-visible meta tag resolvers: a project-registered, declarative
+-- "for requests to a path matching `path_pattern`, from a known
+-- link-preview crawler, look up a row and inject <meta>/<title> tags into
+-- the HTML response" rule. Read directly by site-server/router.php (which
+-- deliberately never depends on the rest of the app -- see that file's own
+-- docblock), not by the main API. `lookup_json`/`meta_json` follow the same
+-- declarative-spec pattern as everything else here -- no code execution,
+-- just a table lookup and value substitution.
+CREATE TABLE IF NOT EXISTS `meta_resolvers` (
+    `id`             INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`     INT UNSIGNED NOT NULL,
+    `name`           VARCHAR(64) NOT NULL,
+    `path_pattern`   VARCHAR(255) NOT NULL,
+    `lookup_json`    TEXT NOT NULL,
+    `meta_json`      TEXT NOT NULL,
+    `created_at`     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_project_resolver` (`project_id`, `name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
 
 -- ─── Migration: project_requirements (run once on existing installs) ─────────

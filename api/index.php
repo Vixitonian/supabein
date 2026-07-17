@@ -85,6 +85,9 @@ require_once SUPABEIN_ROOT . '/app/routes/ai_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/hostname_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/integration_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/webhook_routes.php';
+require_once SUPABEIN_ROOT . '/app/routes/auth_email_provider_routes.php';
+require_once SUPABEIN_ROOT . '/app/routes/trigger_routes.php';
+require_once SUPABEIN_ROOT . '/app/routes/meta_resolver_routes.php';
 
 register_auth_routes($router);
 register_project_routes($router);
@@ -96,6 +99,9 @@ register_ai_routes($router);
 register_hostname_routes($router);
 register_integration_routes($router);
 register_webhook_routes($router);
+register_auth_email_provider_routes($router);
+register_trigger_routes($router);
+register_meta_resolver_routes($router);
 
 try {
     $router->dispatch($request);

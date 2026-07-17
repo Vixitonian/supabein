@@ -195,6 +195,8 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#data-update">PATCH (update row)</a>
     <a class="sb-link" href="#data-delete">DELETE (delete row)</a>
     <a class="sb-link" href="#data-login">POST (login)</a>
+    <a class="sb-link" href="#data-forgot">POST (forgot password)</a>
+    <a class="sb-link" href="#data-reset">POST (reset password)</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">File Storage</span>
@@ -247,6 +249,24 @@ tr:last-child td{border-bottom:none}
     <a class="sb-link" href="#webhooks-list">List webhooks</a>
     <a class="sb-link" href="#webhooks-delete">Delete a webhook</a>
     <a class="sb-link" href="#webhooks-receive">The public receiver</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Auth Email Provider</span>
+    <a class="sb-link" href="#authemail-create">Register the provider</a>
+    <a class="sb-link" href="#authemail-get">Get the provider</a>
+    <a class="sb-link" href="#authemail-delete">Delete the provider</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Triggers</span>
+    <a class="sb-link" href="#triggers-create">Register a trigger</a>
+    <a class="sb-link" href="#triggers-list">List triggers</a>
+    <a class="sb-link" href="#triggers-delete">Delete a trigger</a>
+  </div>
+  <div class="sb-group">
+    <span class="sb-label">Meta Tag Resolvers</span>
+    <a class="sb-link" href="#meta-create">Register a resolver</a>
+    <a class="sb-link" href="#meta-list">List resolvers</a>
+    <a class="sb-link" href="#meta-delete">Delete a resolver</a>
   </div>
   <div class="sb-group">
     <span class="sb-label">Access Tokens</span>
@@ -780,6 +800,37 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -d '{"email": "alice@example.com", "password": "secret123"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-dlogin',this)">Copy</button></div>
     <p>Returns <code>{"token": "eyJ...", "user": {...}}</code> — <code>user</code> is the matched row (password field masked). The JWT carries <code>sub</code> (row id), <code>pid</code> (project id), and <code>type: "project_user"</code>. Use it as Bearer auth in subsequent data API calls to get the <code>authenticated</code> role.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="data-forgot">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/data/:project_id/:table/forgot</span>
+    <span class="desc">Generate a password-reset token for a row in this table</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-dforgot">curl -X POST "https://your-domain/api/v1/data/1/users/forgot" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-dforgot',this)">Copy</button></div>
+    <p>Same identifier auto-detection as <a href="#data-login">/login</a> — whichever non-<code>PASSWORD</code> column you send becomes the lookup key. Always returns the same generic <code>{"message": "..."}</code> regardless of whether it matched a row, whether an <a href="#authemail-create">auth email provider</a> is registered, or whether sending succeeded — this is deliberate, it's what stops the endpoint being used to check which addresses have accounts.</p>
+    <p><strong>The token isn't emailed unless you register an <a href="#authemail-create">auth email provider</a> for this project.</strong> Without one, this endpoint still generates and stores the token (so your own project can email it another way if you build that), but nothing is sent automatically.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="data-reset">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/data/:project_id/:table/reset</span>
+    <span class="desc">Exchange a reset token for a new password</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-dreset">curl -X POST "https://your-domain/api/v1/data/1/users/reset" \
+  -H "Content-Type: application/json" \
+  -d '{"token": "<from the emailed link>", "password": "newSecret123"}'</pre>
+    <button class="copy-btn" onclick="copyEl('c-dreset',this)">Copy</button></div>
+    <p>Token expires 1 hour after <code>/forgot</code> generated it, and is single-use. On success, returns <code>{"message": "...", "token": "eyJ..."}</code> — the same project_user JWT shape as <a href="#data-login">/login</a>, so you can log the user straight in.</p>
   </div>
 </div>
 
@@ -1432,6 +1483,177 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
   </div>
   <div class="endpoint-body">
     <p>No <code>Authorization</code> header — the sender proves itself via the signature header you configured, verified over the exact raw request body. An invalid or missing signature gets <strong>401</strong> and no write is attempted. Anything else — including a payload <code>match</code> didn't match, or a row that couldn't be found — returns <strong>200</strong> with <code>{"received": true, "applied": &lt;bool&gt;, ...}</code>, by design: most senders retry aggressively on a non-2xx response, and a slow/erroring receiver causes duplicate-delivery storms, not safety. Check the response body (or your project's Error Logs) to see what actually happened, don't infer it from the status code.</p>
+  </div>
+</div>
+
+<!-- ── Auth Email Provider ── -->
+<h2 id="authemail-create">Auth Email Provider</h2>
+<p>Lets <a href="#data-forgot">/forgot</a> actually deliver its reset email, by dispatching through an already-registered <a href="#integrations-create">Integration</a> — reuses that secret entirely, no new secret storage. One provider per project; it applies to whichever table's <code>/forgot</code> was called.</p>
+
+<div class="endpoint" id="authemail-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/auth-email-provider</span>
+    <span class="desc">Register (or replace) the provider</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aecreate">curl -X POST "https://your-domain/api/v1/projects/1/auth-email-provider" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "integration": "resend",
+    "forgot_password": {
+      "path": "emails",
+      "from": "no-reply@your-domain",
+      "subject": { "literal": "Reset your password" },
+      "text": { "template": "Reset it here: https://your-app/#/reset-password?token={{token}}" }
+    }
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-aecreate',this)">Copy</button></div>
+    <p><code>integration</code> must already be registered (see <a href="#integrations-create">Integrations</a>) — this only stores routing + a template, not a secret. <code>subject</code>/<code>text</code> are declarative value specs — <code>{"literal": ...}</code> or <code>{"template": "...{{token}}..."}</code> — resolved against exactly two variables: <code>email</code> (whatever identifier <code>/forgot</code> was called with) and <code>token</code> (the raw reset token). The outbound request body is <code>{"to": [email], "subject": ..., "text": ..., "from": ...}</code> — matches Resend's API shape; any provider that accepts a similar JSON body works.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="authemail-get">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/projects/:id/auth-email-provider</span>
+    <span class="desc">Get the registered provider</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aeget">curl "https://your-domain/api/v1/projects/1/auth-email-provider" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-aeget',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="authemail-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/auth-email-provider</span>
+    <span class="desc">Delete the provider — /forgot goes back to generating a token silently</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aedel">curl -X DELETE "https://your-domain/api/v1/projects/1/auth-email-provider" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-aedel',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Triggers ── -->
+<h2 id="triggers-create">Triggers</h2>
+<p>The reverse of Signed Webhooks: "when a row is inserted into this table, call this Integration with this templated request" — for notifying a business owner the instant a lead/order comes in, without the client needing its own session token (it fires from the insert itself, server-side, regardless of who or what inserted the row).</p>
+<div class="callout">Best-effort, synchronous delivery fired inline with the insert — a failure is logged server-side and never blocks or fails the insert, but there's no retry queue in this version. If you need guaranteed delivery, have your own backend poll instead.</div>
+
+<div class="endpoint" id="triggers-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/triggers</span>
+    <span class="desc">Register (or replace) a trigger</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-trcreate">curl -X POST "https://your-domain/api/v1/projects/1/triggers" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "notify-new-lead",
+    "table": "leads",
+    "event": "insert",
+    "integration": "resend",
+    "request": {
+      "method": "POST",
+      "path": "emails",
+      "body": {
+        "to": { "literal": "owner@example.com" },
+        "subject": { "template": "New lead: {{row.name}}" },
+        "text": { "template": "{{row.name}} ({{row.email}}) says: {{row.message}}" }
+      }
+    }
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-trcreate',this)">Copy</button></div>
+    <p><code>event</code> only supports <code>"insert"</code> today. <code>integration</code> must already be registered. Every value in <code>request.body</code> is a declarative spec — <code>{"literal": ...}</code>, <code>{"path": "row.x"}</code>, or <code>{"template": "...{{row.x}}..."}</code> — resolved against <code>{"row": &lt;the inserted row&gt;}</code> (password columns already masked). Multiple triggers can target the same table/event — all of them fire.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="triggers-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/projects/:id/triggers</span>
+    <span class="desc">List triggers</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-trlist">curl "https://your-domain/api/v1/projects/1/triggers" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-trlist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="triggers-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/triggers/:name</span>
+    <span class="desc">Delete a trigger</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-trdel">curl -X DELETE "https://your-domain/api/v1/projects/1/triggers/notify-new-lead" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-trdel',this)">Copy</button></div>
+  </div>
+</div>
+
+<!-- ── Meta Tag Resolvers ── -->
+<h2 id="meta-create">Bot-Visible Meta Tag Resolvers</h2>
+<p>A static SPA sets its page title/social-preview image client-side after mounting — invisible to WhatsApp/Facebook/Twitter/Slack/Discord/etc., which fetch a shared link with a plain HTTP client and never run your JS. Register a resolver and a matching, crawler-only request gets the real <code>&lt;title&gt;</code>/<code>&lt;meta property="og:..."&gt;</code> tags injected server-side into the HTML — every normal human visitor gets the completely unmodified file, same as always.</p>
+
+<div class="endpoint" id="meta-create">
+  <div class="endpoint-head">
+    <span class="method post">POST</span>
+    <span class="path">/api/v1/projects/:id/meta-resolvers</span>
+    <span class="desc">Register (or replace) a resolver</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-mrcreate">curl -X POST "https://your-domain/api/v1/projects/1/meta-resolvers" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "storefront",
+    "path_pattern": "/store/:slug/*",
+    "lookup": { "table": "businesses", "match_column": "slug", "match_value_path": "params.slug" },
+    "meta": {
+      "title": { "path": "row.name" },
+      "og:description": { "path": "row.home_tagline", "fallback": { "path": "row.about_text" } },
+      "og:image": { "path": "row.logo_url", "fallback": { "path": "row.hero_image_url" } }
+    }
+  }'</pre>
+    <button class="copy-btn" onclick="copyEl('c-mrcreate',this)">Copy</button></div>
+    <p><code>path_pattern</code> uses the same <code>:name</code> capture syntax as everything else on the platform, plus an optional trailing <code>/*</code> to match (and ignore) anything after that point — e.g. <code>/store/:slug/*</code> matches <code>/store/lois-stores/products/42</code> with <code>params.slug = "lois-stores"</code>. <code>lookup.match_value_path</code> must reference a captured param (<code>"params.&lt;name&gt;"</code>). Each <code>meta</code> value is a declarative spec resolved against <code>{"row": &lt;looked-up row&gt;, "params": {...}}</code>, with an optional same-shaped <code>fallback</code> tried if the primary resolves empty. The key <code>"title"</code> is special-cased into <code>&lt;title&gt;</code>; keys starting with <code>og:</code> or <code>twitter:</code> become <code>&lt;meta property="..."&gt;</code>; anything else becomes <code>&lt;meta name="..."&gt;</code> (e.g. <code>"description"</code>).</p>
+    <p>Only ever runs for a request from a known crawler UA (WhatsApp, facebookexternalhit, Twitterbot, Slackbot, Discordbot, LinkedInBot, and a handful of others) landing on an HTML document — a real visitor's browser, and every asset request, is completely unaffected.</p>
+  </div>
+</div>
+
+<div class="endpoint" id="meta-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/projects/:id/meta-resolvers</span>
+    <span class="desc">List resolvers</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-mrlist">curl "https://your-domain/api/v1/projects/1/meta-resolvers" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-mrlist',this)">Copy</button></div>
+  </div>
+</div>
+
+<div class="endpoint" id="meta-delete">
+  <div class="endpoint-head">
+    <span class="method delete">DELETE</span>
+    <span class="path">/api/v1/projects/:id/meta-resolvers/:name</span>
+    <span class="desc">Delete a resolver</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-mrdel">curl -X DELETE "https://your-domain/api/v1/projects/1/meta-resolvers/storefront" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-mrdel',this)">Copy</button></div>
   </div>
 </div>
 
