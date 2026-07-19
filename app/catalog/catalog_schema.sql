@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS `project_columns` (
     `nullable`         TINYINT(1) NOT NULL DEFAULT 1,
     `default_val`      VARCHAR(255) DEFAULT NULL,
     `col_order`        SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    -- Mirrors whether the *real* database column actually has a UNIQUE
+    -- index (see Schema::buildColumnDef()) -- catalog metadata, not the
+    -- source of truth; kept in sync at creation time so listColumns()/the
+    -- dashboard can show it without a second DESCRIBE-style query.
+    `is_unique`        TINYINT(1) NOT NULL DEFAULT 0,
     FOREIGN KEY (`project_table_id`) REFERENCES `project_tables`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_col` (`project_table_id`, `col_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
