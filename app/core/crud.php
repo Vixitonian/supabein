@@ -97,6 +97,30 @@ class Crud
         }, $rows);
     }
 
+    // A real UNIQUE column (see Schema::buildColumnDef()) rejects a
+    // conflicting INSERT/UPDATE with MySQL error 1062 -- without this, that
+    // PDOException would propagate all the way to api/index.php's top-level
+    // catch-all, which returns a raw 500 with the internal exception message
+    // (physical table name, driver-specific SQL error text). Translate it
+    // into the clean, actionable 409 a client can actually branch on.
+    private static function execOrConflict(\PDOStatement $stmt, array $params): void
+    {
+        try {
+            $stmt->execute($params);
+        } catch (\PDOException $e) {
+            if ((int)($e->errorInfo[1] ?? 0) === 1062) {
+                $value = null;
+                if (preg_match("/Duplicate entry '(.*)' for key/", $e->getMessage(), $m)) {
+                    $value = $m[1];
+                }
+                abort(409, $value !== null
+                    ? "A row with that value already exists (\"$value\") — this column has a unique constraint."
+                    : 'A row with that value already exists — this column has a unique constraint.');
+            }
+            throw $e;
+        }
+    }
+
     // ─── SELECT (list) ───────────────────────────────────────────────────────
 
     public static function handleList(array $req): void
@@ -219,7 +243,7 @@ class Crud
         }
 
         $pdo = \App::get('db');
-        $pdo->prepare($sql)->execute($params);
+        self::execOrConflict($pdo->prepare($sql), $params);
         $newId = (int)$pdo->lastInsertId();
 
         $stmt = $pdo->prepare('SELECT * FROM `' . $table['physical_name'] . '` WHERE id = ?');
@@ -282,7 +306,7 @@ class Crud
                 abort(422, $e->getMessage());
             }
 
-            $pdo->prepare($sql)->execute($params);
+            self::execOrConflict($pdo->prepare($sql), $params);
             $newId = (int)$pdo->lastInsertId();
 
             $stmt = $pdo->prepare('SELECT * FROM `' . $table['physical_name'] . '` WHERE id = ?');
@@ -330,7 +354,7 @@ class Crud
 
         $pdo  = \App::get('db');
         $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
+        self::execOrConflict($stmt, $params);
 
         if ($stmt->rowCount() === 0) {
             abort(404, 'Row not found or policy constraint not satisfied');

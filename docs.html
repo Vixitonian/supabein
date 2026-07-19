@@ -625,13 +625,15 @@ curl "https://your-domain/api/v1/data/1/users"</pre>
       <tr><td>nullable</td><td>bool</td><td>Allow NULL values (default: true)</td></tr>
       <tr><td>default</td><td>string | bool</td><td>Optional default value. For <code>BOOLEAN</code> columns, <code>true</code>/<code>false</code> are accepted and coerced to <code>1</code>/<code>0</code> automatically.</td></tr>
       <tr><td>references</td><td>string</td><td>Optional: a logical table name in this project to foreign-key this column to (see below). If omitted, a real foreign key is still added automatically whenever the column name matches a table via the <code>*_id</code> convention (e.g. <code>user_id</code> → a <code>user</code>/<code>users</code> table).</td></tr>
+      <tr><td>unique</td><td>bool</td><td>Adds a real MySQL <code>UNIQUE</code> index (default: false). A conflicting insert/update on this column is rejected with <strong>409 Conflict</strong> instead of silently succeeding — enforced at the database level, not just a client-side hint.</td></tr>
     </table>
     <div class="code-wrap"><pre class="code" id="c-col">curl -X POST "https://your-domain/api/v1/projects/1/tables/users/columns" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "email", "type": "VARCHAR(255)", "nullable": false}'</pre>
+  -d '{"name": "email", "type": "VARCHAR(255)", "nullable": false, "unique": true}'</pre>
     <button class="copy-btn" onclick="copyEl('c-col',this)">Copy</button></div>
     <div class="callout"><strong>Foreign keys:</strong> a column is automatically given a real MySQL <code>FOREIGN KEY ... ON DELETE CASCADE</code> constraint whenever its name matches the <code>*_id</code> convention against an existing table in the same project — <code>curl -d '{"name":"user_id","type":"INT"}'</code> against a table that has a <code>users</code> table in the same project is enough, no extra field needed. Use <code>references</code> to be explicit, or when the naming convention doesn't apply (e.g. <code>author_id</code> pointing at a <code>users</code> table): <code>-d '{"name":"author_id","type":"INT","references":"users"}'</code>. Either way the column is stored as <code>INT UNSIGNED</code> (required to match every table's <code>id</code> primary key) and deleting a referenced row cascades — deleting a row also deletes everything that points at it, so a project's data stays consistent instead of accumulating orphaned rows.</div>
+    <div class="callout"><strong>Strongly recommended for any login-identifier column</strong> (e.g. the column a <a href="#data-login">/login</a> endpoint matches against): without <code>unique: true</code>, nothing stops two rows from sharing the same email — and <code>/login</code> always matches the <em>first</em> one, so a duplicate signup (a retried request, a double-submit, a network blip between insert and login) silently creates a row nobody can ever log into again. Adding <code>unique: true</code> to an existing column with duplicate values already in it fails with <strong>409</strong> until the duplicates are cleaned up first.</div>
   </div>
 </div>
 
@@ -726,6 +728,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
   -d '{"name": "Alice", "email": "alice@example.com"}'</pre>
     <button class="copy-btn" onclick="copyEl('c-dins',this)">Copy</button></div>
     <p>Only fields that match defined columns are accepted. Extra fields are silently ignored.</p>
+    <p>If the table has a <a href="#columns"><code>unique: true</code></a> column and this insert's value for it already exists on another row, the request fails with <strong>409 Conflict</strong> instead of creating a duplicate — check for that status rather than assuming any non-2xx means the same thing a validation error would.</p>
   </div>
 </div>
 

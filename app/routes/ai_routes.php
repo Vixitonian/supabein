@@ -2431,7 +2431,7 @@ function ai_execute_build(array $plan, int $userId): array
         }
 
         foreach ($columns as $col) {
-            $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default']);
+            $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default'], $col['unique'] ?? false);
         }
 
         foreach ($tableDef['policies'] ?? [] as $policy) {
@@ -2574,7 +2574,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
             $ddl   = \SupaBein\Schema::createTableDDL($table['physical_name'], $columns);
             \SupaBein\Schema::applyDDL($pdo, $projectId, $ddl);
             foreach ($columns as $col) {
-                $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default']);
+                $catalog->addColumn($table['id'], $col['name'], $col['type'], $col['nullable'], $col['default'], $col['unique'] ?? false);
             }
             foreach ($tableDef['policies'] ?? [] as $p) {
                 try {
@@ -2605,13 +2605,14 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
                 if (in_array(strtolower($colName), ['id','created_at'], true)) continue;
                 $colType  = \SupaBein\Schema::validateDataType($col['type'] ?? 'TEXT');
                 $nullable = (bool)($col['nullable'] ?? true);
+                $unique   = (bool)($col['unique'] ?? false);
 
                 $physicalTable = $tbl['physical_name'];
-                $nullSql = $nullable ? 'NULL' : 'NOT NULL';
-                \SupaBein\Schema::applyDDL($pdo, $projectId,
-                    "ALTER TABLE `{$physicalTable}` ADD COLUMN `{$colName}` {$colType} {$nullSql}"
-                );
-                $catalog->addColumn($tbl['id'], $colName, $colType, $nullable, null);
+                $ddl = \SupaBein\Schema::addColumnDDL($physicalTable, [
+                    'name' => $colName, 'type' => $colType, 'nullable' => $nullable, 'unique' => $unique,
+                ]);
+                \SupaBein\Schema::applyDDL($pdo, $projectId, $ddl);
+                $catalog->addColumn($tbl['id'], $colName, $colType, $nullable, null, $unique);
                 $addedColumns[] = $tblName . '.' . $colName;
             } catch (\Throwable $e) {
                 sb_log('ai_edit', 'add_column failed: ' . $e->getMessage());
