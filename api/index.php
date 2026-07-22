@@ -90,6 +90,8 @@ require_once SUPABEIN_ROOT . '/app/routes/trigger_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/meta_resolver_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/ai_assistant_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/admin_routes.php';
+require_once SUPABEIN_ROOT . '/app/core/icon_generator.php';
+require_once SUPABEIN_ROOT . '/app/routes/image_tool_routes.php';
 
 register_auth_routes($router);
 register_project_routes($router);
@@ -106,6 +108,7 @@ register_trigger_routes($router);
 register_meta_resolver_routes($router);
 register_ai_assistant_routes($router);
 register_admin_routes($router);
+register_image_tool_routes($router);
 
 try {
     $router->dispatch($request);
