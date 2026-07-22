@@ -129,6 +129,7 @@ const PAT_PROJECT_SCOPED_ROUTES = [
     '/v1/projects/:id/ai-assistants',
     '/v1/projects/:id/ai-assistants/:name',
     '/v1/projects/:id/ai-assistants/:name/chat',
+    '/v1/projects/:id/tools/generate-icon',
     '/v1/projects/:id/errors',
     '/v1/projects/:id/errors/download',
     '/v1/projects/:id/requirements',
