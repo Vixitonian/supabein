@@ -35,7 +35,18 @@ class MaxTokensProbe
     // shrink a model that isn't actually limited.
     public static function extractLimit(string $errorMessage, int $requested): ?int
     {
-        if (preg_match('/max_tokens:\s*\d+\s*>\s*(\d+)/i', $errorMessage, $m)) {
+        if (preg_match('/tokens per (?:minute|day)[^:]*:\s*Limit (\d+),\s*Requested (\d+)/i', $errorMessage, $m)) {
+            // Rate-limit phrasing (e.g. Groq's TPM errors): the "Requested"
+            // figure is the whole request's token cost (prompt + max_tokens),
+            // not just max_tokens, so back out an estimate of the prompt's
+            // own cost and leave the model's reply room under what's left of
+            // the budget -- capping max_tokens to the raw limit alone would
+            // still be too high once the real (nonzero) prompt is back in.
+            $tpmLimit = (int)$m[1];
+            $tpmRequested = (int)$m[2];
+            $promptEstimate = max(0, $tpmRequested - $requested);
+            $limit = $tpmLimit - $promptEstimate - 200;
+        } elseif (preg_match('/max_tokens:\s*\d+\s*>\s*(\d+)/i', $errorMessage, $m)) {
             $limit = (int)$m[1];
         } elseif (preg_match('/can only afford (\d+)/i', $errorMessage, $m)) {
             // OpenRouter's credit-balance phrasing: "You requested up to N

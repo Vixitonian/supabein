@@ -12,6 +12,19 @@ class GroqClient
     // (see MaxTokensProbe) rather than hand-maintained here.
     private const MAX_TOKENS_DEFAULT = 32000;
 
+    // Groq's free tier enforces a per-model tokens-per-minute (TPM) budget
+    // that covers the WHOLE request (prompt + max_tokens together), measured
+    // live off the API's own x-ratelimit-limit-tokens response header since
+    // Groq doesn't publish these numbers anywhere else. A flat 32000
+    // max_tokens blows every one of these on its own regardless of prompt
+    // size, so the real starting point has to leave room for the prompt —
+    // see the budget calculation in call() below.
+    private const MODEL_TPM_BUDGET = [
+        'llama-3.3-70b-versatile' => 12000,
+        'openai/gpt-oss-120b'     => 8000,
+        'llama-3.1-8b-instant'    => 6000,
+    ];
+
     private array $lastUsage = [];
     private string $lastRawText = '';
 
@@ -63,7 +76,14 @@ class GroqClient
     private function call(array $messages): array
     {
         $probeKey  = 'groq:' . $this->model;
-        $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);
+
+        $promptChars = 0;
+        foreach ($messages as $m) $promptChars += strlen((string)($m['content'] ?? ''));
+        $promptEstimate = (int)ceil($promptChars / 4);
+        $tpmBudget = self::MODEL_TPM_BUDGET[$this->model] ?? 6000;
+        $budgetDefault = max(512, $tpmBudget - $promptEstimate - 200);
+
+        $maxTokens = MaxTokensProbe::initial($probeKey, min(self::MAX_TOKENS_DEFAULT, $budgetDefault));
 
         $lastError = null;
         for ($attempt = 1; $attempt <= 4; $attempt++) {
