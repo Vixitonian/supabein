@@ -1,16 +1,31 @@
-import io
 import os
+
+# Bound onnxruntime's thread pools before it's imported (via rembg) -- the
+# default multi-threaded execution allocates noticeably more memory, which
+# matters a lot on a 512MB free-tier instance.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("ORT_NUM_THREADS", "1")
+
 from flask import Flask, request, Response, jsonify
 from rembg import remove, new_session
 
 app = Flask(__name__)
 
-# General-purpose object segmentation (isnet-general-use) -- FlyGen only ever
-# sends icon/object-style images here, never people, so the human-specific
-# u2net_human_seg model would be the wrong tool for this job.
-SESSION = new_session("isnet-general-use")
-
 SHARED_SECRET = os.environ.get("SHARED_SECRET", "")
+
+# u2netp -- rembg's small "portable" model (~4.5MB vs. isnet-general-use's
+# ~176MB), specifically built for memory-constrained environments like a
+# free-tier instance. Lower cutout quality than isnet-general-use, but that
+# tradeoff is what makes this fit in 512MB at all. Loaded lazily on first
+# request rather than at import time, so the worker process can boot and
+# start passing health checks immediately instead of holding up startup
+# (and risking an OOM before ever accepting a connection).
+_session = None
+def get_session():
+    global _session
+    if _session is None:
+        _session = new_session("u2netp")
+    return _session
 
 @app.get("/health")
 def health():
@@ -27,7 +42,7 @@ def remove_background():
     if not input_bytes:
         return jsonify({"error": "empty image"}), 422
     try:
-        output_bytes = remove(input_bytes, session=SESSION)
+        output_bytes = remove(input_bytes, session=get_session())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     return Response(output_bytes, mimetype="image/png")
