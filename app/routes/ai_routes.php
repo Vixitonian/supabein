@@ -5007,6 +5007,15 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
     foreach (['timed out', 'timeout', 'could not resolve host', 'couldn\'t resolve host', 'connection refused', 'connection reset', 'empty reply from server', 'failed to connect'] as $needle) {
         if (str_contains($msg, $needle)) return true;
     }
+    // Groq's free tier enforces a small per-model tokens-per-minute budget
+    // that covers prompt + max_tokens together ("Request too large ... on
+    // tokens per minute (TPM)", code rate_limit_exceeded) -- live-measured
+    // at 6000-12000 tokens depending on model, small enough that a large
+    // system prompt alone can permanently exceed a given model's whole
+    // budget no matter how MaxTokensProbe shrinks max_tokens. Falling
+    // forward to the next candidate is the only way such a request ever
+    // completes, same reasoning as a daily rate limit.
+    if (str_contains($msg, 'tokens per minute') || str_contains($msg, 'rate_limit_exceeded')) return true;
     return false;
 }
 
