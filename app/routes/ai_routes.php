@@ -2788,10 +2788,18 @@ function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $
 
 // ─── AI provider factory ─────────────────────────────────────────────────────
 
-const AI_ALLOWED_PROVIDERS = ['gemini', 'openrouter', 'nvidia', 'anthropic'];
+const AI_ALLOWED_PROVIDERS = ['gemini', 'groq', 'openrouter', 'nvidia', 'anthropic'];
 const AI_ALLOWED_MODELS = [
     'gemini' => [
         'gemini-2.5-flash',
+    ],
+    // Free tier, hosted directly by Groq (not fanned out to third-party
+    // backing providers the way openrouter's are) -- ordered best-to-least
+    // capable, same convention as every other provider below.
+    'groq' => [
+        'llama-3.3-70b-versatile',
+        'openai/gpt-oss-120b',
+        'llama-3.1-8b-instant',
     ],
     'anthropic' => [
         'claude-opus-4-8',
@@ -2857,6 +2865,14 @@ function ai_make_single_client(array $config, ?string $provider, ?string $model)
         return new \SupaBein\AnthropicClient($key, $model);
     }
 
+    if ($provider === 'groq') {
+        $key = $config['GROQ_API_KEY'] ?? '';
+        if (!$key) abort(503, 'Groq API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['groq'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\GroqClient($key, $model);
+    }
+
     // Default: Gemini
     $key = $config['GEMINI_API_KEY'] ?? '';
     if (!$key) abort(503, 'AI build is not configured on this server (missing GEMINI_API_KEY)');
@@ -2872,6 +2888,7 @@ function ai_provider_configured(array $config, string $provider): bool
         'nvidia'     => !empty($config['NVIDIA_API_KEY']),
         'anthropic'  => !empty($config['ANTHROPIC_API_KEY']),
         'gemini'     => !empty($config['GEMINI_API_KEY']),
+        'groq'       => !empty($config['GROQ_API_KEY']),
         default      => false,
     };
 }
