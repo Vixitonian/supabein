@@ -2807,18 +2807,44 @@ const AI_ALLOWED_MODELS = [
     ],
     // Ordered best-to-least capable within each provider (index 0 is also that
     // provider's fallback default when an unrecognized model is requested).
+    //
+    // This account's OpenRouter balance is $0 (no credits ever purchased) --
+    // live-verified that every plain (non ":free") model here fails outright
+    // with "Insufficient credits" regardless of which one is tried, while
+    // the ":free"-suffixed models work with no balance at all. Since
+    // ai_build_fallback_chain() interleaves tiers across providers (this
+    // provider's index-0 model is tried before nvidia's, index-1 before
+    // nvidia's tier 1, etc.), having a paid model sitting at index 0 meant
+    // this whole provider was effectively skipped every time -- gemini/groq
+    // failing would fall straight to nvidia's nemotron (observed producing
+    // garbled, repeated-key JSON) without ever trying any of the working
+    // free models below. Reordered so a confirmed-working free model leads:
+    // 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free' was live-verified
+    // end-to-end against the real flyer-planner prompt (~7.4k tokens),
+    // returning a complete, correctly-shaped plan. The paid models are kept
+    // at the end rather than removed -- harmless (fast, cleanly-classified
+    // "insufficient credits" failures, see
+    // ai_is_unrecoverable_provider_error) and immediately useful the moment
+    // this account is ever funded, with no code change needed.
+    //
+    // 'nvidia/nemotron-3-super-120b-a12b:free' is deliberately EXCLUDED
+    // (not just deprioritized): live-tested and it returned garbled,
+    // non-JSON prose instead of a parseable object. That failure mode isn't
+    // an availability problem (see ai_is_unrecoverable_provider_error) --
+    // it's this specific model failing to follow the format instruction --
+    // so it wouldn't reliably fall forward, it would just burn the caller's
+    // retry budget hitting the same broken candidate again.
     'openrouter' => [
-        'moonshotai/kimi-k2',
-        'nvidia/nemotron-3-super-120b-a12b:free',
-        'openai/gpt-oss-120b:free',
-        'poolside/laguna-m.1:free',
-        'cohere/north-mini-code:free',
-        'mistralai/mistral-small-3.2-24b-instruct',
-        'nex-agi/nex-n2-pro',
-        'google/gemma-4-26b-a4b-it:free',
         'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
         'openai/gpt-oss-20b:free',
+        'cohere/north-mini-code:free',
+        'google/gemma-4-26b-a4b-it:free',
+        'poolside/laguna-m.1:free',
         'poolside/laguna-xs.2:free',
+        'openai/gpt-oss-120b:free',
+        'moonshotai/kimi-k2',
+        'mistralai/mistral-small-3.2-24b-instruct',
+        'nex-agi/nex-n2-pro',
     ],
     'nvidia' => [
         'nvidia/nemotron-3-ultra-550b-a55b',
@@ -5016,6 +5042,20 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
     // forward to the next candidate is the only way such a request ever
     // completes, same reasoning as a daily rate limit.
     if (str_contains($msg, 'tokens per minute') || str_contains($msg, 'rate_limit_exceeded')) return true;
+    // OpenRouter's free-tier (":free"-suffixed) models come and go -- a
+    // slug can stop routing entirely ("No endpoints found for X"), get
+    // pulled from the free tier ("This model is unavailable for free..."),
+    // or its backing provider can flake on a given request ("Provider
+    // returned error"). All three are about the CANDIDATE being
+    // unreachable/unusable right now, not about this specific request or
+    // response quality -- unlike a malformed-JSON response (deliberately
+    // NOT included here: that's the caller's own retry loop's job, since a
+    // same-model retry often just works, and jumping providers over what's
+    // frequently a one-off glitch would undermine that for the strong
+    // providers ahead of this in the chain).
+    foreach (['no endpoints found', 'unavailable for free', 'provider returned error'] as $needle) {
+        if (str_contains($msg, $needle)) return true;
+    }
     return false;
 }
 
