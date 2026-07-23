@@ -4981,6 +4981,15 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
     foreach (['support image input', 'support images', 'does not support vision', 'multimodal messages are not supported', 'image_url is not supported'] as $needle) {
         if (str_contains($msg, $needle)) return true;
     }
+    // A request that times out (curl's own "Operation timed out..."/"Connection
+    // timed out" wording, or DNS/connect-level failures) never reached the
+    // model at all -- retrying the exact same provider is no more likely to
+    // succeed than the first attempt was, whereas the next candidate in the
+    // chain is live right now. Treated as unrecoverable so it falls forward
+    // instead of surfacing the timeout straight to the caller.
+    foreach (['timed out', 'timeout', 'could not resolve host', 'couldn\'t resolve host', 'connection refused', 'connection reset', 'empty reply from server', 'failed to connect'] as $needle) {
+        if (str_contains($msg, $needle)) return true;
+    }
     return false;
 }
 
