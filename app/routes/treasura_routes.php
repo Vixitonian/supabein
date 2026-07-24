@@ -49,6 +49,58 @@ function register_treasura_routes(\SupaBein\Router $router): void
         'DEBT_REPAYMENT' => 'Debt repayment', 'TRANSFER' => 'Transfer',
     ][$type] ?? $type;
 
+    // ── Current user ───────────────────────────────────────────────────
+
+    // GET /v1/projects/:id/treasura/me
+    $router->get('/v1/projects/:id/treasura/me', function (array $req) use ($requireTreasuraUser, $pTable): void {
+        $projectId = (int)$req['params']['id'];
+        $userId = $requireTreasuraUser($req);
+        $pdo = \App::get('db');
+        $users = $pTable($projectId, 'users');
+        $stmt = $pdo->prepare("SELECT id, name, email, currency, unallocated_balance, created_at FROM `$users` WHERE id = ?");
+        $stmt->execute([$userId]);
+        $user = $stmt->fetch();
+        if (!$user) abort(404, 'Not found');
+        $user['id'] = (int)$user['id'];
+        json_out(['user' => $user]);
+    }, ['auth_middleware']);
+
+    // PATCH /v1/projects/:id/treasura/me -- profile update, optionally
+    // bundled with a password change (requires the current password).
+    $router->patch('/v1/projects/:id/treasura/me', function (array $req) use ($requireTreasuraUser, $pTable): void {
+        $projectId = (int)$req['params']['id'];
+        $userId = $requireTreasuraUser($req);
+        $pdo = \App::get('db');
+        $users = $pTable($projectId, 'users');
+
+        $name = trim((string)($req['body']['name'] ?? ''));
+        $currency = trim((string)($req['body']['currency'] ?? '')) ?: 'NGN';
+        if (strlen($name) < 2) json_out(['errors' => ['name' => 'Name must be at least 2 characters']], 422);
+
+        $sets = ['name = ?', 'currency = ?'];
+        $params = [$name, $currency];
+
+        if (!empty($req['body']['new_password'])) {
+            $current = (string)($req['body']['current_password'] ?? '');
+            $new = (string)$req['body']['new_password'];
+            $hStmt = $pdo->prepare("SELECT password_hash FROM `$users` WHERE id = ?");
+            $hStmt->execute([$userId]);
+            $hash = (string)$hStmt->fetchColumn();
+            if ($current === '' || !password_verify($current, $hash)) {
+                json_out(['errors' => ['current_password' => 'Current password is incorrect']], 422);
+            }
+            if (strlen($new) < 8) {
+                json_out(['errors' => ['new_password' => 'Password must be at least 8 characters']], 422);
+            }
+            $sets[] = 'password_hash = ?';
+            $params[] = password_hash($new, PASSWORD_BCRYPT);
+        }
+
+        $params[] = $userId;
+        $pdo->prepare("UPDATE `$users` SET " . implode(', ', $sets) . " WHERE id = ?")->execute($params);
+        json_out(['message' => 'Profile updated']);
+    }, ['auth_middleware']);
+
     // ── Treasuries ─────────────────────────────────────────────────────
 
     // GET /v1/projects/:id/treasura/treasuries
