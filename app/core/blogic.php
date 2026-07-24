@@ -105,8 +105,16 @@ class Blogic
         $tmpDir = sys_get_temp_dir() . '/sb_blogic_sandbox';
         if (!is_dir($tmpDir)) @mkdir($tmpDir, 0700, true);
 
+        // PHP_BINARY is wrong here under LiteSpeed: for a request served by
+        // the LSAPI SAPI it resolves to /usr/local/bin/lsphp, which only
+        // understands LSAPI-server or basic CLI-interpreter mode, not "run
+        // this script with these -d flags" -- it just prints its own usage
+        // text and exits. PHP_BIN is the same config key ai_spawn_job_worker()
+        // already uses for exactly this (spawning a genuine CLI-capable PHP
+        // process from a web request), so reuse it here.
+        $phpBin = (\App::get('config')['PHP_BIN'] ?? null) ?: '/usr/local/bin/php';
         $cmd = [
-            PHP_BINARY,
+            $phpBin,
             '-d', 'disable_functions=' . self::DISABLED_FUNCTIONS,
             '-d', 'open_basedir=' . $tmpDir,
             '-d', 'display_errors=0',
@@ -143,15 +151,12 @@ class Blogic
         }
 
         $resultOutput .= stream_get_contents($pipes[3]);
-        $debugOut = stream_get_contents($pipes[1]);
-        $debugErr = stream_get_contents($pipes[2]);
         foreach ([1, 2, 3] as $fd) @fclose($pipes[$fd]);
-        $exitCode = proc_close($process);
+        proc_close($process);
 
         $result = json_decode($resultOutput, true);
         if (!is_array($result)) {
-            // TEMP DEBUG
-            throw new \RuntimeException('BLogic sandbox returned invalid output. binary=' . PHP_BINARY . ' sapi=' . php_sapi_name() . ' exit=' . $exitCode . ' fd3=[' . $resultOutput . '] stdout=[' . $debugOut . '] stderr=[' . $debugErr . ']');
+            throw new \RuntimeException('BLogic sandbox returned invalid output');
         }
         if (isset($result['error'])) {
             throw new BlogicExecutionException((string)$result['error']);

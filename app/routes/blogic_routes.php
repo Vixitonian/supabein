@@ -172,7 +172,7 @@ function register_blogic_routes(\SupaBein\Router $router): void
             abort(422, $e->getMessage());
         } catch (\RuntimeException $e) {
             sb_log('blogic', 'invoke failed', ['project_id' => $projectId, 'table' => $tableName, 'action' => $actionName, 'error' => $e->getMessage()]);
-            abort(500, 'BLogic execution failed: ' . $e->getMessage()); // TEMP DEBUG
+            abort(500, 'BLogic execution failed');
         }
 
         $stmt2 = $pdo->prepare('SELECT * FROM `' . $table['physical_name'] . '` WHERE id = ?');
