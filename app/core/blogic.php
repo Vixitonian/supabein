@@ -18,13 +18,19 @@ class Blogic
     private const RUNNER_PATH = __DIR__ . '/../blogic/sandbox_runner.php';
     private const TIMEOUT_SECONDS = 5;
 
-    // Everything a sandboxed process could use to reach outside itself:
-    // process/exec, raw sockets, mail, and filesystem functions. This
-    // applies to the whole subprocess (including sandbox_runner.php's own
-    // trusted code), which is why that file never touches any of these
-    // either -- disable_functions can't distinguish trusted runner code
-    // from the tenant closure it evaluates.
-    private const DISABLED_FUNCTIONS = 'exec,passthru,shell_exec,system,popen,pcntl_exec,pcntl_fork,proc_open,proc_close,proc_get_status,curl_exec,curl_multi_exec,fsockopen,pfsockopen,stream_socket_client,stream_socket_server,socket_create,mail,dl,putenv,ini_set,file_get_contents,file_put_contents,fopen,readfile,unlink,opendir,scandir,mkdir,rmdir,copy,rename,symlink,link,parse_ini_file';
+    // Process/exec, raw sockets, mail, and dangerous config functions --
+    // the things open_basedir *can't* contain by restricting a path.
+    // Filesystem functions (fopen, file_get_contents, etc.) are deliberately
+    // NOT in this list: open_basedir already fully contains them to the
+    // empty sandbox tmp dir, and disable_functions applies to the whole
+    // subprocess including sandbox_runner.php's own trusted code -- which
+    // needs fopen() itself, to write the actual result to fd 3. Disabling
+    // it broke that (a disabled function call returns false rather than
+    // throwing, so the runner's own fwrite(false, ...) call raised an
+    // uncaught TypeError and crashed silently with display_errors off) --
+    // caught by testing the real invoke() path via proc_open specifically,
+    // not just by testing sandbox_runner.php directly from a shell.
+    private const DISABLED_FUNCTIONS = 'exec,passthru,shell_exec,system,popen,pcntl_exec,pcntl_fork,proc_open,proc_close,proc_get_status,curl_exec,curl_multi_exec,fsockopen,pfsockopen,stream_socket_client,stream_socket_server,socket_create,mail,dl,putenv,ini_set';
 
     private const ALLOWED_EFFECT_OPS = ['increment', 'decrement', 'update', 'insert', 'assert'];
 
