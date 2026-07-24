@@ -197,6 +197,28 @@ A policy entry is `(api_role, operation) → allowed + optional constraint`:
 
 `:current_user_id` is substituted with the authenticated user's ID at query time.
 
+### BLogic
+
+Tables define data, Policies decide who can touch it, BLogic decides what happens when they do. A BLogic entry is a tenant-authored PHP function body attached to a table, stored as data (never a file) and run in a sandboxed subprocess that never holds a database connection.
+
+```
+GET    /api/v1/projects/:id/tables/:name/blogic
+POST   /api/v1/projects/:id/tables/:name/blogic              { trigger_type, action_name?, name, description?, source, context_spec? }
+PATCH  /api/v1/projects/:id/tables/:name/blogic/:blogic_id   { name?, source?, description?, context_spec?, is_active? }
+DELETE /api/v1/projects/:id/tables/:name/blogic/:blogic_id
+
+POST   /api/v1/data/:project_id/:table/:id/actions/:action_name
+```
+
+| Field | Meaning |
+|-------|---------|
+| `trigger_type` | `action` (fires only via the `/actions/:name` route) or a lifecycle hook: `before_insert`, `after_insert`, `before_update`, `after_update`, `before_delete`, `after_delete` (currently declared but not yet auto-fired — `action` is the only trigger the engine invokes in v1) |
+| `action_name` | Required for `action`, e.g. `TREASURER_CONFIRM`. Must be uppercase letters/digits/underscore. |
+| `source` | The *body* of a PHP function — never a full file with its own tags. Sees `$ctx` (the triggering row, resolved physical table names, and any related lookups declared in `context_spec`) and `$effects` (`increment`/`decrement`/`update`/`insert`/`assert`) — nothing else. |
+| `context_spec` | Declares what to pre-fetch before the sandbox runs: `[{"as": "name", "table": "logical_name", "where": {"col": "$row.col"}, "order_by": "col ASC", "one": true}]`. |
+
+The invocation route is gated by the same Policy check a generic `UPDATE` would use — BLogic never runs unless Policies already allow this actor to act on this row. Effects are validated against a whitelist (the triggering table plus whatever `context_spec` declared — nothing the sandboxed code could expand at runtime) and applied atomically in one transaction.
+
 ### Sites & Deploys
 
 ```
@@ -291,4 +313,5 @@ https://supabein.yourdomain.com/api/v1/data/<project_id>/<table_name>
 - **`config/secrets.php`** is above the web root and blocked by `.htaccess`. Never commit real credentials — use environment-specific copies.
 - **Table/column names** are validated against a strict regex and SQL reserved-word blocklist before any DDL is generated.
 - **Uploaded zips** are scanned for path-traversal entries and blocked executable extensions (`.php`, `.py`, `.sh`, etc.) before extraction. A hardening `.htaccess` is written into every deployed site to prevent PHP execution even if a file slips through.
+- **BLogic source** runs in a genuinely separate OS process (`app/blogic/sandbox_runner.php`, spawned via `proc_open` — never `require`'d into the main app), with `disable_functions` stripping process/network/mail functions and `open_basedir` locked to an empty directory. It never holds a database handle: the parent pre-fetches whatever context a function declares it needs, the sandbox only computes over that in-memory data, and every returned effect is re-validated against a table whitelist before the parent executes it. A hard wall-clock timeout (`proc_terminate`) kills a hung or hostile function outright — there is nothing cooperative for it to evade. This is a defense-in-depth boundary, not a hardened container: on ordinary shared hosting with no root/containers, it's sized for AI-generated logic that might be *wrong*, not for an adversary actively probing for a sandbox escape.
 - **All data queries** go through the policy layer — no direct database access from frontend code.
