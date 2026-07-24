@@ -16,7 +16,8 @@ declare(strict_types=1);
 //
 // Protocol: one JSON object on STDIN, `{"source": "<php statements>",
 // "context": {...plain data...}}`. `source` is the *body* of a function --
-// never a full `<?php ... ?>` file -- so it only ever runs inside a fresh
+// never a full PHP file with its own opening/closing tags -- so it only
+// ever runs inside a fresh
 // function scope with exactly two things in it: $ctx (read-only-by-
 // convention input data) and $effects (the only way it can express an
 // intent to change anything). One JSON object on STDOUT: either
