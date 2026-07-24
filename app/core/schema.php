@@ -138,7 +138,8 @@ class Schema
         foreach ($columns as $col) {
             $defs[] = self::buildColumnDef($col);
             if (!empty($col['references'])) {
-                $defs[] = self::foreignKeyConstraintClause($physicalName, $col['name'], $col['references']);
+                self::assertOnDeleteCompatibleWithNullability($col);
+                $defs[] = self::foreignKeyConstraintClause($physicalName, $col['name'], $col['references'], $col['on_delete'] ?? 'CASCADE');
             }
         }
 
@@ -159,7 +160,8 @@ class Schema
         self::validateIdentifier($physicalName);
         $clauses = ['ADD COLUMN ' . self::buildColumnDef($col)];
         if (!empty($col['references'])) {
-            $clauses[] = 'ADD ' . self::foreignKeyConstraintClause($physicalName, $col['name'], $col['references']);
+            self::assertOnDeleteCompatibleWithNullability($col);
+            $clauses[] = 'ADD ' . self::foreignKeyConstraintClause($physicalName, $col['name'], $col['references'], $col['on_delete'] ?? 'CASCADE');
         }
         return sprintf('ALTER TABLE %s %s', self::q($physicalName), implode(', ', $clauses));
     }
@@ -172,20 +174,51 @@ class Schema
         return 'fk_' . substr(md5($childPhysical . '_' . $col), 0, 12);
     }
 
+    private const ALLOWED_ON_DELETE = ['CASCADE', 'SET NULL', 'RESTRICT'];
+
     // FK columns must exactly match the type of every table's fixed `id`
     // PK (INT UNSIGNED AUTO_INCREMENT) -- MySQL rejects a constraint on a
     // mismatched signedness/width, which is why buildColumnDef() forces
     // INT UNSIGNED whenever $col['references'] is set (see below).
-    private static function foreignKeyConstraintClause(string $childPhysical, string $col, string $parentPhysical): string
+    //
+    // $onDelete defaults to CASCADE (the original, only-ever behavior) for
+    // backward compatibility with every existing caller. SET NULL and
+    // RESTRICT exist for schemas where cascading is actively wrong -- e.g.
+    // a financial audit trail (a request/debt row) that must not vanish
+    // just because the user who initiated it was later deleted, or an
+    // optional assignment (like a treasurer on a relationship) that should
+    // just clear rather than take the whole parent row down with it.
+    private static function foreignKeyConstraintClause(string $childPhysical, string $col, string $parentPhysical, string $onDelete = 'CASCADE'): string
     {
         self::validateIdentifier($childPhysical);
         self::validateIdentifier($col);
         self::validateIdentifier($parentPhysical);
+        $onDelete = strtoupper($onDelete);
+        if (!in_array($onDelete, self::ALLOWED_ON_DELETE, true)) {
+            throw new \InvalidArgumentException(
+                "Invalid on_delete '$onDelete'. Allowed: " . implode(', ', self::ALLOWED_ON_DELETE)
+            );
+        }
         $name = self::fkConstraintName($childPhysical, $col);
         return sprintf(
-            'CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(id) ON DELETE CASCADE',
-            self::q($name), self::q($col), self::q($parentPhysical)
+            'CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(id) ON DELETE %s',
+            self::q($name), self::q($col), self::q($parentPhysical), $onDelete
         );
+    }
+
+    // MySQL rejects ON DELETE SET NULL on a NOT NULL column outright (errno
+    // 1101) -- caught here with a clear message instead of a raw DDL
+    // failure, since by the time that error surfaces the caller has no idea
+    // which of the two settings is the one to blame.
+    private static function assertOnDeleteCompatibleWithNullability(array $col): void
+    {
+        $onDelete = strtoupper($col['on_delete'] ?? 'CASCADE');
+        $nullable = (bool)($col['nullable'] ?? true);
+        if ($onDelete === 'SET NULL' && !$nullable) {
+            throw new \InvalidArgumentException(
+                "Column '{$col['name']}' has on_delete='SET NULL' but is not nullable -- SET NULL requires the column to allow NULL."
+            );
+        }
     }
 
     /**

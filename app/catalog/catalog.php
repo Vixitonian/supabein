@@ -481,7 +481,13 @@ class Catalog
 
     // ─── Columns ─────────────────────────────────────────────────────────────
 
-    public function addColumn(int $tableId, string $colName, string $dataType, bool $nullable = true, ?string $defaultVal = null, bool $unique = false): array
+    // $onDelete is metadata only when $referencesPhysical is null (a plain,
+    // non-FK column) -- it's meaningless there and stored as NULL. Recorded
+    // purely so listColumns()/introspection can show what's actually live in
+    // the DB without a second DESCRIBE/information_schema query, same
+    // rationale as is_unique above; the real constraint always lives in
+    // MySQL itself via Schema::foreignKeyConstraintClause().
+    public function addColumn(int $tableId, string $colName, string $dataType, bool $nullable = true, ?string $defaultVal = null, bool $unique = false, ?string $referencesPhysical = null, ?string $onDelete = null): array
     {
         $stmt = $this->pdo->prepare(
             'SELECT COALESCE(MAX(col_order),0)+1 FROM project_columns WHERE project_table_id = ?'
@@ -489,20 +495,24 @@ class Catalog
         $stmt->execute([$tableId]);
         $order = (int)$stmt->fetchColumn();
 
+        $storedOnDelete = $referencesPhysical !== null ? strtoupper($onDelete ?? 'CASCADE') : null;
+
         $stmt = $this->pdo->prepare(
-            'INSERT INTO project_columns (project_table_id, col_name, data_type, nullable, default_val, col_order, is_unique)
-             VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO project_columns (project_table_id, col_name, data_type, nullable, default_val, col_order, is_unique, references_physical, on_delete)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$tableId, $colName, $dataType, $nullable ? 1 : 0, $defaultVal, $order, $unique ? 1 : 0]);
+        $stmt->execute([$tableId, $colName, $dataType, $nullable ? 1 : 0, $defaultVal, $order, $unique ? 1 : 0, $referencesPhysical, $storedOnDelete]);
         return [
-            'id'               => (int)$this->pdo->lastInsertId(),
-            'project_table_id' => $tableId,
-            'col_name'         => $colName,
-            'data_type'        => $dataType,
-            'nullable'         => $nullable,
-            'default_val'      => $defaultVal,
-            'col_order'        => $order,
-            'unique'           => $unique,
+            'id'                   => (int)$this->pdo->lastInsertId(),
+            'project_table_id'     => $tableId,
+            'col_name'             => $colName,
+            'data_type'            => $dataType,
+            'nullable'             => $nullable,
+            'default_val'          => $defaultVal,
+            'col_order'            => $order,
+            'unique'               => $unique,
+            'references_physical'  => $referencesPhysical,
+            'on_delete'            => $storedOnDelete,
         ];
     }
 
@@ -510,7 +520,8 @@ class Catalog
     {
         $stmt = $this->pdo->prepare(
             'SELECT id, col_name, col_name AS name, data_type, data_type AS type,
-                    nullable, default_val, default_val AS `default`, col_order, is_unique, is_unique AS `unique`
+                    nullable, default_val, default_val AS `default`, col_order, is_unique, is_unique AS `unique`,
+                    references_physical, on_delete
              FROM project_columns WHERE project_table_id = ? ORDER BY col_order ASC'
         );
         $stmt->execute([$tableId]);
@@ -520,7 +531,8 @@ class Catalog
     public function getColumn(int $tableId, string $colName): ?array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, col_name, data_type, nullable, default_val, is_unique, is_unique AS `unique`
+            'SELECT id, col_name, data_type, nullable, default_val, is_unique, is_unique AS `unique`,
+                    references_physical, on_delete
              FROM project_columns WHERE project_table_id = ? AND col_name = ?'
         );
         $stmt->execute([$tableId, $colName]);

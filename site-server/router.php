@@ -51,7 +51,12 @@ if (str_starts_with($reqPathRaw, '/api/')) {
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HEADER         => true,
         CURLOPT_FOLLOWLOCATION => false,
-        CURLOPT_TIMEOUT        => 30,
+        // AI-assistant chat calls can legitimately run past 30s once they're
+        // several tiers deep into the provider fallback chain (a slow/rate-
+        // limited primary timing out before the next candidate is tried) --
+        // 30s was turning those into a false 502 "Upstream API unreachable"
+        // here, well before the backend's own request actually finished.
+        CURLOPT_TIMEOUT        => 300,
     ]);
     if (in_array($_SERVER['REQUEST_METHOD'], ['POST', 'PATCH', 'PUT', 'DELETE'], true)) {
         curl_setopt($ch, CURLOPT_POSTFIELDS, file_get_contents('php://input'));
