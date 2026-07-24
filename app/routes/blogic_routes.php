@@ -156,6 +156,11 @@ function register_blogic_routes(\SupaBein\Router $router): void
             'user_id' => $req['auth']['user_id'] ?? null,
             'role'    => $req['auth']['role'] ?? 'anon',
         ];
+        // Whatever the caller sent beyond the action name itself (e.g. a
+        // "note" on a Treasura-style approval action) -- plain caller input,
+        // same trust level as any other request body; functions that don't
+        // use it just ignore it.
+        $context['params'] = is_array($req['body'] ?? null) ? $req['body'] : [];
 
         $allowedTables = [$table['physical_name']];
         foreach ($entry['context_spec'] ?? [] as $lookup) {

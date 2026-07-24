@@ -42,7 +42,12 @@ class Blogic
      *
      * context_spec shape: [{"as": "name", "table": "logical_table_name",
      * "where": {"col": "literal" | "$row.col"}, "order_by": "col ASC",
-     * "one": true}, ...]
+     * "one": true, "expose_only": true}, ...]
+     *
+     * "expose_only" skips the query entirely (no read happens) and only
+     * registers the table's physical name in $ctx['tables'][$as] -- for a
+     * table a function only ever writes to (e.g. notifications) and has no
+     * reason to read first.
      *
      * $ctx['table'] and $ctx['tables'][$as] carry the resolved *physical*
      * table names alongside the data -- source never has to know or
@@ -61,6 +66,7 @@ class Blogic
             $table = $catalog->getTable($projectId, (string)$lookup['table']);
             if (!$table) continue;
             $ctx['tables'][$lookup['as']] = $table['physical_name'];
+            if (!empty($lookup['expose_only'])) continue;
 
             $where = [];
             $params = [];
