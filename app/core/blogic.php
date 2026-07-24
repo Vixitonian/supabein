@@ -37,16 +37,24 @@ class Blogic
      * context_spec shape: [{"as": "name", "table": "logical_table_name",
      * "where": {"col": "literal" | "$row.col"}, "order_by": "col ASC",
      * "one": true}, ...]
+     *
+     * $ctx['table'] and $ctx['tables'][$as] carry the resolved *physical*
+     * table names alongside the data -- source never has to know or
+     * hardcode SupaBein's internal naming scheme (p{projectId}_{name}) to
+     * pass the right value to $effects->increment()/insert()/etc, and
+     * whatever it passes is exactly what applyEffects()'s whitelist expects
+     * regardless.
      */
-    public function resolveContext(\PDO $pdo, int $projectId, array $triggeringRow, ?array $contextSpec): array
+    public function resolveContext(\PDO $pdo, int $projectId, array $triggeringRow, string $triggeringTablePhysical, ?array $contextSpec): array
     {
         $catalog = Catalog::getInstance();
-        $ctx = ['row' => $triggeringRow, 'related' => []];
+        $ctx = ['row' => $triggeringRow, 'table' => $triggeringTablePhysical, 'related' => [], 'tables' => []];
 
         foreach ($contextSpec ?? [] as $lookup) {
             if (!is_array($lookup) || empty($lookup['as']) || empty($lookup['table'])) continue;
             $table = $catalog->getTable($projectId, (string)$lookup['table']);
             if (!$table) continue;
+            $ctx['tables'][$lookup['as']] = $table['physical_name'];
 
             $where = [];
             $params = [];

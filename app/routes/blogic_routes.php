@@ -151,7 +151,7 @@ function register_blogic_routes(\SupaBein\Router $router): void
         $row = $stmt->fetch();
         if (!$row) abort(404, 'Row not found or policy constraint not satisfied');
 
-        $context = $blogic->resolveContext($pdo, $projectId, $row, $entry['context_spec']);
+        $context = $blogic->resolveContext($pdo, $projectId, $row, $table['physical_name'], $entry['context_spec']);
         $context['actor'] = [
             'user_id' => $req['auth']['user_id'] ?? null,
             'role'    => $req['auth']['role'] ?? 'anon',
