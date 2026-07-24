@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS `project_columns` (
     -- source of truth; kept in sync at creation time so listColumns()/the
     -- dashboard can show it without a second DESCRIBE-style query.
     `is_unique`        TINYINT(1) NOT NULL DEFAULT 0,
+    -- Same "metadata mirror, not source of truth" story as is_unique above,
+    -- for foreign keys: references_physical is the target table this column
+    -- actually has a live FK constraint against (NULL for a plain column),
+    -- and on_delete is CASCADE/SET NULL/RESTRICT -- see
+    -- Schema::foreignKeyConstraintClause(), the real constraint always
+    -- lives in MySQL itself.
+    `references_physical` VARCHAR(64) DEFAULT NULL,
+    `on_delete`        VARCHAR(16) DEFAULT NULL,
     FOREIGN KEY (`project_table_id`) REFERENCES `project_tables`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_col` (`project_table_id`, `col_name`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
