@@ -612,6 +612,78 @@ class Catalog
         return self::castRow($stmt->fetch() ?: null, ['id', 'allowed']);
     }
 
+    // ─── BLogic (tenant business logic, executed by app/core/blogic.php) ──────
+
+    public function createBlogic(int $tableId, string $triggerType, ?string $actionName, string $name, ?string $description, string $source, ?array $contextSpec): array
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO project_blogic (project_table_id, trigger_type, action_name, name, description, source, context_spec)
+             VALUES (?, ?, ?, ?, ?, ?, ?)'
+        );
+        $stmt->execute([$tableId, $triggerType, $actionName, $name, $description, $source, $contextSpec !== null ? json_encode($contextSpec) : null]);
+        return $this->getBlogicById((int)$this->pdo->lastInsertId());
+    }
+
+    public function listBlogic(int $tableId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_table_id, trigger_type, action_name, name, description, source, context_spec, is_active, created_at, updated_at
+             FROM project_blogic WHERE project_table_id = ? ORDER BY created_at ASC'
+        );
+        $stmt->execute([$tableId]);
+        return array_map([self::class, 'decodeBlogicRow'], self::castRows($stmt->fetchAll(), ['id', 'project_table_id', 'is_active']));
+    }
+
+    public function getBlogicById(int $id): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_table_id, trigger_type, action_name, name, description, source, context_spec, is_active, created_at, updated_at
+             FROM project_blogic WHERE id = ?'
+        );
+        $stmt->execute([$id]);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_table_id', 'is_active']);
+        return $row !== null ? self::decodeBlogicRow($row) : null;
+    }
+
+    // The one lookup the request path actually needs: given a table + how it
+    // was triggered, find the active matching entry (or null -- most
+    // tables/operations have no BLogic attached, that's the common case).
+    public function findActiveBlogic(int $tableId, string $triggerType, ?string $actionName): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, project_table_id, trigger_type, action_name, name, description, source, context_spec, is_active, created_at, updated_at
+             FROM project_blogic
+             WHERE project_table_id = ? AND trigger_type = ? AND action_name ' . ($actionName === null ? 'IS NULL' : '= ?') . ' AND is_active = 1
+             LIMIT 1'
+        );
+        $params = $actionName === null ? [$tableId, $triggerType] : [$tableId, $triggerType, $actionName];
+        $stmt->execute($params);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_table_id', 'is_active']);
+        return $row !== null ? self::decodeBlogicRow($row) : null;
+    }
+
+    public function updateBlogic(int $id, string $name, ?string $description, string $source, ?array $contextSpec, bool $isActive): ?array
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE project_blogic SET name = ?, description = ?, source = ?, context_spec = ?, is_active = ? WHERE id = ?'
+        );
+        $stmt->execute([$name, $description, $source, $contextSpec !== null ? json_encode($contextSpec) : null, $isActive ? 1 : 0, $id]);
+        return $this->getBlogicById($id);
+    }
+
+    public function deleteBlogic(int $id): bool
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM project_blogic WHERE id = ?');
+        $stmt->execute([$id]);
+        return $stmt->rowCount() > 0;
+    }
+
+    private static function decodeBlogicRow(array $row): array
+    {
+        $row['context_spec'] = $row['context_spec'] !== null ? json_decode($row['context_spec'], true) : null;
+        return $row;
+    }
+
     // ─── Migrations ──────────────────────────────────────────────────────────
 
     public function recordMigration(int $projectId, string $sql): void

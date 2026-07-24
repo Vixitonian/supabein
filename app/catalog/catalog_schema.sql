@@ -77,6 +77,38 @@ CREATE TABLE IF NOT EXISTS `project_policies` (
     UNIQUE KEY `uq_policy` (`project_table_id`, `api_role`, `operation`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- BLogic: tenant-authored business logic, executed in a sandboxed PHP
+-- subprocess (app/core/blogic.php + app/blogic/sandbox_runner.php) --
+-- never `require`'d into the main app process. The subprocess never holds a
+-- DB handle: `context_spec` declares what the engine should pre-fetch (the
+-- triggering row, plus any declared related-table lookups) before invoking
+-- the sandbox; the sandboxed code only computes over that in-memory data and
+-- returns a list of effects (increment/decrement/insert/update/assert),
+-- which the trusted parent process validates against a whitelist and the
+-- table's own scope, then executes atomically. `source` is the only
+-- tenant-authored part of this row -- deliberately DB-stored, never written
+-- to a file, so it never shares deploy/trust boundaries with the platform's
+-- own codebase.
+CREATE TABLE IF NOT EXISTS `project_blogic` (
+    `id`               INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_table_id` INT UNSIGNED NOT NULL,
+    -- 'action' fires only via POST .../:id/actions/:action_name (action_name
+    -- required). The before_/after_ hooks fire automatically on the matching
+    -- generic CRUD operation (action_name is NULL for these).
+    `trigger_type`     ENUM('action','before_insert','after_insert','before_update','after_update','before_delete','after_delete') NOT NULL,
+    `action_name`      VARCHAR(64) DEFAULT NULL,
+    `name`             VARCHAR(128) NOT NULL,
+    `description`      TEXT DEFAULT NULL,
+    `source`           LONGTEXT NOT NULL,
+    `context_spec`     JSON DEFAULT NULL,
+    `is_active`        TINYINT(1) NOT NULL DEFAULT 1,
+    `created_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_table_id`) REFERENCES `project_tables`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_blogic_action` (`project_table_id`, `action_name`),
+    KEY `idx_blogic_trigger` (`project_table_id`, `trigger_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS `migrations` (
     `id`         INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `project_id` INT UNSIGNED NOT NULL,
