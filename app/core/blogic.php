@@ -143,12 +143,15 @@ class Blogic
         }
 
         $resultOutput .= stream_get_contents($pipes[3]);
+        $debugOut = stream_get_contents($pipes[1]);
+        $debugErr = stream_get_contents($pipes[2]);
         foreach ([1, 2, 3] as $fd) @fclose($pipes[$fd]);
-        proc_close($process);
+        $exitCode = proc_close($process);
 
         $result = json_decode($resultOutput, true);
         if (!is_array($result)) {
-            throw new \RuntimeException('BLogic sandbox returned invalid output');
+            // TEMP DEBUG
+            throw new \RuntimeException('BLogic sandbox returned invalid output. binary=' . PHP_BINARY . ' sapi=' . php_sapi_name() . ' exit=' . $exitCode . ' fd3=[' . $resultOutput . '] stdout=[' . $debugOut . '] stderr=[' . $debugErr . ']');
         }
         if (isset($result['error'])) {
             throw new BlogicExecutionException((string)$result['error']);
