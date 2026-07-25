@@ -24,12 +24,17 @@ function register_auth_email_provider_routes(\SupaBein\Router $router): void
 
     // POST /v1/projects/:id/auth-email-provider
     // { "integration": "resend", "forgot_password": { "path": "emails", "from": "no-reply@...",
-    //   "subject": {"literal": "Reset your password"}, "text": {"template": "...{{token}}..."} } }
+    //   "subject": {"literal": "Reset your password"}, "text": {"template": "...{{token}}..."} },
+    //   "verify_email": { "path": "emails", "subject": {...}, "text": {"template": "...{{token}}..."} } }
+    // verify_email is optional -- omit it and /resend-verification (data_routes.php)
+    // stays a silent no-op, same posture as omitting forgot_password entirely
+    // did before this field existed.
     $router->post('/v1/projects/:id/auth-email-provider', function (array $req) use ($catalog, $ownProject, $validSpec): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']);
 
         $integrationName = trim((string)($req['body']['integration'] ?? ''));
         $fp   = $req['body']['forgot_password'] ?? null;
+        $ve   = $req['body']['verify_email'] ?? null;
         if ($integrationName === '') {
             abort(422, 'integration is required (the name of a already-registered Integration)');
         }
@@ -50,7 +55,22 @@ function register_auth_email_provider_routes(\SupaBein\Router $router): void
             abort(422, 'forgot_password.subject and forgot_password.text must each be {"literal": ...} or {"template": "...{{token}}..."}');
         }
 
-        $provider = $catalog->createAuthEmailProvider($project['id'], $integrationName, $path, $from, $subject, $text);
+        $verifyPath = $verifySubject = $verifyText = null;
+        if ($ve !== null) {
+            if (!is_array($ve)) abort(422, 'verify_email must be an object if present');
+            $verifyPath = trim((string)($ve['path'] ?? ''));
+            $verifySubject = $ve['subject'] ?? null;
+            $verifyText    = $ve['text'] ?? null;
+            if ($verifyPath === '') abort(422, 'verify_email.path is required (the Integration path to POST the email to)');
+            if (!$validSpec($verifySubject) || !$validSpec($verifyText)) {
+                abort(422, 'verify_email.subject and verify_email.text must each be {"literal": ...} or {"template": "...{{token}}..."}');
+            }
+        }
+
+        $provider = $catalog->createAuthEmailProvider(
+            $project['id'], $integrationName, $path, $from, $subject, $text,
+            $verifyPath, $verifySubject, $verifyText
+        );
         json_out($provider, 201);
     }, ['auth_middleware']);
 

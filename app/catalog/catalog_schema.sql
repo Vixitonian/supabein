@@ -362,16 +362,48 @@ CREATE TABLE IF NOT EXISTS `project_password_resets` (
 -- ({"literal":...} or {"template":"...{{token}}..."}) resolved against
 -- {email, token} -- never arbitrary code. No row = /forgot behaves exactly
 -- as it does without this feature (token generated, nothing sent).
+--
+-- verify_path/verify_subject_spec/verify_text_spec are the same shape,
+-- reused for the email-verification flow (see project_email_verifications
+-- below) so a project needs only one provider row for both its auth
+-- emails. NULL = verification email sending is a no-op, same "silent by
+-- default" posture as the forgot-password fields.
 CREATE TABLE IF NOT EXISTS `auth_email_providers` (
-    `project_id`        INT UNSIGNED NOT NULL PRIMARY KEY,
-    `integration_name`  VARCHAR(64) NOT NULL,
-    `path`               VARCHAR(255) NOT NULL,
-    `from_address`       VARCHAR(255) DEFAULT NULL,
-    `subject_spec`       TEXT NOT NULL,
-    `text_spec`          TEXT NOT NULL,
-    `created_at`         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    `updated_at`         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `project_id`          INT UNSIGNED NOT NULL PRIMARY KEY,
+    `integration_name`    VARCHAR(64) NOT NULL,
+    `path`                 VARCHAR(255) NOT NULL,
+    `from_address`         VARCHAR(255) DEFAULT NULL,
+    `subject_spec`         TEXT NOT NULL,
+    `text_spec`            TEXT NOT NULL,
+    `verify_path`          VARCHAR(255) DEFAULT NULL,
+    `verify_subject_spec`  TEXT DEFAULT NULL,
+    `verify_text_spec`     TEXT DEFAULT NULL,
+    `created_at`           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Email-verification tokens for project-table end-users. Deliberately
+-- mirrors project_password_resets's shape rather than reusing that table --
+-- a leftover reset token should never be able to flip verification state,
+-- and vice versa. Any table with an `email_verified` column (BOOLEAN /
+-- TINYINT(1)) opts a project into this flow by convention (see Crud's
+-- handleInsert/handleUpdate and data_routes.php's /login, /verify,
+-- /resend-verification): registration forces it to 0, only consuming a
+-- valid token here can set it to 1, and /login refuses to issue a token
+-- while it's 0.
+CREATE TABLE IF NOT EXISTS `project_email_verifications` (
+    `id`          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `project_id`  INT UNSIGNED NOT NULL,
+    `table_name`  VARCHAR(64) NOT NULL,
+    `row_id`      INT UNSIGNED NOT NULL,
+    `token_hash`  VARCHAR(64) NOT NULL,
+    `expires_at`  DATETIME NOT NULL,
+    `used_at`     DATETIME NULL DEFAULT NULL,
+    `created_at`  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,
+    UNIQUE KEY `uq_token_hash` (`token_hash`),
+    KEY `idx_project_table_row` (`project_id`, `table_name`, `row_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Outbound triggers: "when a row is inserted into `table_name`, call

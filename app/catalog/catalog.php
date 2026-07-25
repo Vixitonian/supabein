@@ -1884,7 +1884,8 @@ class Catalog
         return (int)$row['row_id'];
     }
 
-    // ─── Auth email provider (dispatches a project's own /forgot email) ───────
+    // ─── Auth email provider (dispatches a project's own /forgot and
+    // /verify emails) ────────────────────────────────────────────────────────
 
     public function createAuthEmailProvider(
         int $projectId,
@@ -1892,15 +1893,26 @@ class Catalog
         string $path,
         ?string $fromAddress,
         array $subjectSpec,
-        array $textSpec
+        array $textSpec,
+        ?string $verifyPath = null,
+        ?array $verifySubjectSpec = null,
+        ?array $verifyTextSpec = null
     ): array {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO auth_email_providers (project_id, integration_name, path, from_address, subject_spec, text_spec)
-             VALUES (?, ?, ?, ?, ?, ?)
+            'INSERT INTO auth_email_providers
+                (project_id, integration_name, path, from_address, subject_spec, text_spec,
+                 verify_path, verify_subject_spec, verify_text_spec)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE integration_name = VALUES(integration_name), path = VALUES(path),
-                 from_address = VALUES(from_address), subject_spec = VALUES(subject_spec), text_spec = VALUES(text_spec)'
+                 from_address = VALUES(from_address), subject_spec = VALUES(subject_spec), text_spec = VALUES(text_spec),
+                 verify_path = VALUES(verify_path), verify_subject_spec = VALUES(verify_subject_spec),
+                 verify_text_spec = VALUES(verify_text_spec)'
         );
-        $stmt->execute([$projectId, $integrationName, $path, $fromAddress, json_encode($subjectSpec), json_encode($textSpec)]);
+        $stmt->execute([
+            $projectId, $integrationName, $path, $fromAddress, json_encode($subjectSpec), json_encode($textSpec),
+            $verifyPath, $verifySubjectSpec !== null ? json_encode($verifySubjectSpec) : null,
+            $verifyTextSpec !== null ? json_encode($verifyTextSpec) : null,
+        ]);
         return $this->getAuthEmailProvider($projectId);
     }
 
@@ -1912,6 +1924,8 @@ class Catalog
         if ($row === null) return null;
         $row['subject_spec'] = json_decode($row['subject_spec'], true);
         $row['text_spec']    = json_decode($row['text_spec'], true);
+        $row['verify_subject_spec'] = $row['verify_subject_spec'] !== null ? json_decode($row['verify_subject_spec'], true) : null;
+        $row['verify_text_spec']    = $row['verify_text_spec'] !== null ? json_decode($row['verify_text_spec'], true) : null;
         return self::castRow($row, ['project_id']);
     }
 
@@ -1944,6 +1958,67 @@ class Catalog
             $body['from'] = $provider['from_address'];
         }
         $this->callIntegration($projectId, $provider['integration_name'], 'POST', $provider['path'], $body);
+    }
+
+    // ─── Project-table email verification (end-users of a project's own
+    // auth table, gated on an `email_verified` column by convention -- see
+    // Crud::handleInsert/handleUpdate and data_routes.php's /login, /verify,
+    // /resend-verification) ─────────────────────────────────────────────────
+
+    public function createProjectEmailVerificationToken(int $projectId, string $tableName, int $rowId): string
+    {
+        $raw     = bin2hex(random_bytes(32));
+        $hash    = hash('sha256', $raw);
+        $expires = date('Y-m-d H:i:s', time() + 86400); // 24h -- longer than a password reset, since verifying is lower-stakes and people check email less urgently right after signing up
+
+        $this->pdo->prepare(
+            'DELETE FROM project_email_verifications WHERE project_id = ? AND table_name = ? AND row_id = ?'
+        )->execute([$projectId, $tableName, $rowId]);
+        $this->pdo->prepare(
+            'INSERT INTO project_email_verifications (project_id, table_name, row_id, token_hash, expires_at)
+             VALUES (?, ?, ?, ?, ?)'
+        )->execute([$projectId, $tableName, $rowId, $hash, $expires]);
+
+        return $raw;
+    }
+
+    public function consumeProjectEmailVerificationToken(int $projectId, string $tableName, string $rawToken): ?int
+    {
+        $hash = hash('sha256', $rawToken);
+        $stmt = $this->pdo->prepare(
+            'SELECT id, row_id FROM project_email_verifications
+             WHERE project_id = ? AND table_name = ? AND token_hash = ? AND used_at IS NULL AND expires_at > NOW()
+             LIMIT 1'
+        );
+        $stmt->execute([$projectId, $tableName, $hash]);
+        $row = $stmt->fetch();
+        if (!$row) {
+            return null;
+        }
+        $this->pdo->prepare('UPDATE project_email_verifications SET used_at = NOW() WHERE id = ?')->execute([$row['id']]);
+        return (int)$row['row_id'];
+    }
+
+    // Sends the verification email through the project's registered
+    // provider's verify_* fields, if set. Silent no-op otherwise -- same
+    // "never blocks or changes the caller's response" posture as
+    // dispatchForgotPasswordEmail.
+    public function dispatchVerificationEmail(int $projectId, string $email, string $token): void
+    {
+        $provider = $this->getAuthEmailProvider($projectId);
+        if ($provider === null || empty($provider['verify_path']) || empty($provider['verify_subject_spec']) || empty($provider['verify_text_spec'])) {
+            return;
+        }
+        $context = ['email' => $email, 'token' => $token];
+        $body = [
+            'to'      => [$email],
+            'subject' => self::resolveValueSpec((array)$provider['verify_subject_spec'], $context),
+            'text'    => self::resolveValueSpec((array)$provider['verify_text_spec'], $context),
+        ];
+        if (!empty($provider['from_address'])) {
+            $body['from'] = $provider['from_address'];
+        }
+        $this->callIntegration($projectId, $provider['integration_name'], 'POST', $provider['verify_path'], $body);
     }
 
     // ─── Outbound triggers (row insert -> templated Integration call) ─────────

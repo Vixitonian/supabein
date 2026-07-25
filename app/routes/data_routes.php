@@ -62,6 +62,14 @@ function register_data_routes(\SupaBein\Router $router): void
             abort(401, 'Invalid credentials');
         }
 
+        // A table opts into email-verification-before-login by convention
+        // (an `email_verified` column -- see /verify, /resend-verification
+        // below, and Crud::handleInsert which forces it to 0 on
+        // registration). Tables without that column are unaffected.
+        if (array_key_exists('email_verified', $colTypes) && !(bool)($row['email_verified'] ?? false)) {
+            abort(403, 'Please verify your email before logging in.');
+        }
+
         // Null out the hash before returning
         $row[$passwordCol] = null;
         if (isset($row['id'])) $row['id'] = (int)$row['id'];
@@ -185,6 +193,131 @@ function register_data_routes(\SupaBein\Router $router): void
 
         json_out(['message' => 'Password updated successfully.', 'token' => $jwt]);
     });
+
+    // POST /v1/data/:project_id/:table_name/verify — exchange a raw
+    // verification token (from the emailed link) for email_verified=1,
+    // and log the user straight in, mirroring /reset's response shape.
+    $router->post('/v1/data/:project_id/:table_name/verify', function (array $req): void {
+        $projectId = (int)$req['params']['project_id'];
+        $tableName = $req['params']['table_name'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+
+        $token = (string)($req['body']['token'] ?? '');
+        if ($token === '') abort(422, 'token is required');
+
+        $table = $catalog->getTable($projectId, $tableName);
+        if (!$table) abort(404, 'Table not found');
+
+        $colRows  = $catalog->listColumns((int)$table['id']);
+        $colTypes = array_column($colRows, 'data_type', 'col_name');
+        if (!array_key_exists('email_verified', $colTypes)) abort(400, 'This table has no email_verified column');
+
+        $rowId = $catalog->consumeProjectEmailVerificationToken($projectId, $tableName, $token);
+        if ($rowId === null) abort(401, 'Invalid or expired verification token');
+
+        $pdo = \App::get('db');
+        $pdo->prepare('UPDATE `' . $table['physical_name'] . '` SET `email_verified` = 1 WHERE id = ?')
+            ->execute([$rowId]);
+
+        $config = \App::get('config');
+        $now    = time();
+        $projectUserTtl = (int)($config['PROJECT_USER_JWT_TTL'] ?? 2592000);
+        $jwt = JWT::encode([
+            'sub' => $rowId, 'pid' => $projectId, 'table' => $tableName, 'type' => 'project_user',
+            'iat' => $now, 'exp' => $now + $projectUserTtl,
+        ], $config['JWT_SECRET'], $config['JWT_ALGO']);
+
+        json_out(['message' => 'Email verified successfully.', 'token' => $jwt]);
+    });
+
+    // POST /v1/data/:project_id/:table_name/resend-verification — same
+    // identifier auto-detection and enumeration-safe generic response as
+    // /forgot. Silently does nothing for an already-verified or nonexistent
+    // account, but the response is identical either way.
+    $router->post('/v1/data/:project_id/:table_name/resend-verification', function (array $req): void {
+        $projectId = (int)$req['params']['project_id'];
+        $tableName = $req['params']['table_name'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+
+        $table = $catalog->getTable($projectId, $tableName);
+        if (!$table) abort(404, 'Table not found');
+
+        $colRows  = $catalog->listColumns((int)$table['id']);
+        $colTypes = array_column($colRows, 'data_type', 'col_name');
+        if (!array_key_exists('email_verified', $colTypes)) abort(400, 'This table has no email_verified column');
+        if (!array_key_exists('email', $colTypes)) abort(400, 'This table has no email column');
+
+        $identVal = (string)($req['body']['email'] ?? '');
+        if ($identVal === '') abort(422, 'email is required');
+
+        \SupaBein\RateLimit::checkProject($projectId);
+
+        $generic = ['message' => 'If that account exists and is not yet verified, a new verification link has been sent.'];
+
+        $stmt = \App::get('db')->prepare('SELECT id, email_verified FROM `' . $table['physical_name'] . '` WHERE `email` = ? LIMIT 1');
+        $stmt->execute([$identVal]);
+        $row = $stmt->fetch();
+        if (!$row || (bool)$row['email_verified']) {
+            json_out($generic);
+            return;
+        }
+
+        $token = $catalog->createProjectEmailVerificationToken($projectId, $tableName, (int)$row['id']);
+        try {
+            $catalog->dispatchVerificationEmail($projectId, $identVal, $token);
+        } catch (\Throwable $e) {
+            sb_log('auth-email', 'resend-verification dispatch failed', ['project_id' => $projectId, 'error' => $e->getMessage()]);
+        }
+
+        json_out($generic);
+    });
+
+    // POST /v1/data/:project_id/:table_name/change-password — the
+    // authenticated counterpart to /forgot+/reset, for a user who already
+    // knows their current password and just wants a new one. Requires a
+    // project_user token scoped to this exact project+table -- optional_auth
+    // still runs so anon/other-role callers get a clean 401 rather than a
+    // confusing 422 from a missing identity.
+    $router->post('/v1/data/:project_id/:table_name/change-password', function (array $req): void {
+        $projectId = (int)$req['params']['project_id'];
+        $tableName = $req['params']['table_name'];
+        $catalog   = \SupaBein\Catalog::getInstance();
+        $auth      = $req['auth'];
+
+        if ($auth === null || ($auth['role'] ?? '') !== 'project_user'
+            || (int)($auth['project_id'] ?? 0) !== $projectId || ($auth['table'] ?? null) !== $tableName) {
+            abort(401, 'Must be logged in to this account to change its password');
+        }
+
+        $currentPassword = (string)($req['body']['current_password'] ?? '');
+        $newPassword     = (string)($req['body']['new_password'] ?? '');
+        if ($currentPassword === '' || $newPassword === '') abort(422, 'current_password and new_password are required');
+        if (strlen($newPassword) < 8) abort(422, 'New password must be at least 8 characters');
+
+        $table = $catalog->getTable($projectId, $tableName);
+        if (!$table) abort(404, 'Table not found');
+
+        $colRows  = $catalog->listColumns((int)$table['id']);
+        $colTypes = array_column($colRows, 'data_type', 'col_name');
+        $passwordCol = null;
+        foreach ($colTypes as $col => $type) {
+            if ($type === 'PASSWORD') { $passwordCol = $col; break; }
+        }
+        if ($passwordCol === null) abort(400, 'This table has no PASSWORD column');
+
+        $pdo  = \App::get('db');
+        $stmt = $pdo->prepare('SELECT `' . $passwordCol . '` AS hash FROM `' . $table['physical_name'] . '` WHERE id = ?');
+        $stmt->execute([$auth['user_id']]);
+        $row = $stmt->fetch();
+        if (!$row || !password_verify($currentPassword, (string)($row['hash'] ?? ''))) {
+            abort(401, 'Current password is incorrect');
+        }
+
+        $pdo->prepare('UPDATE `' . $table['physical_name'] . '` SET `' . $passwordCol . '` = ? WHERE id = ?')
+            ->execute([password_hash($newPassword, PASSWORD_BCRYPT), $auth['user_id']]);
+
+        json_out(['message' => 'Password changed successfully.']);
+    }, ['optional_auth_middleware']);
 
     $router->get(
         '/v1/data/:project_id/:table_name',

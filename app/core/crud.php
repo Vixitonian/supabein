@@ -231,6 +231,15 @@ class Crud
                 $body[$col] = password_hash((string)$body[$col], PASSWORD_BCRYPT);
             }
         }
+        // A table opts into the email-verification flow by convention (an
+        // `email_verified` column) -- see data_routes.php's /login, /verify.
+        // Never trust the client for this: force unverified on every insert
+        // regardless of what the request body says, exactly like a real
+        // registration would be.
+        $hasEmailVerifiedCol = in_array('email_verified', $allowedCols, true);
+        if ($hasEmailVerifiedCol) {
+            $body['email_verified'] = 0;
+        }
 
         try {
             [$sql, $params] = QueryBuilder::insert(
@@ -250,11 +259,35 @@ class Crud
         $stmt->execute([$newId]);
         $row = $stmt->fetch();
         if ($row && isset($row['id'])) $row['id'] = (int)$row['id'];
+        if ($row && $hasEmailVerifiedCol) self::maybeDispatchVerificationEmail($projectId, $tableName, $row, $colTypes);
         if ($row) [$row] = self::maskPasswordCols([$row], $colTypes);
         if ($row) [$row] = self::decodeJsonCols([$row], $colTypes);
         if ($row) self::fireInsertTriggers($projectId, $tableName, $row);
         if ($row) [$row] = self::castScalarCols([$row], $colTypes);
         json_out($row, 201);
+    }
+
+    // Best-effort dispatch of a verification email right after registration
+    // (an insert into a table with both a PASSWORD column and an
+    // `email_verified` column). Looks for a plain `email` column to send to
+    // -- if the table doesn't have one, this is silently skipped, same
+    // "feature doesn't activate" posture as the rest of the auth-email
+    // system rather than guessing at some other column. Never allowed to
+    // affect the insert's own response.
+    private static function maybeDispatchVerificationEmail(int $projectId, string $tableName, array $row, array $colTypes): void
+    {
+        if (!array_key_exists('email', $row) || !array_key_exists('email', $colTypes)) return;
+        if (!in_array('PASSWORD', $colTypes, true)) return;
+        $email = (string)($row['email'] ?? '');
+        if ($email === '' || (int)($row['id'] ?? 0) <= 0) return;
+
+        try {
+            $catalog = \SupaBein\Catalog::getInstance();
+            $token   = $catalog->createProjectEmailVerificationToken($projectId, $tableName, (int)$row['id']);
+            $catalog->dispatchVerificationEmail($projectId, $email, $token);
+        } catch (\Throwable $e) {
+            sb_log('auth-email', 'verification dispatch failed', ['project_id' => $projectId, 'table' => $tableName, 'error' => $e->getMessage()]);
+        }
     }
 
     // Best-effort, never allowed to affect the insert's own response --
@@ -287,6 +320,7 @@ class Crud
         }
 
         [$table, $allowedCols, $policy, $colTypes] = self::resolve($projectId, $tableName, $req['auth'], 'INSERT');
+        $hasEmailVerifiedCol = in_array('email_verified', $allowedCols, true);
 
         $pdo      = \App::get('db');
         $inserted = [];
@@ -298,6 +332,14 @@ class Crud
                 if (($colTypes[$col] ?? '') === 'PASSWORD' && isset($body[$col]) && $body[$col] !== '') {
                     $body[$col] = password_hash((string)$body[$col], PASSWORD_BCRYPT);
                 }
+            }
+            // Same as handleInsert: batch registration is still registration.
+            // Verification emails are deliberately NOT auto-sent per row here
+            // -- a 500-row batch is not a "someone just signed up" moment,
+            // and firing that many emails per request is its own abuse
+            // surface; batch-inserted rows just start out unverified.
+            if ($hasEmailVerifiedCol) {
+                $body['email_verified'] = 0;
             }
 
             try {
@@ -339,6 +381,11 @@ class Crud
                 $body[$col] = password_hash((string)$body[$col], PASSWORD_BCRYPT);
             }
         }
+        // `email_verified` can never be client-set through the generic
+        // update path -- the only legitimate way it becomes true is
+        // consuming a valid token via /verify (see data_routes.php), which
+        // updates it directly rather than going through Crud at all.
+        unset($body['email_verified']);
 
         try {
             [$sql, $params] = QueryBuilder::update(
