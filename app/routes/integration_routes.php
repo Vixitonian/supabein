@@ -75,6 +75,25 @@ function register_integration_routes(\SupaBein\Router $router): void
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
 
+    // POST /v1/projects/:id/integrations/use-platform-resend
+    // Provisions this project's own `resend` Integration backed by the
+    // platform's shared Resend key -- no secret in the request body, there
+    // is nothing to provide. From here it's a normal Integration: register
+    // an auth-email-provider against it (POST /v1/projects/:id/auth-email-provider,
+    // integration: "resend") the same way as with a self-supplied key.
+    // Deliberately its own explicit call, not something any other endpoint
+    // does on a project's behalf automatically -- see
+    // Catalog::provisionPlatformResendIntegration()'s doc comment for why.
+    $router->post('/v1/projects/:id/integrations/use-platform-resend', function (array $req) use ($catalog, $ownProject): void {
+        $project = $ownProject((int)$req['params']['id'], $req['auth']);
+        try {
+            $integration = $catalog->provisionPlatformResendIntegration($project['id']);
+        } catch (\RuntimeException $e) {
+            abort(500, $e->getMessage());
+        }
+        json_out($integration, 201);
+    }, ['auth_middleware']);
+
     // POST /v1/projects/:id/integrations/:name/proxy
     // { "method": "POST", "path": "subaccount", "body": {...} }
     //

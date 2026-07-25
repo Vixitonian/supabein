@@ -1884,6 +1884,29 @@ class Catalog
         return (int)$row['row_id'];
     }
 
+    // Provisions a project's own `resend` Integration row backed by the
+    // platform's own shared Resend key (app/routes/auth_routes.php's
+    // sb_send_email() uses the same config value for the dashboard's own
+    // account emails) -- so a project can get working transactional email
+    // without the tenant ever having to obtain and paste in their own
+    // Resend key. Deliberately still just a normal per-project Integration
+    // row afterward: same encryption, same SSRF-safe callIntegration()
+    // proxy, same per-project isolation as if the tenant had registered
+    // their own key -- this only changes where the secret value comes from
+    // at creation time, not how it's used afterward. Explicit/opt-in per
+    // project (called once, on request), never applied automatically to
+    // every project, since every project drawing on it shares the same
+    // underlying Resend account quota and sending reputation.
+    public function provisionPlatformResendIntegration(int $projectId): array
+    {
+        $config = \App::get('config');
+        $apiKey = $config['RESEND_API_KEY'] ?? '';
+        if ($apiKey === '') {
+            throw new \RuntimeException('Platform Resend key is not configured');
+        }
+        return $this->createIntegration($projectId, 'resend', 'https://api.resend.com', $apiKey, 'bearer', null);
+    }
+
     // ─── Auth email provider (dispatches a project's own /forgot and
     // /verify emails) ────────────────────────────────────────────────────────
 
