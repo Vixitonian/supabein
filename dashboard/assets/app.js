@@ -1643,8 +1643,17 @@ const AiPanel = (() => {
       intent,
       suggestProjectName(body.prompt),
       async (confirmedIntent, projectName) => {
-        const sess = currentSession();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== msg.id);
+        // The server's PATCH /v1/ai/sessions/:id upserts messages by id and
+        // never erases one it already has -- so once the pending review is
+        // persisted (see showIntentReviewCard), removing it from sess.messages
+        // client-side would NOT delete it server-side, just orphan a stale
+        // "still pending" copy that could resurface on a later reload.
+        // Mutating this same message in place means the next persistSession()
+        // call (triggered by addMessage below) overwrites that same id
+        // instead of leaving it behind.
+        msg.type = undefined;
+        msg.data = undefined;
+        msg.content = 'Requirements confirmed.';
         body.intent = { ...confirmedIntent, project_name: projectName };
         // Fire-and-forget — don't block the build start on DB round-trips
         addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
@@ -1654,13 +1663,13 @@ const AiPanel = (() => {
         await proceedWithPlan(body);
       },
       () => {
-        const sess = currentSession();
-        if (sess) sess.messages = sess.messages.filter(m => m.id !== msg.id);
-        // Cancelling used to just wipe the card with zero trace -- from the
-        // outside that reads as "it disappeared" (nothing built, no error,
-        // no explanation). Leave a plain note behind instead so cancelling
-        // is an intentional, visible action, not silent data loss.
-        addMessage(currentSessionId, { role: "ai", content: "Review cancelled -- nothing was built. Send another message to try again." });
+        // Same in-place-mutation reasoning as the confirm branch above --
+        // this IS the persisted pending-review message resolving into its
+        // final state, not a new message replacing a removed one.
+        msg.type = undefined;
+        msg.data = undefined;
+        msg.content = 'Review cancelled -- nothing was built. Send another message to try again.';
+        persistSession(currentSession());
         renderMessages();
       }
     );
@@ -1683,6 +1692,10 @@ const AiPanel = (() => {
     renderMessages();
     const container = panelEl?.querySelector('.ai-messages');
     if (container) container.scrollTop = container.scrollHeight;
+    // Persist so reopening the session resumes right at this review instead
+    // of losing it -- fire-and-forget, same posture as every other
+    // background save in this file (see addMessage).
+    persistSession(sess);
   }
 
   async function proceedWithPlan(body) {
