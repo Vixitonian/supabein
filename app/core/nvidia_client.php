@@ -17,7 +17,11 @@ class NvidiaClient
 
     public function __construct(
         private string $apiKey,
-        private string $model = 'qwen/qwen3.5-122b-a10b'
+        private string $model = 'qwen/qwen3.5-122b-a10b',
+        // See GeminiClient's constructor for why this is a param, not a
+        // hardcoded constant -- a short-lived caller (FallbackAiClient
+        // driving an interactive chat turn) passes something much smaller.
+        private int $timeoutSeconds = 420
     ) {}
 
     public function getLastUsage(): array
@@ -90,7 +94,7 @@ class NvidiaClient
                     'Authorization: Bearer ' . $this->apiKey,
                     'Accept: application/json',
                 ],
-                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_TIMEOUT        => $this->timeoutSeconds,
                 CURLOPT_CONNECTTIMEOUT => 10,
                 // Captured so a 429 can honor the server's own Retry-After
                 // instead of guessing at a backoff — see below.

@@ -270,6 +270,7 @@ tr:last-child td{border-bottom:none}
   </div>
   <div class="sb-group">
     <span class="sb-label">AI Assistants</span>
+    <a class="sb-link" href="#ai-models-list">Available models</a>
     <a class="sb-link" href="#ai-assistant-create">Register an assistant</a>
     <a class="sb-link" href="#ai-assistant-list">List assistants</a>
     <a class="sb-link" href="#ai-assistant-delete">Delete an assistant</a>
@@ -1702,6 +1703,20 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
 <p>A hosted AI chat capability for your project — unlike <a href="#integrations-create">Integrations</a>, you don't bring your own provider API key. SupaBein calls its own AI provider on your behalf, the same infrastructure the AI app-builder itself runs on, and meters usage against <strong>your account's AI credit balance</strong> (shared across every project you own — not a per-project budget).</p>
 <div class="callout">Every call is billed to the credit balance of the SupaBein account that owns the project, regardless of who or what actually calls it (your own token, a PAT, or an end-user's project_user token). A registered <code>system_prompt</code> is always enforced server-side — a caller can only ever supply conversation turns, never override it. Out of credit? Calls return <strong>402</strong> until your account is topped up.</div>
 
+<div class="endpoint" id="ai-models-list">
+  <div class="endpoint-head">
+    <span class="method get">GET</span>
+    <span class="path">/api/v1/ai/models</span>
+    <span class="desc">List every provider/model pair currently available on this server</span>
+  </div>
+  <div class="endpoint-body">
+    <div class="code-wrap"><pre class="code" id="c-aimodels">curl "https://your-domain/api/v1/ai/models" \
+  -H "Authorization: Bearer YOUR_TOKEN"</pre>
+    <button class="copy-btn" onclick="copyEl('c-aimodels',this)">Copy</button></div>
+    <p>Returns <code>{"models": [{"label": "...", "provider": "...", "model": "...", "badge": "..."}, ...]}</code> — the exact <code>provider</code>/<code>model</code> values are what you pass in an assistant's <code>models</code> field below. Deliberately dynamic rather than a hardcoded list here in the docs — a provider with no configured API key on this server is already filtered out, so everything returned is guaranteed callable right now, not aspirational.</p>
+  </div>
+</div>
+
 <div class="endpoint" id="ai-assistant-create">
   <div class="endpoint-head">
     <span class="method post">POST</span>
@@ -1715,10 +1730,17 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
   -d '{
     "name": "support-bot",
     "system_prompt": "You are Lois Stores'"'"' support assistant. Be concise and friendly.",
-    "allow_project_user": true
+    "allow_project_user": true,
+    "models": [
+      {"provider": "zhipu", "model": "glm-4.5-flash"},
+      {"provider": "groq", "model": "llama-3.3-70b-versatile"}
+    ],
+    "json_mode": false
   }'</pre>
     <button class="copy-btn" onclick="copyEl('c-aacreate',this)">Copy</button></div>
     <p><code>system_prompt</code> is optional (omit for a generic assistant with no special instructions) and locked — end users can never see or override it. <code>allow_project_user</code> defaults to <code>false</code> (owner/PAT-only); set it to let any authenticated end user of your project (a <a href="#data-login">project_user token</a>) chat with it directly — the natural setting for a customer-facing support/chat feature.</p>
+    <p><code>models</code> is optional — omit it entirely to use the platform's own default model selection (no code change needed if you never touch this). When set, it's an ordered list of <code>{"provider", "model"}</code> pairs (see <a href="#ai-models-list">Available models</a> for valid values) this assistant tries in turn: on a hard provider failure (rate limit exhausted, no credit, invalid key) it automatically moves to the next candidate, so a chat call only ever fails outright if every candidate in your list is currently unavailable. Each pair is validated against the server's real, currently-configured models at registration time — an unrecognized <code>provider</code> or <code>model</code> returns <strong>422</strong> with the actual valid options for that provider, rather than silently storing something that would fail later.</p>
+    <p><code>json_mode</code> defaults to <code>false</code> — the right setting for a normal conversational bot; the model replies in plain language, and forcing JSON syntax on that would either mangle a reply into a stray wrapped value or get the request outright rejected by some providers. Set it <code>true</code> only if this assistant's own <code>system_prompt</code> instructs the model to output structured JSON and <em>your own code</em> parses <code>reply</code> as JSON afterward — a one-shot content/config generator reusing this chat endpoint rather than a real back-and-forth conversation.</p>
   </div>
 </div>
 
@@ -1765,6 +1787,7 @@ curl "https://your-domain/api/v1/projects/1/sites/1/browse?path=core/router.js" 
   }'</pre>
     <button class="copy-btn" onclick="copyEl('c-aachat',this)">Copy</button></div>
     <p><code>messages</code> is the full conversation so far (send prior turns back each time — there's no server-side session) — each item is <code>{"role": "user"|"assistant", "content": "..."}</code>. The final item must be a <code>user</code> turn. Returns <code>{"reply": "...", "provider": "...", "model": "...", "usage": {...}, "cost_micro_usd": N}</code>. <code>cost_micro_usd</code> is what this one call was billed (1,000,000 = $1.00) — useful for your own usage display, though the source of truth is always the account's actual balance.</p>
+    <p><code>reply</code>'s format follows the assistant's own <code>json_mode</code> setting (see <a href="#ai-assistant-create">Register an assistant</a>) — plain conversational text by default, regardless of which candidate in a <code>models</code> fallback chain actually answered, or strict JSON if the assistant was registered with <code>json_mode: true</code>. There's no per-call override here; the setting is fixed at registration time for the assistant as a whole.</p>
     <p>Callable by the project's own owner/PAT, or by a project_user token if the assistant's <code>allow_project_user</code> is set. <strong>402</strong> if the owning account is out of AI credit and not on an unlimited grant.</p>
   </div>
 </div>

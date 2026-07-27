@@ -735,15 +735,16 @@ const AiPanel = (() => {
 
   // Ordered best-to-least capable for software/frontend generation (scale, tier, coding
   // pedigree, context window, and OpenRouter pricing as a capability proxy where relevant).
-  const AI_MODELS = [
+  let AI_MODELS = [
     { label: 'Claude Opus 4.8',      provider: 'anthropic',  model: 'claude-opus-4-8',                                   badge: 'Claude' },
     { label: 'Claude Sonnet 5',      provider: 'anthropic',  model: 'claude-sonnet-5',                                   badge: 'Claude' },
     { label: 'Nemotron 3 Ultra 550B',provider: 'nvidia',     model: 'nvidia/nemotron-3-ultra-550b-a55b',                 badge: 'NVIDIA' },
     { label: 'Kimi K2',              provider: 'openrouter', model: 'moonshotai/kimi-k2',                                badge: 'OpenRouter' },
     { label: 'GLM 5.2',              provider: 'nvidia',     model: 'z-ai/glm-5.2',                                      badge: 'NVIDIA' },
+    { label: 'GLM 4.5 Flash',        provider: 'zhipu',      model: 'glm-4.5-flash',                                     badge: 'Zhipu' },
+    { label: 'GLM 4.7 Flash',        provider: 'zhipu',      model: 'glm-4.7-flash',                                     badge: 'Zhipu' },
     { label: 'DeepSeek V4 Pro',      provider: 'nvidia',     model: 'deepseek-ai/deepseek-v4-pro',                       badge: 'NVIDIA' },
     { label: 'Qwen 3.5 122B',        provider: 'nvidia',     model: 'qwen/qwen3.5-122b-a10b',                            badge: 'NVIDIA' },
-    { label: 'Nemotron Super 120B',  provider: 'openrouter', model: 'nvidia/nemotron-3-super-120b-a12b:free',            badge: 'Free' },
     { label: 'GPT OSS 120B',         provider: 'openrouter', model: 'openai/gpt-oss-120b:free',                          badge: 'Free' },
     { label: 'DeepSeek V4 Flash',    provider: 'nvidia',     model: 'deepseek-ai/deepseek-v4-flash',                     badge: 'NVIDIA' },
     { label: 'Gemini 2.5 Flash',     provider: 'gemini',     model: 'gemini-2.5-flash',                                  badge: 'Fast' },
@@ -757,6 +758,22 @@ const AiPanel = (() => {
     { label: 'Laguna XS.2',          provider: 'openrouter', model: 'poolside/laguna-xs.2:free',                         badge: 'Free' },
   ];
 
+  // Single source of truth is now the backend's AI_MODEL_CATALOG (see
+  // GET /v1/ai/models) -- this refreshes the bundled fallback list above
+  // with the real, currently-configured catalog as soon as it's available,
+  // so a model added/removed server-side shows up here without a matching
+  // frontend edit ever being needed again.
+  (async () => {
+    try {
+      const result = await Api.get('/v1/ai/models');
+      if (Array.isArray(result?.models) && result.models.length) {
+        AI_MODELS = result.models;
+      }
+    } catch (e) {
+      // Offline, not yet authenticated, or the route itself failed --
+      // the bundled fallback list above stays in effect either way.
+    }
+  })();
   function getSelectedModel() {
     try { return JSON.parse(localStorage.getItem('sb:ai_model')) || AI_MODELS[0]; }
     catch { return AI_MODELS[0]; }

@@ -28,17 +28,25 @@ class FallbackAiClient
     private array $config;
     private object $client;
     private array $lastUsage = [];
+    // Per-candidate curl timeout (seconds) -- null keeps every raw client's
+    // own 420s app-builder default. A short-lived, interactive caller (e.g.
+    // Catalog::callAiAssistant()'s chat turn) passes something far smaller,
+    // so a slow/unresponsive candidate is abandoned quickly and this class's
+    // whole reason for existing -- moving on to the next model -- actually
+    // has a chance to kick in instead of the request just sitting there.
+    private ?int $timeoutSeconds;
     /** @var array<int, array{from_provider:string, from_model:string, to_provider:string, to_model:string, error:string}> */
     private array $fallbackEvents = [];
 
-    public function __construct(array $config, array $candidates)
+    public function __construct(array $config, array $candidates, ?int $timeoutSeconds = null)
     {
         if (!$candidates) {
             throw new \InvalidArgumentException('FallbackAiClient needs at least one candidate');
         }
-        $this->config     = $config;
-        $this->candidates = array_values($candidates);
-        $this->client      = $this->buildClient($this->candidates[0]);
+        $this->config         = $config;
+        $this->candidates     = array_values($candidates);
+        $this->timeoutSeconds = $timeoutSeconds;
+        $this->client          = $this->buildClient($this->candidates[0]);
     }
 
     private function buildClient(array $candidate): object
@@ -47,7 +55,7 @@ class FallbackAiClient
         // make_ai_client() itself, which now returns a FallbackAiClient and
         // would recurse infinitely. Resolved via PHP's normal namespace
         // fallback to the global function of the same name.
-        return \ai_make_single_client($this->config, $candidate['provider'], $candidate['model']);
+        return \ai_make_single_client($this->config, $candidate['provider'], $candidate['model'], $this->timeoutSeconds);
     }
 
     public function getActiveProvider(): string
@@ -84,14 +92,14 @@ class FallbackAiClient
         return method_exists($this->client, 'getLastRawText') ? $this->client->getLastRawText() : '';
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
     {
-        return $this->call(fn(object $c): array => $c->generateJson($systemPrompt, $userPrompt, $attachments));
+        return $this->call(fn(object $c): array => $c->generateJson($systemPrompt, $userPrompt, $attachments, $jsonMode));
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
     {
-        return $this->call(fn(object $c): array => $c->generateJsonWithHistory($systemPrompt, $history, $userPrompt, $attachments));
+        return $this->call(fn(object $c): array => $c->generateJsonWithHistory($systemPrompt, $history, $userPrompt, $attachments, $jsonMode));
     }
 
     private function call(\Closure $invoke): array

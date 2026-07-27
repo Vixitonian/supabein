@@ -79,6 +79,9 @@ require_once SUPABEIN_ROOT . '/app/core/storage.php';
 // binary on the production host to regenerate it) -- required explicitly
 // here instead, same as icon_generator.php below.
 require_once SUPABEIN_ROOT . '/app/core/groq_client.php';
+require_once SUPABEIN_ROOT . '/app/core/zhipu_client.php';
+require_once SUPABEIN_ROOT . '/app/core/deepseek_client.php';
+require_once SUPABEIN_ROOT . '/app/core/zhipu_image_client.php';
 require_once SUPABEIN_ROOT . '/app/routes/auth_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/project_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/table_routes.php';

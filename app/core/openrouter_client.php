@@ -22,7 +22,11 @@ class OpenRouterClient
 
     public function __construct(
         private string $apiKey,
-        private string $model = 'google/gemini-2.5-flash'
+        private string $model = 'google/gemini-2.5-flash',
+        // See GeminiClient's constructor for why this is a param, not a
+        // hardcoded constant -- a short-lived caller (FallbackAiClient
+        // driving an interactive chat turn) passes something much smaller.
+        private int $timeoutSeconds = 420
     ) {}
 
     public function getLastUsage(): array
@@ -111,7 +115,7 @@ class OpenRouterClient
                     'Authorization: Bearer ' . $this->apiKey,
                     'HTTP-Referer: ' . ($_SERVER['HTTP_HOST'] ?? 'supabein'),
                 ],
-                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_TIMEOUT        => $this->timeoutSeconds,
                 CURLOPT_CONNECTTIMEOUT => 10,
             ]);
 

@@ -2788,7 +2788,7 @@ function ai_read_frontend_files(array $config, \SupaBein\Catalog $catalog, int $
 
 // ─── AI provider factory ─────────────────────────────────────────────────────
 
-const AI_ALLOWED_PROVIDERS = ['gemini', 'groq', 'openrouter', 'nvidia', 'anthropic'];
+const AI_ALLOWED_PROVIDERS = ['gemini', 'groq', 'openrouter', 'nvidia', 'anthropic', 'zhipu', 'deepseek'];
 const AI_ALLOWED_MODELS = [
     'gemini' => [
         'gemini-2.5-flash',
@@ -2804,6 +2804,25 @@ const AI_ALLOWED_MODELS = [
     'anthropic' => [
         'claude-opus-4-8',
         'claude-sonnet-5',
+    ],
+    // Zhipu / BigModel (GLM). glm-4.5-flash is the efficient default (small
+    // reasoning overhead); glm-4.7-flash is a much heavier "thinking" model
+    // that needs a large max_tokens budget to get past its own reasoning
+    // trace before it ever emits real content -- see ZhipuClient's own
+    // token-budget comment for the live-measured numbers.
+    'zhipu' => [
+        'glm-4.5-flash',
+        'glm-4.7-flash',
+    ],
+    // DeepSeek's own API (not NVIDIA's hosted copy, which already appears
+    // under 'nvidia' above as deepseek-ai/deepseek-v4-*) -- this account's
+    // DeepSeek balance is $0 at wiring time (confirmed via a live 402
+    // "Insufficient Balance" response, distinct from the 401 a bad key
+    // returns), so every real call fails on billing until funded. Wired in
+    // anyway per explicit request -- starts working the moment it's funded,
+    // no code change needed.
+    'deepseek' => [
+        'deepseek-v4-flash',
     ],
     // Ordered best-to-least capable within each provider (index 0 is also that
     // provider's fallback default when an unrecognized model is requested).
@@ -2842,6 +2861,8 @@ const AI_ALLOWED_MODELS = [
         'poolside/laguna-m.1:free',
         'poolside/laguna-xs.2:free',
         'openai/gpt-oss-120b:free',
+        'nvidia/nemotron-3-nano-30b-a3b:free',
+        'nvidia/nemotron-nano-9b-v2:free',
         'moonshotai/kimi-k2',
         'mistralai/mistral-small-3.2-24b-instruct',
         'nex-agi/nex-n2-pro',
@@ -2855,13 +2876,53 @@ const AI_ALLOWED_MODELS = [
     ],
 ];
 
+// Single source of truth for the dashboard's model picker -- display order,
+// label, and badge for every (provider, model) pair a user can actually
+// choose. Previously duplicated as a hand-maintained array in
+// dashboard/assets/app.js; that copy silently drifted from this one (a
+// model added here never showed up there until someone remembered to patch
+// both). The dashboard now fetches this via GET /v1/ai/models instead of
+// hardcoding its own list -- see that route below, which also filters out
+// any entry whose provider has no configured API key.
+//
+// Deliberately NOT auto-derived from AI_ALLOWED_MODELS's per-provider tier
+// order: this list's cross-provider interleaving ("best overall" ordering,
+// not grouped by provider) is a curated UX decision, not a mechanical one.
+// The /v1/ai/models route below cross-checks every entry against
+// AI_ALLOWED_MODELS so a typo'd or removed model here fails loud (filtered
+// out) instead of silently offering a choice ai_make_single_client() would
+// then quietly substitute away from.
+const AI_MODEL_CATALOG = [
+    ['label' => 'Claude Opus 4.8',       'provider' => 'anthropic',  'model' => 'claude-opus-4-8',                                    'badge' => 'Claude'],
+    ['label' => 'Claude Sonnet 5',       'provider' => 'anthropic',  'model' => 'claude-sonnet-5',                                    'badge' => 'Claude'],
+    ['label' => 'Nemotron 3 Ultra 550B', 'provider' => 'nvidia',     'model' => 'nvidia/nemotron-3-ultra-550b-a55b',                  'badge' => 'NVIDIA'],
+    ['label' => 'Kimi K2',               'provider' => 'openrouter', 'model' => 'moonshotai/kimi-k2',                                 'badge' => 'OpenRouter'],
+    ['label' => 'GLM 5.2',               'provider' => 'nvidia',     'model' => 'z-ai/glm-5.2',                                       'badge' => 'NVIDIA'],
+    ['label' => 'GLM 4.5 Flash',         'provider' => 'zhipu',      'model' => 'glm-4.5-flash',                                      'badge' => 'Zhipu'],
+    ['label' => 'GLM 4.7 Flash',         'provider' => 'zhipu',      'model' => 'glm-4.7-flash',                                      'badge' => 'Zhipu'],
+    ['label' => 'DeepSeek V4 Flash (direct)', 'provider' => 'deepseek', 'model' => 'deepseek-v4-flash',                             'badge' => 'DeepSeek'],
+    ['label' => 'DeepSeek V4 Pro',       'provider' => 'nvidia',     'model' => 'deepseek-ai/deepseek-v4-pro',                        'badge' => 'NVIDIA'],
+    ['label' => 'Qwen 3.5 122B',         'provider' => 'nvidia',     'model' => 'qwen/qwen3.5-122b-a10b',                             'badge' => 'NVIDIA'],
+    ['label' => 'Nemotron Super 120B',   'provider' => 'openrouter', 'model' => 'nvidia/nemotron-3-super-120b-a12b:free',             'badge' => 'Free'],
+    ['label' => 'GPT OSS 120B',          'provider' => 'openrouter', 'model' => 'openai/gpt-oss-120b:free',                           'badge' => 'Free'],
+    ['label' => 'DeepSeek V4 Flash',     'provider' => 'nvidia',     'model' => 'deepseek-ai/deepseek-v4-flash',                      'badge' => 'NVIDIA'],
+    ['label' => 'Gemini 2.5 Flash',      'provider' => 'gemini',     'model' => 'gemini-2.5-flash',                                   'badge' => 'Fast'],
+    ['label' => 'Laguna M.1',            'provider' => 'openrouter', 'model' => 'poolside/laguna-m.1:free',                           'badge' => 'Free'],
+    ['label' => 'North Mini Code',       'provider' => 'openrouter', 'model' => 'cohere/north-mini-code:free',                        'badge' => 'Free'],
+    ['label' => 'Mistral Small 3.2',     'provider' => 'openrouter', 'model' => 'mistralai/mistral-small-3.2-24b-instruct',           'badge' => 'OpenRouter'],
+    ['label' => 'Nex N2 Pro',            'provider' => 'openrouter', 'model' => 'nex-agi/nex-n2-pro',                                 'badge' => 'OpenRouter'],
+    ['label' => 'Gemma 4 26B (MoE)',     'provider' => 'openrouter', 'model' => 'google/gemma-4-26b-a4b-it:free',                     'badge' => 'Free'],
+    ['label' => 'Nemotron Nano Omni',    'provider' => 'openrouter', 'model' => 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free', 'badge' => 'Free'],
+    ['label' => 'GPT OSS 20B',           'provider' => 'openrouter', 'model' => 'openai/gpt-oss-20b:free',                            'badge' => 'Free'],
+    ['label' => 'Laguna XS.2',           'provider' => 'openrouter', 'model' => 'poolside/laguna-xs.2:free',                          'badge' => 'Free'],
+];
 // Builds exactly one raw provider client for one specific (provider, model).
 // Only ever called (a) directly, for the simple single-provider case, or
 // (b) from FallbackAiClient against candidates ai_build_fallback_chain()
 // already filtered to providers with a configured key — never speculatively
 // against an unconfigured one, since abort() below is a hard, uncatchable
 // process exit (: never), not a throwable a try/catch could react to.
-function ai_make_single_client(array $config, ?string $provider, ?string $model): object
+function ai_make_single_client(array $config, ?string $provider, ?string $model, ?int $timeoutSeconds = null): object
 {
     $provider = in_array($provider, AI_ALLOWED_PROVIDERS, true)
         ? $provider
@@ -2872,7 +2933,7 @@ function ai_make_single_client(array $config, ?string $provider, ?string $model)
         if (!$key) abort(503, 'OpenRouter API key not configured on this server');
         $allowed = AI_ALLOWED_MODELS['openrouter'];
         $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
-        return new \SupaBein\OpenRouterClient($key, $model);
+        return new \SupaBein\OpenRouterClient($key, $model, $timeoutSeconds ?? 420);
     }
 
     if ($provider === 'nvidia') {
@@ -2880,7 +2941,7 @@ function ai_make_single_client(array $config, ?string $provider, ?string $model)
         if (!$key) abort(503, 'NVIDIA API key not configured on this server');
         $allowed = AI_ALLOWED_MODELS['nvidia'];
         $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
-        return new \SupaBein\NvidiaClient($key, $model);
+        return new \SupaBein\NvidiaClient($key, $model, $timeoutSeconds ?? 420);
     }
 
     if ($provider === 'anthropic') {
@@ -2888,7 +2949,7 @@ function ai_make_single_client(array $config, ?string $provider, ?string $model)
         if (!$key) abort(503, 'Anthropic API key not configured on this server');
         $allowed = AI_ALLOWED_MODELS['anthropic'];
         $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
-        return new \SupaBein\AnthropicClient($key, $model);
+        return new \SupaBein\AnthropicClient($key, $model, $timeoutSeconds ?? 420);
     }
 
     if ($provider === 'groq') {
@@ -2896,7 +2957,23 @@ function ai_make_single_client(array $config, ?string $provider, ?string $model)
         if (!$key) abort(503, 'Groq API key not configured on this server');
         $allowed = AI_ALLOWED_MODELS['groq'];
         $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
-        return new \SupaBein\GroqClient($key, $model);
+        return new \SupaBein\GroqClient($key, $model, $timeoutSeconds ?? 420);
+    }
+
+    if ($provider === 'zhipu') {
+        $key = $config['ZHIPU_API_KEY'] ?? '';
+        if (!$key) abort(503, 'Zhipu API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['zhipu'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\ZhipuClient($key, $model, $timeoutSeconds ?? 420);
+    }
+
+    if ($provider === 'deepseek') {
+        $key = $config['DEEPSEEK_API_KEY'] ?? '';
+        if (!$key) abort(503, 'DeepSeek API key not configured on this server');
+        $allowed = AI_ALLOWED_MODELS['deepseek'];
+        $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
+        return new \SupaBein\DeepSeekClient($key, $model, $timeoutSeconds ?? 420);
     }
 
     // Default: Gemini
@@ -2904,7 +2981,7 @@ function ai_make_single_client(array $config, ?string $provider, ?string $model)
     if (!$key) abort(503, 'AI build is not configured on this server (missing GEMINI_API_KEY)');
     $allowed = AI_ALLOWED_MODELS['gemini'];
     $model   = in_array($model, $allowed, true) ? $model : $allowed[0];
-    return new \SupaBein\GeminiClient($key, $model);
+    return new \SupaBein\GeminiClient($key, $model, $timeoutSeconds ?? 420);
 }
 
 function ai_provider_configured(array $config, string $provider): bool
@@ -2915,8 +2992,64 @@ function ai_provider_configured(array $config, string $provider): bool
         'anthropic'  => !empty($config['ANTHROPIC_API_KEY']),
         'gemini'     => !empty($config['GEMINI_API_KEY']),
         'groq'       => !empty($config['GROQ_API_KEY']),
+        'zhipu'      => !empty($config['ZHIPU_API_KEY']),
+        'deepseek'   => !empty($config['DEEPSEEK_API_KEY']),
         default      => false,
     };
+}
+// ─── Image generation (AI Assistants "image" kind) ─────────────────────────
+// Separate registry from the text/chat one above -- a provider or model
+// valid for a text chat assistant has nothing to do with whether it's an
+// image provider, and vice versa. Only Zhipu/CogView-4 today; structured the
+// same way as AI_ALLOWED_PROVIDERS/AI_ALLOWED_MODELS so a second image
+// provider slots in without touching Catalog::callAiAssistantImage() at all.
+const AI_IMAGE_ALLOWED_PROVIDERS = ['zhipu'];
+// cogview-3-flash listed first -- it's the priority/default choice
+// (AI_IMAGE_ALLOWED_MODELS[$provider][0], same convention as the text
+// registry above). Both models live-tested (2026-07) via a direct API call;
+// both carry the identical watermark ZhipuImageClient already crops.
+const AI_IMAGE_ALLOWED_MODELS = [
+    'zhipu' => ['cogview-3-flash', 'cogview-4'],
+];
+
+function ai_image_provider_configured(array $config, string $provider): bool
+{
+    return match ($provider) {
+        'zhipu' => !empty($config['ZHIPU_API_KEY']),
+        default => false,
+    };
+}
+
+// Returns raw image bytes (PNG). Mirrors ai_make_single_client()'s dispatch
+// shape but for image generation, which has no shared client interface
+// worth building yet (only one provider) -- add a real dispatch table here
+// if/when a second one shows up.
+function ai_generate_image(array $config, string $provider, string $model, string $prompt): string
+{
+    if ($provider === 'zhipu' && in_array($model, AI_IMAGE_ALLOWED_MODELS['zhipu'], true)) {
+        $key = $config['ZHIPU_API_KEY'] ?? '';
+        if (!$key) abort(503, 'Zhipu API key not configured on this server');
+        return \SupaBein\ZhipuImageClient::generate($key, $prompt, $model);
+    }
+    throw new \RuntimeException("Unsupported image provider/model: $provider/$model");
+}
+
+// Whether a (provider, model) candidate is genuinely free to call, for
+// ordering the no-preference fallback chain (see ai_build_fallback_chain())
+// free-before-paid. Deliberately conservative: only providers/models with an
+// explicit, documented free tier count -- Groq's entire catalog (hosted
+// directly, not fanned out to paid backing providers -- see
+// AI_ALLOWED_MODELS's own comment) and OpenRouter's ":free"-suffixed slugs.
+// Gemini, Anthropic, NVIDIA, and OpenRouter's non-":free" models are all
+// billed per-token (or, for this account specifically, fail outright on
+// "insufficient credits" -- see AI_ALLOWED_MODELS's OpenRouter comment) and
+// are treated as paid here even though the caller's own key might happen to
+// have free trial credit remaining.
+function ai_model_is_free(string $provider, string $model): bool
+{
+    if ($provider === 'groq') return true;
+    if ($provider === 'openrouter') return str_ends_with($model, ':free');
+    return false;
 }
 
 // Builds the ordered list of (provider, model) candidates a FallbackAiClient
@@ -2955,11 +3088,26 @@ function ai_build_fallback_chain(array $config, ?string $preferredProvider, ?str
         return $chain;
     }
 
+    // 1. The one model already live-verified end-to-end against the real
+    //    flyer-planner prompt (~7.4k tokens) -- see AI_ALLOWED_MODELS's own
+    //    comment on this exact slug.
+    $add('openrouter', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free');
+
+    // 2. Every other genuinely free model (see ai_model_is_free()), before
+    //    any paid one -- $add() already no-ops the duplicate from step 1.
+    foreach (AI_ALLOWED_PROVIDERS as $provider) {
+        foreach (AI_ALLOWED_MODELS[$provider] ?? [] as $model) {
+            if (ai_model_is_free($provider, $model)) $add($provider, $model);
+        }
+    }
+
+    // 3. Only once every free candidate is queued, the paid/cost-unconfirmed
+    //    ones -- same best-to-least-capable tier-interleave as before.
     $maxTier = max(array_map('count', AI_ALLOWED_MODELS));
     for ($tier = 0; $tier < $maxTier; $tier++) {
         foreach (AI_ALLOWED_PROVIDERS as $provider) {
             $models = AI_ALLOWED_MODELS[$provider] ?? [];
-            if (isset($models[$tier])) $add($provider, $models[$tier]);
+            if (isset($models[$tier]) && !ai_model_is_free($provider, $models[$tier])) $add($provider, $models[$tier]);
         }
     }
 
@@ -2970,13 +3118,13 @@ function ai_build_fallback_chain(array $config, ?string $preferredProvider, ?str
 // automatic cross-provider/cross-model fallback for free, with no changes of
 // their own, since FallbackAiClient exposes the exact same generateJson /
 // generateJsonWithHistory / getLastUsage surface every raw client already did.
-function make_ai_client(array $config, ?string $provider, ?string $model): object
+function make_ai_client(array $config, ?string $provider, ?string $model, ?int $timeoutSeconds = null): object
 {
     $chain = ai_build_fallback_chain($config, $provider, $model);
     if (!$chain) {
         abort(503, 'No AI provider is configured on this server');
     }
-    return new \SupaBein\FallbackAiClient($config, $chain);
+    return new \SupaBein\FallbackAiClient($config, $chain, $timeoutSeconds);
 }
 
 // ─── Reference file attachments (build/edit prompts) ─────────────────────────
@@ -5011,7 +5159,7 @@ function ai_is_unrecoverable_provider_error(string $msg): bool
 {
     $msg = strtolower($msg);
     if (str_contains($msg, 'rate limit') && (str_contains($msg, 'per-day') || str_contains($msg, 'per day') || str_contains($msg, 'daily'))) return true;
-    foreach (['insufficient credit', 'add credit', 'add 10 credits', 'credit balance is too low', 'quota exceeded', 'exceeded your current quota', 'invalid api key', 'unauthorized'] as $needle) {
+    foreach (['insufficient credit', 'insufficient balance', 'add credit', 'add 10 credits', 'credit balance is too low', 'quota exceeded', 'exceeded your current quota', 'invalid api key', 'unauthorized'] as $needle) {
         if (str_contains($msg, $needle)) return true;
     }
     // Live-caught: attaching an image to a build/edit request can land on a
@@ -7926,6 +8074,21 @@ PROMPT;
     // History is project-scoped: pass ?project_id=<id> for a specific project's
     // sessions, ?project_id=none for the "Build with AI" bucket (no project yet),
     // or omit entirely for the full unscoped list.
+    // Backs the dashboard's model picker -- see AI_MODEL_CATALOG's own
+    // comment for why this replaced a hardcoded frontend array. Filters out
+    // (a) any provider with no configured API key and (b) any entry whose
+    // model isn't actually present in AI_ALLOWED_MODELS for that provider,
+    // so a stale or typo'd catalog entry never offers a choice that would
+    // silently get substituted for a different model server-side.
+    $router->get('/v1/ai/models', function (array $req): void {
+        $config = \App::get('config');
+        $models = array_values(array_filter(AI_MODEL_CATALOG, function (array $entry) use ($config): bool {
+            if (!ai_provider_configured($config, $entry['provider'])) return false;
+            $allowed = AI_ALLOWED_MODELS[$entry['provider']] ?? [];
+            return in_array($entry['model'], $allowed, true);
+        }));
+        json_out(['models' => $models]);
+    }, ['auth_middleware']);
     $router->get('/v1/ai/sessions', function (array $req): void {
         $userId    = (int)$req['auth']['user_id'];
         $catalog   = \SupaBein\Catalog::getInstance();
@@ -7947,7 +8110,7 @@ PROMPT;
         if ($prompt === '') abort(422, 'prompt is required');
         $config = \App::get('config');
         try {
-            $client = make_ai_client($config, null, null); // default fast model — keep it cheap
+            $client = make_ai_client($config, null, null, 60); // default fast model — keep it cheap
             $sys = 'You title chat sessions. Given the user\'s first message, return ONLY JSON {"title": "..."} '
                  . 'with a concise, specific 1-5 word Title Case label (max 40 chars, no trailing punctuation, no quotes).';
             $res   = $client->generateJson($sys, mb_substr($prompt, 0, 500));

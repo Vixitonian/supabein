@@ -2253,14 +2253,34 @@ class Catalog
 
     // ─── AI assistants (per-project, hosted -- no secret storage) ─────────────
 
-    public function createAiAssistant(int $projectId, string $name, ?string $systemPrompt, bool $allowProjectUser): array
+    // $models: ordered array of ['provider' => .., 'model' => ..] candidates
+    // this assistant should try in turn (see callAiAssistant()) -- null
+    // (the default) keeps today's behavior, falling back to the platform's
+    // own no-preference default chain. Validated by the route layer against
+    // AI_ALLOWED_PROVIDERS/AI_ALLOWED_MODELS before ever reaching here, same
+    // division of responsibility as every other validated create* method.
+    // $jsonMode: false (the default) is right for the common case -- a
+    // conversational support/chat bot, where forcing JSON-mode output either
+    // gets the request outright rejected (Groq requires the literal word
+    // "json" appear in the prompt when this is set) or mangles a plain reply
+    // into a stray wrapped JSON value. Set it true only for an assistant
+    // whose OWN system_prompt demands structured JSON back and whose caller
+    // parses `reply` as JSON on their end (e.g. a one-shot content/config
+    // generator reusing this chat endpoint rather than a real conversation)
+    // -- see callAiAssistant(), which reads this per-assistant instead of a
+    // single hardcoded choice for every assistant on the platform.
+    public function createAiAssistant(int $projectId, string $name, ?string $systemPrompt, bool $allowProjectUser, ?array $models = null, bool $jsonMode = false): array
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO ai_assistants (project_id, name, system_prompt, allow_project_user)
-             VALUES (?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE system_prompt = VALUES(system_prompt), allow_project_user = VALUES(allow_project_user)'
+            'INSERT INTO ai_assistants (project_id, name, system_prompt, allow_project_user, models, json_mode)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE system_prompt = VALUES(system_prompt), allow_project_user = VALUES(allow_project_user), models = VALUES(models), json_mode = VALUES(json_mode)'
         );
-        $stmt->execute([$projectId, $name, $systemPrompt, $allowProjectUser ? 1 : 0]);
+        $stmt->execute([
+            $projectId, $name, $systemPrompt, $allowProjectUser ? 1 : 0,
+            $models !== null ? json_encode($models, JSON_UNESCAPED_UNICODE) : null,
+            $jsonMode ? 1 : 0,
+        ]);
         return $this->getAiAssistant($projectId, $name);
     }
 
@@ -2268,14 +2288,22 @@ class Catalog
     {
         $stmt = $this->pdo->prepare('SELECT * FROM ai_assistants WHERE project_id = ? ORDER BY name');
         $stmt->execute([$projectId]);
-        return self::castRows($stmt->fetchAll(), ['id', 'project_id', 'allow_project_user']);
+        $rows = self::castRows($stmt->fetchAll(), ['id', 'project_id', 'allow_project_user', 'json_mode']);
+        foreach ($rows as &$row) {
+            $row['models'] = $row['models'] !== null ? (json_decode($row['models'], true) ?? null) : null;
+        }
+        return $rows;
     }
 
     public function getAiAssistant(int $projectId, string $name): ?array
     {
         $stmt = $this->pdo->prepare('SELECT * FROM ai_assistants WHERE project_id = ? AND name = ?');
         $stmt->execute([$projectId, $name]);
-        return self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'allow_project_user']);
+        $row = self::castRow($stmt->fetch() ?: null, ['id', 'project_id', 'allow_project_user', 'json_mode']);
+        if ($row !== null) {
+            $row['models'] = $row['models'] !== null ? (json_decode($row['models'], true) ?? null) : null;
+        }
+        return $row;
     }
 
     public function deleteAiAssistant(int $projectId, string $name): bool
@@ -2285,6 +2313,42 @@ class Catalog
         return $stmt->rowCount() > 0;
     }
 
+    // Builds this assistant's AI client: its own ordered candidate list when
+    // one is configured (filtered to providers that are both allowed AND
+    // actually have a key configured on this server -- exactly the same two
+    // checks ai_build_fallback_chain() applies, just against a caller-chosen
+    // subset/order instead of the platform default), or the ordinary
+    // no-preference default chain when it isn't. A configured list that
+    // filters down to nothing (every candidate's provider lost its key, or
+    // the list only ever contained now-invalid entries) throws rather than
+    // silently falling through to the default chain -- an assistant owner
+    // who deliberately restricted their model choices should see a clear
+    // error, not a surprise call to some other model they didn't pick.
+    private function buildAiAssistantClient(array $config, ?array $models): object
+    {
+        if ($models === null || $models === []) {
+            return \make_ai_client($config, null, null, 60);
+        }
+        $candidates = [];
+        $seen = [];
+        foreach ($models as $entry) {
+            $provider = is_array($entry) ? ($entry['provider'] ?? null) : null;
+            $model    = is_array($entry) ? ($entry['model'] ?? null) : null;
+            if (!is_string($provider) || !is_string($model)) continue;
+            if (!in_array($provider, \AI_ALLOWED_PROVIDERS, true)) continue;
+            if (!\ai_provider_configured($config, $provider)) continue;
+            $allowed = \AI_ALLOWED_MODELS[$provider] ?? [];
+            if (!in_array($model, $allowed, true)) continue;
+            $key = $provider . ':' . $model;
+            if (isset($seen[$key])) continue;
+            $seen[$key] = true;
+            $candidates[] = ['provider' => $provider, 'model' => $model];
+        }
+        if (!$candidates) {
+            throw new \RuntimeException('None of this assistant\'s configured models are currently available.');
+        }
+        return new \SupaBein\FallbackAiClient($config, $candidates, 60);
+    }
     // Runs a chat turn through SupaBein's own hosted AI (the exact same
     // make_ai_client()/FallbackAiClient the app-builder uses -- no per-
     // project provider key, no new outbound-call machinery). The registered
@@ -2330,9 +2394,18 @@ class Catalog
         }
 
         $config = \App::get('config');
-        $client = \make_ai_client($config, null, null);
+        $client = $this->buildAiAssistantClient($config, $assistant['models'] ?? null);
         try {
-            $client->generateJsonWithHistory((string)($assistant['system_prompt'] ?? ''), $history, $lastUserMessage);
+            // Per-assistant, not hardcoded: most assistants are plain
+            // conversational chat (jsonMode false is the default -- forcing
+            // JSON either gets the request outright rejected by Groq, which
+            // requires the literal word "json" somewhere in the prompt, or
+            // mangles a plain reply into a stray wrapped JSON value elsewhere).
+            // An assistant whose own system_prompt demands structured JSON
+            // back (and whose caller parses `reply` as JSON) opts in via
+            // json_mode: true at creation -- see createAiAssistant()'s doc
+            // comment.
+            $client->generateJsonWithHistory((string)($assistant['system_prompt'] ?? ''), $history, $lastUserMessage, [], (bool)($assistant['json_mode'] ?? false));
         } catch (\RuntimeException $e) {
             // These clients are built for the app-builder's structured-JSON
             // contract and throw if the model's reply isn't itself valid

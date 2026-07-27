@@ -25,19 +25,54 @@ function register_ai_assistant_routes(\SupaBein\Router $router): void
 
     // POST /v1/projects/:id/ai-assistants
     // { "name": "support-bot", "system_prompt": "You are Lois Stores' support assistant...",
-    //   "allow_project_user": true }
+    //   "allow_project_user": true,
+    //   "models": [{"provider": "zhipu", "model": "glm-4.5-flash"}, {"provider": "groq", "model": "llama-3.3-70b-versatile"}] }
+    //
+    // `models` is optional -- omit it (or send null) to keep the platform's
+    // own no-preference default fallback chain, same as before this field
+    // existed. When given, it's the assistant's OWN ordered fallback list:
+    // callAiAssistant() tries each candidate in order, moving to the next
+    // only on an unrecoverable provider error (rate limit, no credit,
+    // invalid key -- see ai_is_unrecoverable_provider_error()), exactly the
+    // same mechanism FallbackAiClient already uses everywhere else.
     $router->post('/v1/projects/:id/ai-assistants', function (array $req) use ($catalog, $ownProject, $validName): void {
         $project = $ownProject((int)$req['params']['id'], $req['auth']);
 
         $name              = strtolower(trim((string)($req['body']['name'] ?? '')));
         $systemPrompt      = isset($req['body']['system_prompt']) ? (string)$req['body']['system_prompt'] : null;
         $allowProjectUser  = (bool)($req['body']['allow_project_user'] ?? false);
+        // See Catalog::createAiAssistant()'s doc comment -- false (the
+        // default) is right for a normal conversational chat bot; only set
+        // this for an assistant whose own system_prompt demands structured
+        // JSON back and whose caller parses \`reply\` as JSON on their end.
+        $jsonMode          = (bool)($req['body']['json_mode'] ?? false);
+        $modelsRaw         = $req['body']['models'] ?? null;
 
         if (!$validName($name)) {
             abort(422, 'name must be lowercase letters, numbers, "-", "_" (max 63 chars).');
         }
 
-        $assistant = $catalog->createAiAssistant($project['id'], $name, $systemPrompt, $allowProjectUser);
+        $models = null;
+        if ($modelsRaw !== null) {
+            if (!is_array($modelsRaw) || empty($modelsRaw)) {
+                abort(422, 'models must be a non-empty array of {"provider": "...", "model": "..."} objects, or omitted entirely.');
+            }
+            $models = [];
+            foreach (array_values($modelsRaw) as $i => $entry) {
+                $provider = is_array($entry) ? ($entry['provider'] ?? null) : null;
+                $model    = is_array($entry) ? ($entry['model'] ?? null) : null;
+                if (!is_string($provider) || !in_array($provider, AI_ALLOWED_PROVIDERS, true)) {
+                    abort(422, "models[$i]: \"provider\" must be one of: " . implode(', ', AI_ALLOWED_PROVIDERS));
+                }
+                $allowed = AI_ALLOWED_MODELS[$provider] ?? [];
+                if (!is_string($model) || !in_array($model, $allowed, true)) {
+                    abort(422, "models[$i]: \"model\" must be one of: " . implode(', ', $allowed) . " (for provider \"$provider\")");
+                }
+                $models[] = ['provider' => $provider, 'model' => $model];
+            }
+        }
+
+        $assistant = $catalog->createAiAssistant($project['id'], $name, $systemPrompt, $allowProjectUser, $models, $jsonMode);
         json_out($assistant, 201);
     }, ['auth_middleware']);
 

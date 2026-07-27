@@ -30,7 +30,11 @@ class GroqClient
 
     public function __construct(
         private string $apiKey,
-        private string $model = 'llama-3.3-70b-versatile'
+        private string $model = 'llama-3.3-70b-versatile',
+        // See GeminiClient's constructor for why this is a param, not a
+        // hardcoded constant -- a short-lived caller (FallbackAiClient
+        // driving an interactive chat turn) passes something much smaller.
+        private int $timeoutSeconds = 420
     ) {}
 
     public function getLastUsage(): array
@@ -51,15 +55,15 @@ class GroqClient
      *   Deliberate degrade: this client is typically reached deep in the
      *   fallback chain, and dropping an image there beats failing outright.
      */
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
             ['role' => 'user',   'content' => $userPrompt],
-        ]);
+        ], $jsonMode);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {
@@ -70,10 +74,10 @@ class GroqClient
             ];
         }
         $messages[] = ['role' => 'user', 'content' => $userPrompt];
-        return $this->call($messages);
+        return $this->call($messages, $jsonMode);
     }
 
-    private function call(array $messages): array
+    private function call(array $messages, bool $jsonMode = true): array
     {
         $probeKey  = 'groq:' . $this->model;
 
@@ -92,13 +96,17 @@ class GroqClient
                 'messages'        => $messages,
                 'max_tokens'      => $maxTokens,
                 'stream'          => false,
+            ];
+            if ($jsonMode) {
                 // Unlike OpenRouter (which fans out to many backing providers
                 // with inconsistent support), Groq hosts these models itself
-                // and reliably honors json_object mode -- every system prompt
-                // in this codebase already describes a JSON shape and says
-                // "json" explicitly, which is all Groq requires to accept this.
-                'response_format' => ['type' => 'json_object'],
-            ];
+                // and reliably honors json_object mode -- but Groq also HARD
+                // REJECTS the request outright if the word "json" doesn't
+                // appear anywhere in the messages, which a plain conversational
+                // chat turn (Catalog::callAiAssistant(), jsonMode: false) has no
+                // reason to guarantee -- so this is opt-in, not automatic.
+                $body['response_format'] = ['type' => 'json_object'];
+            }
             $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
 
             $responseHeaders = [];
@@ -112,7 +120,7 @@ class GroqClient
                     'Authorization: Bearer ' . $this->apiKey,
                     'Accept: application/json',
                 ],
-                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_TIMEOUT        => $this->timeoutSeconds,
                 CURLOPT_CONNECTTIMEOUT => 10,
                 // Captured so a 429 can honor the server's own Retry-After
                 // instead of guessing at a backoff.
@@ -148,6 +156,30 @@ class GroqClient
                         MaxTokensProbe::remember($probeKey, $maxTokens);
                         continue;
                     }
+                }
+                // Groq's own json_object-mode server-side validator can
+                // reject a single generation on its own merits (a fresh
+                // attempt from the same model often just produces valid
+                // JSON the second time) -- deliberately NOT treated as
+                // chain-jumping-worthy in ai_is_unrecoverable_provider_error()
+                // for exactly this reason, so it has to be retried in place
+                // here instead, or it surfaces as a raw 502 straight to
+                // whatever called this (e.g. Catalog::callAiAssistant()).
+                if ($attempt < 4 && stripos($msg, 'failed to validate json') !== false) {
+                    continue;
+                }
+                // A daily quota 429 (TPD/RPD -- "tokens per day"/"requests
+                // per day") cannot be fixed by waiting out this request's
+                // budget: Groq's own message states retry windows in hours,
+                // not seconds (live-caught: "Please try again in 1h36m...").
+                // Sleeping through the retry loop below would burn ~180s
+                // (3 attempts x 60s cap) on a model that is certain to fail
+                // every one of them -- throw immediately instead, so
+                // ai_is_unrecoverable_provider_error() (which already
+                // recognizes "per day") sends the caller straight to the
+                // next candidate in the fallback chain right away.
+                if ($httpCode === 429 && stripos($msg, 'per day') !== false) {
+                    throw $lastError;
                 }
                 // Retry on 5xx or 429 (rate limit) -- honor the server's own
                 // Retry-After when it sends one (capped at 60s), same

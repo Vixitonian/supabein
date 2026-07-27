@@ -480,6 +480,17 @@ CREATE TABLE IF NOT EXISTS `ai_assistants` (
     `name`                VARCHAR(64) NOT NULL,
     `system_prompt`       TEXT DEFAULT NULL,
     `allow_project_user`  TINYINT(1) NOT NULL DEFAULT 0,
+    -- Ordered JSON array of {"provider":..,"model":..} candidates this
+    -- assistant tries in turn (see Catalog::callAiAssistant()) -- NULL
+    -- means "no preference," falling back to the platform's own default
+    -- fallback chain (ai_build_fallback_chain() with no preferred provider).
+    `models`              TEXT DEFAULT NULL,
+    -- false (default): plain conversational chat -- never forces JSON-mode
+    -- output on the model (see callAiAssistant()). true: this assistant's
+    -- own system_prompt demands structured JSON back and its caller parses
+    -- `reply` as JSON -- e.g. a one-shot content/config generator reusing
+    -- this chat endpoint rather than a real conversation.
+    `json_mode`           TINYINT(1) NOT NULL DEFAULT 0,
     `created_at`          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at`          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (`project_id`) REFERENCES `projects`(`id`) ON DELETE CASCADE,

@@ -21,7 +21,11 @@ class AnthropicClient
 
     public function __construct(
         private string $apiKey,
-        private string $model = 'claude-opus-4-8'
+        private string $model = 'claude-opus-4-8',
+        // See GeminiClient's constructor for why this is a param, not a
+        // hardcoded constant -- a short-lived caller (FallbackAiClient
+        // driving an interactive chat turn) passes something much smaller.
+        private int $timeoutSeconds = 420
     ) {}
 
     public function getLastUsage(): array
@@ -105,7 +109,7 @@ class AnthropicClient
                     'x-api-key: ' . $this->apiKey,
                     'anthropic-version: ' . self::API_VERSION,
                 ],
-                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_TIMEOUT        => $this->timeoutSeconds,
                 CURLOPT_CONNECTTIMEOUT => 10,
             ]);
 

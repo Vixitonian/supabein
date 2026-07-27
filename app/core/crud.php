@@ -46,6 +46,23 @@ class Crud
         return [$table, $allowedCols, $policy, $colTypes];
     }
 
+    // Mirrors Policy::check()'s own bypass condition (service_role, or the
+    // project owner's own user_id -- covers both a platform-login JWT and
+    // an account-wide/project-scoped PAT, since all three resolve to that
+    // same user_id) rather than trusting a role name alone, so this stays
+    // in lockstep with whatever "full access" already means there.
+    private static function isTrustedCaller(?array $auth, int $projectId): bool
+    {
+        if ($auth === null) {
+            return false;
+        }
+        if (($auth['role'] ?? '') === 'service_role') {
+            return true;
+        }
+        $project = Catalog::getInstance()->getProjectByIdInternal($projectId);
+        return $project !== null && (int)($auth['user_id'] ?? -1) === (int)$project['owner_user_id'];
+    }
+
     private static function maskPasswordCols(array $rows, array $colTypes): array
     {
         $passCols = array_keys(array_filter($colTypes, fn($t) => $t === 'PASSWORD'));
@@ -382,10 +399,19 @@ class Crud
             }
         }
         // `email_verified` can never be client-set through the generic
-        // update path -- the only legitimate way it becomes true is
-        // consuming a valid token via /verify (see data_routes.php), which
-        // updates it directly rather than going through Crud at all.
-        unset($body['email_verified']);
+        // update path by an ordinary end-user JWT or anon key -- the
+        // legitimate way it becomes true for a real registrant is consuming
+        // a valid token via /verify (see data_routes.php), which updates it
+        // directly rather than going through Crud at all. A trusted,
+        // full-access caller (the project's own service_key, or the project
+        // owner's own token/PAT -- the exact two identities Policy::check()
+        // already lets bypass every row policy) is the one deliberate
+        // exception: without it, nothing could ever unblock a registrant
+        // whose verification email never arrived, including the project's
+        // own operators.
+        if (array_key_exists('email_verified', $body) && !self::isTrustedCaller($req['auth'], $projectId)) {
+            unset($body['email_verified']);
+        }
 
         try {
             [$sql, $params] = QueryBuilder::update(

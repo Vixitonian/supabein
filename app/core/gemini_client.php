@@ -13,7 +13,16 @@ class GeminiClient
 
     public function __construct(
         private string $apiKey,
-        private string $model = 'gemini-2.5-flash'
+        private string $model = 'gemini-2.5-flash',
+        // 420s (7min) suits the app-builder's own long generation jobs, the
+        // default every existing caller keeps getting. A short-lived,
+        // interactive use (an AI Assistant chat turn via FallbackAiClient)
+        // passes something far smaller instead, so a slow/unresponsive
+        // model gets abandoned in seconds rather than minutes -- the whole
+        // point of a multi-model fallback chain is defeated if the first
+        // candidate is allowed to sit there for up to 7 minutes before the
+        // chain ever gets a chance to try the next one.
+        private int $timeoutSeconds = 420
     ) {}
 
     public function getLastUsage(): array
@@ -39,9 +48,9 @@ class GeminiClient
      *   inventing plausible-looking placeholders. Gemini accepts both image/*
      *   and application/pdf as inlineData.
      */
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
     {
-        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments);
+        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments, $jsonMode);
     }
 
     /**
@@ -54,7 +63,7 @@ class GeminiClient
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
     {
         $url  = sprintf(self::ENDPOINT, urlencode($this->model));
         $url .= '?key=' . urlencode($this->apiKey);
@@ -74,7 +83,13 @@ class GeminiClient
         $payload = json_encode([
             'systemInstruction' => ['parts' => [['text' => $systemPrompt]]],
             'contents'          => $contents,
-            'generationConfig'  => ['responseMimeType' => 'application/json', 'maxOutputTokens' => 65536],
+            // Conversational chat callers (Catalog::callAiAssistant()) pass
+            // jsonMode: false -- forcing responseMimeType here would otherwise
+            // make even a plain "Hi there!" reply come back wrapped as some
+            // JSON value instead of natural text.
+            'generationConfig'  => $jsonMode
+                ? ['responseMimeType' => 'application/json', 'maxOutputTokens' => 65536]
+                : ['maxOutputTokens' => 65536],
         ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
 
         $response = null; $httpCode = 0;
@@ -85,7 +100,7 @@ class GeminiClient
                 CURLOPT_POST           => true,
                 CURLOPT_POSTFIELDS     => $payload,
                 CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-                CURLOPT_TIMEOUT        => 420,
+                CURLOPT_TIMEOUT        => $this->timeoutSeconds,
                 CURLOPT_CONNECTTIMEOUT => 10,
             ]);
 
