@@ -7,9 +7,12 @@ require_once SUPABEIN_ROOT . '/app/core/gemini_client.php';
 require_once SUPABEIN_ROOT . '/app/core/openrouter_client.php';
 require_once SUPABEIN_ROOT . '/app/core/nvidia_client.php';
 require_once SUPABEIN_ROOT . '/app/core/anthropic_client.php';
+require_once SUPABEIN_ROOT . '/app/core/zhipu_client.php';
+require_once SUPABEIN_ROOT . '/app/core/zhipu_image_client.php';
 require_once SUPABEIN_ROOT . '/app/core/fallback_ai_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 require_once SUPABEIN_ROOT . '/app/core/ai_validator.php';
+require_once SUPABEIN_ROOT . '/app/core/storage.php';
 
 // ─── Gemini system prompts ───────────────────────────────────────────────────
 
