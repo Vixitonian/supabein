@@ -43,7 +43,7 @@ function register_image_tool_routes(\SupaBein\Router $router): void
         }
 
         try {
-            $png = \SupaBein\IconGenerator::generate($subject);
+            $png = \SupaBein\IconGenerator::generate((int)$project['id'], $subject);
         } catch (\InvalidArgumentException $e) {
             abort(422, $e->getMessage());
         } catch (\RuntimeException $e) {

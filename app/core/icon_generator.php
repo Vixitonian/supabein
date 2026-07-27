@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace SupaBein;
 
-// Generates a single icon-style PNG asset on demand: fetches an image from
-// CogView-4 (Zhipu, config['ZHIPU_API_KEY']) if configured, falling back to
-// PollinationsClient (free, keyless text-to-image) on any failure there --
-// then cuts its background out via real ML segmentation, trying the
-// self-hosted rembg service first (config['REMBG_SERVICE_URL'] /
+// Generates a single icon-style PNG asset on demand: fetches an image via
+// the calling project's own "icon-generator" AI Assistant (kind: "image",
+// see Catalog::callAiAssistantImage()) if it has one registered, falling
+// back to PollinationsClient (free, keyless text-to-image, no credit spent)
+// on any failure there or if the project never registered one -- then cuts
+// its background out via real ML segmentation, trying the self-hosted
+// rembg service first (config['REMBG_SERVICE_URL'] /
 // config['REMBG_SHARED_SECRET'], a small Flask+rembg container on Render,
 // see rembg-service/ at the repo root), falling back to remove.bg's API
 // (config['REMOVEBG_API_KEY']) if rembg isn't configured or the request
@@ -28,22 +30,15 @@ class IconGenerator
     ];
 
     private const IMAGE_SIZE = 512;
-    // CogView-4 asks for at least 1024x1024 -- generated at that size, then
-    // downscaled after the watermark crop below so IMAGE_SIZE stays the one
-    // true output dimension for both providers.
-    private const COGVIEW_IMAGE_SIZE = 1024;
-    // Live-tested (2026-07): every CogView-4 image on this account tier
-    // comes back with a fixed "AI生成" watermark badge stamped in the
-    // bottom-right corner -- roughly the last ~20% of width and ~9% of
-    // height. Cropping the bottom BAND off (full width, not just the corner)
-    // guarantees the watermark is gone regardless of its exact horizontal
-    // position within that band, without producing an off-center or
-    // asymmetric result the way a corner-only crop would. The icon prompt
-    // already asks for a centered subject with generous margin, so losing
-    // this bottom sliver doesn't crop into the subject itself.
-    private const COGVIEW_WATERMARK_CROP_FRACTION = 0.12;
 
-    public static function generate(string $subject): string
+    // "icon-generator" is the fixed, conventional name a project registers
+    // its image-kind AI Assistant under for this feature to find it -- same
+    // registration-by-convention pattern Zera uses for its own named
+    // assistants (e.g. zera-launch-content). A project that never registers
+    // one just always falls through to the free Pollinations path below.
+    private const ASSISTANT_NAME = 'icon-generator';
+
+    public static function generate(int $projectId, string $subject): string
     {
         $subject = trim($subject);
         if ($subject === '') {
@@ -56,27 +51,64 @@ class IconGenerator
         $config = self::assertBackgroundRemovalConfigured();
 
         $prompt = self::buildPrompt($subject);
-        $raw = self::fetchSourceImage($prompt);
+        $raw = self::fetchSourceImage($projectId, $prompt);
         return self::removeBackground($raw, $config);
     }
 
-    // CogView-4 first (config-gated, better rendering quality -- see the
-    // generate() docblock); Pollinations as the always-available fallback so
-    // a missing key or a transient CogView failure never blocks generation
-    // outright, same graceful-degradation posture as removeBackground()'s
-    // own rembg-then-remove.bg chain right below it.
-    private static function fetchSourceImage(string $prompt): string
+    // The project's own registered image assistant first (better rendering
+    // quality, metered against that project's own AI credit -- see the
+    // generate() docblock); Pollinations as the always-available, free
+    // fallback so a missing registration or a transient provider failure
+    // never blocks generation outright, same graceful-degradation posture
+    // as removeBackground()'s own rembg-then-remove.bg chain right below it.
+    private static function fetchSourceImage(int $projectId, string $prompt): string
     {
-        $config = \App::get('config');
-        $zhipuKey = (string)($config['ZHIPU_API_KEY'] ?? '');
-        if ($zhipuKey !== '') {
-            try {
-                return self::fetchFromCogView($prompt, $zhipuKey);
-            } catch (\RuntimeException $e) {
-                // Falls through to Pollinations below.
+        try {
+            $result = \SupaBein\Catalog::getInstance()->callAiAssistantImage($projectId, self::ASSISTANT_NAME, $prompt);
+            $bytes = base64_decode($result['image_base64'], true);
+            if ($bytes !== false) {
+                return self::resizeToTarget($bytes);
             }
+        } catch (\RuntimeException $e) {
+            // Falls through to Pollinations below.
         }
         return \SupaBein\PollinationsClient::generate($prompt, self::IMAGE_SIZE);
+    }
+
+    // The registered image assistant's own client (e.g. ZhipuImageClient)
+    // may hand back a different square resolution than IMAGE_SIZE (it picks
+    // its own generation size, watermark-crop math included) -- downscale
+    // to the one true output dimension every downstream consumer of this
+    // class already expects, same as the Pollinations path (which requests
+    // IMAGE_SIZE directly and never needs this). No-ops if already the
+    // right size; falls back to the original bytes on any GD failure.
+    private static function resizeToTarget(string $imageBytes): string
+    {
+        $src = @imagecreatefromstring($imageBytes);
+        if ($src === false) {
+            return $imageBytes;
+        }
+        try {
+            if (imagesx($src) === self::IMAGE_SIZE && imagesy($src) === self::IMAGE_SIZE) {
+                return $imageBytes;
+            }
+            $final = imagecreatetruecolor(self::IMAGE_SIZE, self::IMAGE_SIZE);
+            imagesavealpha($final, true);
+            $transparent = imagecolorallocatealpha($final, 0, 0, 0, 127);
+            imagefill($final, 0, 0, $transparent);
+            imagecopyresampled(
+                $final, $src, 0, 0, 0, 0,
+                self::IMAGE_SIZE, self::IMAGE_SIZE, imagesx($src), imagesy($src)
+            );
+
+            ob_start();
+            imagepng($final);
+            $out = ob_get_clean();
+            imagedestroy($final);
+            return $out !== false && $out !== '' ? $out : $imageBytes;
+        } finally {
+            imagedestroy($src);
+        }
     }
 
     private static function assertBackgroundRemovalConfigured(): array
@@ -111,117 +143,6 @@ class IconGenerator
             . 'no people, no humans, no faces, no text, no watermark, product icon style',
             $subject
         );
-    }
-
-    // Calls Zhipu's CogView-4 image-generation endpoint (returns a
-    // short-lived signed URL, not the image bytes directly -- fetched as a
-    // second request), then crops the bottom watermark band off before
-    // handing the bytes on to background removal. Downscales to
-    // IMAGE_SIZE afterward so both source providers hand removeBackground()
-    // the same target resolution.
-    private static function fetchFromCogView(string $prompt, string $apiKey): string
-    {
-        $body = json_encode([
-            'model'  => 'cogview-4',
-            'prompt' => $prompt,
-            'size'   => self::COGVIEW_IMAGE_SIZE . 'x' . self::COGVIEW_IMAGE_SIZE,
-        ], JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-
-        $ch = curl_init('https://open.bigmodel.cn/api/paas/v4/images/generations');
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST           => true,
-            CURLOPT_POSTFIELDS     => $body,
-            CURLOPT_HTTPHEADER     => [
-                'Content-Type: application/json',
-                'Authorization: Bearer ' . $apiKey,
-                'Accept: application/json',
-            ],
-            CURLOPT_TIMEOUT        => 60,
-            CURLOPT_CONNECTTIMEOUT => 10,
-        ]);
-        $response = curl_exec($ch);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($response === false || $error !== '') {
-            throw new \RuntimeException('CogView-4 request failed: ' . ($error ?: 'unknown error'));
-        }
-        if ($status !== 200) {
-            throw new \RuntimeException('CogView-4 returned HTTP ' . $status . ': ' . substr((string)$response, 0, 300));
-        }
-        $envelope = json_decode((string)$response, true);
-        $imageUrl = $envelope['data'][0]['url'] ?? null;
-        if (!is_string($imageUrl) || $imageUrl === '') {
-            throw new \RuntimeException('CogView-4 response did not include an image URL');
-        }
-
-        $ch = curl_init($imageUrl);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT        => 30,
-        ]);
-        $imageBytes = curl_exec($ch);
-        $imgStatus = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $imgError = curl_error($ch);
-        curl_close($ch);
-
-        if ($imageBytes === false || $imgError !== '' || $imgStatus !== 200 || $imageBytes === '') {
-            throw new \RuntimeException('Could not download CogView-4 image: ' . ($imgError ?: ('HTTP ' . $imgStatus)));
-        }
-
-        return self::cropWatermarkBand((string)$imageBytes);
-    }
-
-    // Crops the bottom COGVIEW_WATERMARK_CROP_FRACTION of the image off
-    // (full width) to remove the corner watermark, then resizes back down
-    // to a square IMAGE_SIZE x IMAGE_SIZE canvas -- background removal and
-    // every downstream consumer of this class already expect that fixed
-    // square shape (see the pre-existing Pollinations path, which requests
-    // it directly). Falls back to returning the ORIGINAL, uncropped bytes
-    // on any GD failure (corrupt image, unsupported format) rather than
-    // blocking generation entirely over a cosmetic watermark -- the
-    // subsequent background-removal step still runs either way.
-    private static function cropWatermarkBand(string $imageBytes): string
-    {
-        $src = @imagecreatefromstring($imageBytes);
-        if ($src === false) {
-            return $imageBytes;
-        }
-        try {
-            $width = imagesx($src);
-            $height = imagesy($src);
-            $keepHeight = (int)round($height * (1 - self::COGVIEW_WATERMARK_CROP_FRACTION));
-            if ($keepHeight < 1 || $width < 1) {
-                return $imageBytes;
-            }
-
-            $cropped = imagecreatetruecolor($width, $keepHeight);
-            imagesavealpha($cropped, true);
-            $transparent = imagecolorallocatealpha($cropped, 0, 0, 0, 127);
-            imagefill($cropped, 0, 0, $transparent);
-            imagecopy($cropped, $src, 0, 0, 0, 0, $width, $keepHeight);
-
-            $final = imagecreatetruecolor(self::IMAGE_SIZE, self::IMAGE_SIZE);
-            imagesavealpha($final, true);
-            $finalTransparent = imagecolorallocatealpha($final, 0, 0, 0, 127);
-            imagefill($final, 0, 0, $finalTransparent);
-            imagecopyresampled(
-                $final, $cropped, 0, 0, 0, 0,
-                self::IMAGE_SIZE, self::IMAGE_SIZE, $width, $keepHeight
-            );
-
-            ob_start();
-            imagepng($final);
-            $out = ob_get_clean();
-            imagedestroy($cropped);
-            imagedestroy($final);
-            return $out !== false && $out !== '' ? $out : $imageBytes;
-        } finally {
-            imagedestroy($src);
-        }
     }
 
     // Tries the self-hosted rembg service first (if configured) since it's
