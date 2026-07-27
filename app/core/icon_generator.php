@@ -6,7 +6,7 @@ namespace SupaBein;
 
 // Generates a single icon-style PNG asset on demand: fetches an image from
 // CogView-4 (Zhipu, config['ZHIPU_API_KEY']) if configured, falling back to
-// Pollinations.ai (free, keyless text-to-image) on any failure there --
+// PollinationsClient (free, keyless text-to-image) on any failure there --
 // then cuts its background out via real ML segmentation, trying the
 // self-hosted rembg service first (config['REMBG_SERVICE_URL'] /
 // config['REMBG_SHARED_SECRET'], a small Flask+rembg container on Render,
@@ -76,7 +76,7 @@ class IconGenerator
                 // Falls through to Pollinations below.
             }
         }
-        return self::fetchFromPollinations($prompt);
+        return \SupaBein\PollinationsClient::generate($prompt, self::IMAGE_SIZE);
     }
 
     private static function assertBackgroundRemovalConfigured(): array
@@ -222,34 +222,6 @@ class IconGenerator
         } finally {
             imagedestroy($src);
         }
-    }
-
-    private static function fetchFromPollinations(string $prompt): string
-    {
-        $url = 'https://image.pollinations.ai/prompt/' . rawurlencode($prompt)
-            . '?width=' . self::IMAGE_SIZE
-            . '&height=' . self::IMAGE_SIZE
-            . '&nologo=true';
-
-        $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT        => 30,
-            CURLOPT_HTTPHEADER     => ['Accept: image/*'],
-        ]);
-        $body = curl_exec($ch);
-        $status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($body === false || $error !== '') {
-            throw new \RuntimeException('Image generation request failed: ' . ($error ?: 'unknown error'));
-        }
-        if ($status !== 200 || $body === '') {
-            throw new \RuntimeException('Image generation returned HTTP ' . $status);
-        }
-        return (string)$body;
     }
 
     // Tries the self-hosted rembg service first (if configured) since it's

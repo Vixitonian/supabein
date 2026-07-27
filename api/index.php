@@ -82,6 +82,7 @@ require_once SUPABEIN_ROOT . '/app/core/groq_client.php';
 require_once SUPABEIN_ROOT . '/app/core/zhipu_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deepseek_client.php';
 require_once SUPABEIN_ROOT . '/app/core/zhipu_image_client.php';
+require_once SUPABEIN_ROOT . '/app/core/pollinations_client.php';
 require_once SUPABEIN_ROOT . '/app/routes/auth_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/project_routes.php';
 require_once SUPABEIN_ROOT . '/app/routes/table_routes.php';
