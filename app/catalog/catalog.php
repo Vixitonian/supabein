@@ -2251,6 +2251,23 @@ class Catalog
         return $cost;
     }
 
+    // Flat per-image estimate, not a token-based ledger -- CogView bills per
+    // call regardless of prompt length, so there's no usage figure to meter
+    // against the way debitAiUsage() does for text. Same "internal metering
+    // estimate, not a provider-invoice reconciliation" posture as
+    // AI_PRICE_MICRO_USD_PER_1K_TOKENS above.
+    private const AI_IMAGE_PRICE_MICRO_USD_PER_IMAGE = [
+        'zhipu' => 20000, // ~$0.02/image
+    ];
+    private const AI_IMAGE_PRICE_DEFAULT_MICRO_USD_PER_IMAGE = 20000;
+
+    public function debitAiImageUsage(int $userId, string $provider): int
+    {
+        $cost = self::AI_IMAGE_PRICE_MICRO_USD_PER_IMAGE[$provider] ?? self::AI_IMAGE_PRICE_DEFAULT_MICRO_USD_PER_IMAGE;
+        $this->debitAiCredit($userId, $cost);
+        return $cost;
+    }
+
     // ─── AI assistants (per-project, hosted -- no secret storage) ─────────────
 
     // $models: ordered array of ['provider' => .., 'model' => ..] candidates
@@ -2269,15 +2286,20 @@ class Catalog
     // generator reusing this chat endpoint rather than a real conversation)
     // -- see callAiAssistant(), which reads this per-assistant instead of a
     // single hardcoded choice for every assistant on the platform.
-    public function createAiAssistant(int $projectId, string $name, ?string $systemPrompt, bool $allowProjectUser, ?array $models = null, bool $jsonMode = false): array
+    // $kind: 'chat' (default) is the original conversational-assistant
+    // shape, called via callAiAssistant()/POST .../chat. 'image' assistants
+    // are called via callAiAssistantImage()/POST .../image instead -- see
+    // both for the kind-specific validation and model-registry split
+    // (AI_ALLOWED_* for chat, AI_IMAGE_ALLOWED_* for image).
+    public function createAiAssistant(int $projectId, string $name, ?string $systemPrompt, bool $allowProjectUser, ?array $models = null, bool $jsonMode = false, string $kind = 'chat'): array
     {
         $stmt = $this->pdo->prepare(
-            'INSERT INTO ai_assistants (project_id, name, system_prompt, allow_project_user, models, json_mode)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON DUPLICATE KEY UPDATE system_prompt = VALUES(system_prompt), allow_project_user = VALUES(allow_project_user), models = VALUES(models), json_mode = VALUES(json_mode)'
+            'INSERT INTO ai_assistants (project_id, name, kind, system_prompt, allow_project_user, models, json_mode)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE kind = VALUES(kind), system_prompt = VALUES(system_prompt), allow_project_user = VALUES(allow_project_user), models = VALUES(models), json_mode = VALUES(json_mode)'
         );
         $stmt->execute([
-            $projectId, $name, $systemPrompt, $allowProjectUser ? 1 : 0,
+            $projectId, $name, $kind, $systemPrompt, $allowProjectUser ? 1 : 0,
             $models !== null ? json_encode($models, JSON_UNESCAPED_UNICODE) : null,
             $jsonMode ? 1 : 0,
         ]);
@@ -2435,6 +2457,104 @@ class Catalog
             'usage'    => $usage,
             'cost_micro_usd' => $costMicroUsd,
         ];
+    }
+
+    // Same shape as buildAiAssistantClient() but against the image registry
+    // (AI_IMAGE_ALLOWED_PROVIDERS/AI_IMAGE_ALLOWED_MODELS) -- a configured
+    // candidate list is filtered to what's actually available; null/empty
+    // means "any configured image provider/model", tried in registry order
+    // rather than a single platform default (there's no per-assistant
+    // no-preference default chain for images the way ai_build_fallback_chain()
+    // provides for text).
+    private function buildAiAssistantImageCandidates(array $config, ?array $models): array
+    {
+        if ($models === null || $models === []) {
+            $candidates = [];
+            foreach (\AI_IMAGE_ALLOWED_PROVIDERS as $provider) {
+                if (!\ai_image_provider_configured($config, $provider)) continue;
+                foreach (\AI_IMAGE_ALLOWED_MODELS[$provider] ?? [] as $model) {
+                    $candidates[] = ['provider' => $provider, 'model' => $model];
+                }
+            }
+            if (!$candidates) {
+                throw new \RuntimeException('No image-generation provider is currently configured on this server.');
+            }
+            return $candidates;
+        }
+        $candidates = [];
+        $seen = [];
+        foreach ($models as $entry) {
+            $provider = is_array($entry) ? ($entry['provider'] ?? null) : null;
+            $model    = is_array($entry) ? ($entry['model'] ?? null) : null;
+            if (!is_string($provider) || !is_string($model)) continue;
+            if (!in_array($provider, \AI_IMAGE_ALLOWED_PROVIDERS, true)) continue;
+            if (!\ai_image_provider_configured($config, $provider)) continue;
+            $allowed = \AI_IMAGE_ALLOWED_MODELS[$provider] ?? [];
+            if (!in_array($model, $allowed, true)) continue;
+            $key = $provider . ':' . $model;
+            if (isset($seen[$key])) continue;
+            $seen[$key] = true;
+            $candidates[] = ['provider' => $provider, 'model' => $model];
+        }
+        if (!$candidates) {
+            throw new \RuntimeException('None of this assistant\'s configured image models are currently available.');
+        }
+        return $candidates;
+    }
+
+    // Image-generation counterpart to callAiAssistant(): same auth/credit
+    // posture (INSUFFICIENT_CREDIT thrown right before the real spend), but
+    // for a 'kind' => 'image' assistant and a single prompt instead of a
+    // chat history. Tries each candidate in order (registry-filtered,
+    // caller-restricted, or platform-wide -- see
+    // buildAiAssistantImageCandidates()) and returns on the first success;
+    // a candidate that throws is skipped in favor of the next one rather
+    // than failing the whole call, same graceful-degradation posture as
+    // IconGenerator's own CogView-then-Pollinations chain.
+    public function callAiAssistantImage(int $projectId, string $name, string $prompt): array
+    {
+        $assistant = $this->getAiAssistant($projectId, $name);
+        if ($assistant === null) {
+            throw new \RuntimeException('AI assistant not found');
+        }
+        if (($assistant['kind'] ?? 'chat') !== 'image') {
+            throw new \RuntimeException('This assistant is not an image-generation assistant');
+        }
+        $project = $this->getProjectByIdInternal($projectId);
+        if ($project === null) {
+            throw new \RuntimeException('Project not found');
+        }
+        $ownerUserId = (int)$project['owner_user_id'];
+
+        if (!$this->hasAiCredit($ownerUserId)) {
+            throw new \RuntimeException('INSUFFICIENT_CREDIT');
+        }
+
+        $prompt = trim($prompt);
+        if ($prompt === '') {
+            throw new \RuntimeException('prompt is required');
+        }
+
+        $config = \App::get('config');
+        $candidates = $this->buildAiAssistantImageCandidates($config, $assistant['models'] ?? null);
+
+        $lastError = null;
+        foreach ($candidates as $candidate) {
+            try {
+                $imageBytes = \ai_generate_image($config, $candidate['provider'], $candidate['model'], $prompt);
+                $costMicroUsd = $this->debitAiImageUsage($ownerUserId, $candidate['provider']);
+                return [
+                    'image_base64'   => base64_encode($imageBytes),
+                    'provider'       => $candidate['provider'],
+                    'model'          => $candidate['model'],
+                    'cost_micro_usd' => $costMicroUsd,
+                ];
+            } catch (\RuntimeException $e) {
+                $lastError = $e;
+                continue;
+            }
+        }
+        throw $lastError ?? new \RuntimeException('Image generation failed');
     }
 
     // ─── Platform admin (see app/routes/admin_routes.php, /sb-admin) ──────────

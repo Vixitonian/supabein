@@ -478,6 +478,12 @@ CREATE TABLE IF NOT EXISTS `ai_assistants` (
     `id`                  INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     `project_id`          INT UNSIGNED NOT NULL,
     `name`                VARCHAR(64) NOT NULL,
+    -- 'chat' (default): conversational assistant, called via .../chat and
+    -- Catalog::callAiAssistant(). 'image': image-generation assistant,
+    -- called via .../image and Catalog::callAiAssistantImage() instead --
+    -- its `models` (if given) validates against the separate image registry
+    -- (AI_IMAGE_ALLOWED_PROVIDERS/AI_IMAGE_ALLOWED_MODELS in ai_routes.php).
+    `kind`                ENUM('chat', 'image') NOT NULL DEFAULT 'chat',
     `system_prompt`       TEXT DEFAULT NULL,
     `allow_project_user`  TINYINT(1) NOT NULL DEFAULT 0,
     -- Ordered JSON array of {"provider":..,"model":..} candidates this
