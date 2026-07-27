@@ -12,8 +12,13 @@ function register_image_tool_routes(\SupaBein\Router $router): void
     $catalog = \SupaBein\Catalog::getInstance();
 
     // POST /v1/projects/:id/tools/generate-icon
-    // { "subject": "rocket ship" }
+    // { "subject": "rocket ship", "context": "Launch your idea into orbit -- ..." }
     // -> { "png_base64": "..." }
+    //
+    // `context` is optional -- a short description of what this icon means
+    // within whatever it's for (e.g. the flyer's own already-generated
+    // headline/description). Never regenerated here; just forwarded as-is
+    // into the image prompt's "Meaning" section.
     $router->post('/v1/projects/:id/tools/generate-icon', function (array $req) use ($catalog): void {
         $urlProjectId  = (int)$req['params']['id'];
         $auth          = $req['auth'];
@@ -41,9 +46,10 @@ function register_image_tool_routes(\SupaBein\Router $router): void
         if ($subject === '') {
             abort(422, 'subject is required, e.g. "rocket ship"');
         }
+        $context = trim((string)($req['body']['context'] ?? ''));
 
         try {
-            $png = \SupaBein\IconGenerator::generate((int)$project['id'], $subject);
+            $png = \SupaBein\IconGenerator::generate((int)$project['id'], $subject, $context);
         } catch (\InvalidArgumentException $e) {
             abort(422, $e->getMessage());
         } catch (\RuntimeException $e) {

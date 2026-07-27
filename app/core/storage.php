@@ -6,7 +6,7 @@ namespace SupaBein;
 
 class Storage
 {
-    private const MAX_FILE_SIZE = 52_428_800; // 50 MB
+    private const MAX_FILE_SIZE = 104_857_600; // 100 MB
     private const BLOCKED_EXT   = [
         'php','php3','php4','php5','phtml','phar','cgi','pl','py','rb','sh',
         'exe','bat','cmd','htaccess','htpasswd',
@@ -65,7 +65,7 @@ class Storage
         $bucket   = self::validBucket($bucket);
         $filename = self::validFilename($filename);
         if (strlen($bytes) > self::MAX_FILE_SIZE) {
-            abort(413, 'File exceeds the 50 MB limit');
+            abort(413, 'File exceeds the 100 MB limit');
         }
 
         $dir = self::bucketDir($projectId, $bucket);
@@ -115,7 +115,7 @@ class Storage
             abort(422, 'Upload error (code ' . $code . '). Send a multipart/form-data POST with field name "file".');
         }
         if ((int)$file['size'] > self::MAX_FILE_SIZE) {
-            abort(413, 'File exceeds the 50 MB limit');
+            abort(413, 'File exceeds the 100 MB limit');
         }
 
         $filename = self::scopedFilename($userScope, self::validFilename($file['name']));

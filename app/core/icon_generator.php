@@ -38,7 +38,12 @@ class IconGenerator
     // one just always falls through to the free Pollinations path below.
     private const ASSISTANT_NAME = 'icon-generator';
 
-    public static function generate(int $projectId, string $subject): string
+    // $context: an optional short description of what the icon means within
+    // the flyer it's for -- meant to be the flyer's OWN already-generated
+    // content (headline/description/tagline), never a fresh AI call of its
+    // own, so this stays a plain pass-through of text the caller already
+    // has in hand.
+    public static function generate(int $projectId, string $subject, string $context = ''): string
     {
         $subject = trim($subject);
         if ($subject === '') {
@@ -48,9 +53,13 @@ class IconGenerator
             throw new \InvalidArgumentException('subject is too long (max 120 characters)');
         }
         self::assertSubjectAllowed($subject);
+        $context = trim($context);
+        if (mb_strlen($context) > 300) {
+            $context = mb_substr($context, 0, 300);
+        }
         $config = self::assertBackgroundRemovalConfigured();
 
-        $prompt = self::buildPrompt($subject);
+        $prompt = self::buildPrompt($subject, $context);
         $raw = self::fetchSourceImage($projectId, $prompt);
         return self::removeBackground($raw, $config);
     }
@@ -136,13 +145,28 @@ class IconGenerator
         }
     }
 
-    private static function buildPrompt(string $subject): string
+    // "Master prompt" template: a fixed style/camera/composition/materials/
+    // lighting/colors/background/quality spec plus a negative-prompt clause
+    // folded into one string, since neither image provider wired in here
+    // (Zhipu/CogView, Pollinations) accepts a separate negative_prompt
+    // field -- both take one plain text prompt.
+    private static function buildPrompt(string $subject, string $context = ''): string
     {
-        return sprintf(
-            '3D clay render icon of %s, isolated, single object, centered, plain background, '
-            . 'no people, no humans, no faces, no text, no watermark, product icon style',
-            $subject
-        );
+        $meaning = $context !== '' ? "Meaning:\n$context\n\n" : '';
+        return "Create a premium 3D icon asset for a modern flyer.\n\n"
+            . "Subject:\n$subject\n\n"
+            . $meaning
+            . "Visual style:\nModern 3D illustration, rounded soft geometry, glossy clay/plastic material, premium SaaS design style.\n\n"
+            . "Camera:\n45-degree isometric perspective, slight top-down angle, centered composition.\n\n"
+            . "Composition:\nOne main hero object with 1-2 supporting elements, clear silhouette, minimal design.\n\n"
+            . "Materials:\nGlossy soft plastic, smooth rounded edges, realistic 3D product render.\n\n"
+            . "Lighting:\nSoft studio lighting, gentle highlights, subtle shadows.\n\n"
+            . "Colors:\nVibrant professional colors, modern brand palette, visually balanced.\n\n"
+            . "Background:\nPure white isolated background, no text, no logo, no environment, easy PNG extraction.\n\n"
+            . "Quality:\nUltra detailed, clean edges, professional marketing asset, square 1:1 format.\n\n"
+            . "Avoid: text, letters, numbers, logos, watermarks, realistic photography, human faces, "
+            . "complex backgrounds, multiple unrelated objects, messy composition, flat 2D illustration, "
+            . "low quality textures, dark lighting, excessive shadows.";
     }
 
     // Tries the self-hosted rembg service first (if configured) since it's
