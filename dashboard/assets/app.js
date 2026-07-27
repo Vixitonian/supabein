@@ -1631,17 +1631,20 @@ const AiPanel = (() => {
     return words.map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   }
 
-  function showIntentReviewCard(intent, body) {
-    const container = panelEl?.querySelector('.ai-messages');
-    if (!container) return;
-    const existing = container.querySelector('.ai-intent-card');
-    if (existing) existing.remove();
-
-    const card = renderIntentCard(
+  // Renders the (still-unconfirmed) requirements-review card for a message
+  // that carries { intent, body } as its data -- called fresh on every
+  // renderMessages() pass, same as any other message type, so this survives
+  // a full messages-container rebuild instead of being wiped by one. Reads
+  // the session/message fresh via currentSession()/msg.id on each callback
+  // rather than closing over anything from a specific render pass.
+  function renderIntentReviewMessage(msg) {
+    const { intent, body } = msg.data;
+    return renderIntentCard(
       intent,
       suggestProjectName(body.prompt),
       async (confirmedIntent, projectName) => {
-        card.remove();
+        const sess = currentSession();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== msg.id);
         body.intent = { ...confirmedIntent, project_name: projectName };
         // Fire-and-forget — don't block the build start on DB round-trips
         addMessage(currentSessionId, { role: 'ai', type: 'intent', data: confirmedIntent });
@@ -1650,10 +1653,36 @@ const AiPanel = (() => {
         }
         await proceedWithPlan(body);
       },
-      () => { card.remove(); renderMessages(); }
+      () => {
+        const sess = currentSession();
+        if (sess) sess.messages = sess.messages.filter(m => m.id !== msg.id);
+        // Cancelling used to just wipe the card with zero trace -- from the
+        // outside that reads as "it disappeared" (nothing built, no error,
+        // no explanation). Leave a plain note behind instead so cancelling
+        // is an intentional, visible action, not silent data loss.
+        addMessage(currentSessionId, { role: "ai", content: "Review cancelled -- nothing was built. Send another message to try again." });
+        renderMessages();
+      }
     );
-    container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
+  }
+
+  // The review card used to be appended straight to the DOM, bypassing
+  // sess.messages entirely -- which meant ANY later renderMessages() call
+  // (container.innerHTML = '' + full rebuild from sess.messages) wiped it
+  // out with zero trace, not just an explicit Cancel. Scrolling up far
+  // enough to trigger loadOlderMessages()'s pagination re-render was enough
+  // on its own to make the whole card vanish mid-review. Storing it as a
+  // real (session-local, never persisted server-side — same posture as a
+  // live "thinking"/"trace" card) entry in sess.messages means
+  // renderMessages() naturally reconstructs it instead of destroying it.
+  function showIntentReviewCard(intent, body) {
+    const sess = currentSession();
+    if (!sess) return;
+    sess.messages = sess.messages.filter(m => m.type !== 'intent-review');
+    sess.messages.push({ id: 'intent_review_' + Date.now(), role: 'ai', type: 'intent-review', data: { intent, body } });
+    renderMessages();
+    const container = panelEl?.querySelector('.ai-messages');
+    if (container) container.scrollTop = container.scrollHeight;
   }
 
   async function proceedWithPlan(body) {
@@ -3104,6 +3133,7 @@ const AiPanel = (() => {
     }
     if (msg.type === 'progress') return renderProgressCard(msg);
     if (msg.type === 'intent') return renderIntentSummaryCard(msg);
+    if (msg.type === 'intent-review') return renderIntentReviewMessage(msg);
     if (msg.type === 'edit-intent') return el('span', {});
     if (msg.type === 'recover') return renderRecoveryCard(msg);
     if (msg.type === 'plan') return renderPlanCard(msg);
