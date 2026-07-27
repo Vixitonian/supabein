@@ -849,7 +849,7 @@ curl "https://your-domain/api/v1/data/1/users?limit=20&offset=0&status=active" \
 <!-- ── File Storage ── -->
 <h2 id="storage-upload">File Storage</h2>
 <p>Store files (images, documents, assets) per project inside named <strong>buckets</strong>. Files are served publicly via a read-only URL — no auth needed to fetch them. Uploading/listing/deleting requires either operator auth (JWT/PAT/<code>service_key</code>, full bucket access) <strong>or</strong> an end-user's <code>project_user</code> JWT (from a table's <a href="#data-login">login endpoint</a>) — see below.</p>
-<div class="callout">Bucket names: 1–63 characters, lowercase letters/numbers/hyphens/underscores. Max file size: 100 MB. Blocked extensions: <code>.php .py .sh .exe .cgi .rb .pl .bat .cmd .htaccess</code></div>
+<div class="callout">Bucket names: 1–63 characters, lowercase letters/numbers/hyphens/underscores. Max file size: 100 MB. Blocked extensions: <code>.php .py .sh .cgi .rb .pl .bat .cmd .htaccess</code></div>
 
 <div class="endpoint">
   <div class="endpoint-head">

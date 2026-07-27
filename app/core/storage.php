@@ -9,7 +9,7 @@ class Storage
     private const MAX_FILE_SIZE = 104_857_600; // 100 MB
     private const BLOCKED_EXT   = [
         'php','php3','php4','php5','phtml','phar','cgi','pl','py','rb','sh',
-        'exe','bat','cmd','htaccess','htpasswd',
+        'bat','cmd','htaccess','htpasswd',
     ];
 
     private static function root(): string

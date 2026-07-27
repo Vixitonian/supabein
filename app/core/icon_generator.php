@@ -9,13 +9,13 @@ namespace SupaBein;
 // see Catalog::callAiAssistantImage()) if it has one registered, falling
 // back to PollinationsClient (free, keyless text-to-image, no credit spent)
 // on any failure there or if the project never registered one -- then cuts
-// its background out via real ML segmentation, trying the self-hosted
-// rembg service first (config['REMBG_SERVICE_URL'] /
-// config['REMBG_SHARED_SECRET'], a small Flask+rembg container on Render,
-// see rembg-service/ at the repo root), falling back to remove.bg's API
-// (config['REMOVEBG_API_KEY']) if rembg isn't configured or the request
-// fails for any reason. At least one of the two background-removal methods
-// must be configured.
+// its background out, trying real ML segmentation first: the self-hosted
+// rembg service (config['REMBG_SERVICE_URL'] / config['REMBG_SHARED_SECRET'],
+// a small Flask+rembg container on Render, see rembg-service/ at the repo
+// root), then remove.bg's API (config['REMOVEBG_API_KEY']) if rembg isn't
+// configured or fails, then finally a local, zero-config color-key cutout
+// (see removeBackgroundViaColorKey()) if both of those fail or aren't
+// configured -- so this never hard-fails on background removal alone.
 class IconGenerator
 {
     // Real human/person imagery is out of scope for this generator (same
@@ -57,7 +57,7 @@ class IconGenerator
         if (mb_strlen($context) > 300) {
             $context = mb_substr($context, 0, 300);
         }
-        $config = self::assertBackgroundRemovalConfigured();
+        $config = \App::get('config');
 
         $prompt = self::buildPrompt($subject, $context);
         $raw = self::fetchSourceImage($projectId, $prompt);
@@ -120,18 +120,6 @@ class IconGenerator
         }
     }
 
-    private static function assertBackgroundRemovalConfigured(): array
-    {
-        $config = \App::get('config');
-        $hasRembg = !empty($config['REMBG_SERVICE_URL'] ?? '');
-        $hasRemoveBg = !empty($config['REMOVEBG_API_KEY'] ?? '');
-        if (!$hasRembg && !$hasRemoveBg) {
-            throw new \RuntimeException(
-                'Background removal is not configured yet (neither REMBG_SERVICE_URL nor REMOVEBG_API_KEY is set).'
-            );
-        }
-        return $config;
-    }
 
     private static function assertSubjectAllowed(string $subject): void
     {
@@ -170,44 +158,116 @@ class IconGenerator
     }
 
     // Tries the self-hosted rembg service first (if configured) since it's
-    // free and under our own control; falls back to remove.bg on any
-    // failure there (not configured, timeout, non-200, crash-looping free
-    // Render instance -- rembg-service/ runs on Render's free tier, which is
-    // not always instantly available). If rembg isn't configured at all,
-    // goes straight to remove.bg. Throws only if the attempted path(s) all
-    // fail, with both errors included so a real remove.bg failure isn't
-    // masked by an unrelated rembg one.
+    // free and under our own control, then remove.bg (if configured) on any
+    // failure there, then finally a local, zero-config color-key cutout
+    // (see removeBackgroundViaColorKey()) as the last resort -- it needs no
+    // external service at all, so this only ever hard-fails if that GD-only
+    // path itself can't even decode the image. Every error encountered
+    // along the way is collected so a real failure isn't masked by an
+    // unrelated one further up the chain.
     private static function removeBackground(string $imageBytes, array $config): string
     {
         $rembgUrl = (string)($config['REMBG_SERVICE_URL'] ?? '');
         $rembgSecret = (string)($config['REMBG_SHARED_SECRET'] ?? '');
         $removeBgKey = (string)($config['REMOVEBG_API_KEY'] ?? '');
 
-        $rembgError = null;
+        $errors = [];
+
         if ($rembgUrl !== '') {
             try {
                 return self::removeBackgroundViaRembg($imageBytes, $rembgUrl, $rembgSecret);
             } catch (\RuntimeException $e) {
-                $rembgError = $e->getMessage();
-                if ($removeBgKey === '') {
-                    throw new \RuntimeException('rembg failed and no remove.bg fallback is configured: ' . $rembgError);
-                }
+                $errors[] = 'rembg: ' . $e->getMessage();
             }
         }
 
-        if ($removeBgKey === '') {
-            // Only reachable if assertBackgroundRemovalConfigured() somehow
-            // let an inconsistent state through -- defensive, not expected.
-            throw new \RuntimeException('No background removal method configured.');
+        if ($removeBgKey !== '') {
+            try {
+                return self::removeBackgroundViaRemoveBg($imageBytes, $removeBgKey);
+            } catch (\RuntimeException $e) {
+                $errors[] = 'remove.bg: ' . $e->getMessage();
+            }
         }
 
         try {
-            return self::removeBackgroundViaRemoveBg($imageBytes, $removeBgKey);
+            return self::removeBackgroundViaColorKey($imageBytes);
         } catch (\RuntimeException $e) {
-            $message = $rembgError !== null
-                ? 'Both background removal methods failed. rembg: ' . $rembgError . ' | remove.bg: ' . $e->getMessage()
-                : $e->getMessage();
-            throw new \RuntimeException($message);
+            $errors[] = 'color-key: ' . $e->getMessage();
+        }
+
+        throw new \RuntimeException(
+            $errors ? ('All background removal methods failed. ' . implode(' | ', $errors)) : 'No background removal method available.'
+        );
+    }
+
+    // Zero-config, local fallback -- no external service, so it's always
+    // available regardless of what's configured. Works specifically
+    // because every image this class hands it was generated from
+    // buildPrompt(), which always asks for "a pure white isolated
+    // background", so a near-white (or near-black, for the occasional
+    // provider variance) background is a safe assumption for these actual
+    // inputs, not a generic guess. Flood-fills inward from the four image
+    // edges rather than thresholding every matching pixel in the whole
+    // image, so a white mug interior or a black shadow INSIDE the subject
+    // (never touching the border) is left alone -- only background
+    // connected to the edge gets punched transparent.
+    private static function removeBackgroundViaColorKey(string $imageBytes): string
+    {
+        $src = @imagecreatefromstring($imageBytes);
+        if ($src === false) {
+            throw new \RuntimeException('Color-key cutout: could not decode image');
+        }
+        try {
+            imagepalettetotruecolor($src);
+            imagealphablending($src, false);
+            imagesavealpha($src, true);
+            $width = imagesx($src);
+            $height = imagesy($src);
+
+            $threshold = 24; // per-channel distance from pure white/black
+            $isBackground = function (int $rgb) use ($threshold): bool {
+                $r = ($rgb >> 16) & 0xFF;
+                $g = ($rgb >> 8) & 0xFF;
+                $b = $rgb & 0xFF;
+                return (max(255 - $r, 255 - $g, 255 - $b) <= $threshold)
+                    || (max($r, $g, $b) <= $threshold);
+            };
+
+            $visited = array_fill(0, $width * $height, false);
+            $queue = [];
+            for ($x = 0; $x < $width; $x++) {
+                $queue[] = [$x, 0];
+                $queue[] = [$x, $height - 1];
+            }
+            for ($y = 0; $y < $height; $y++) {
+                $queue[] = [0, $y];
+                $queue[] = [$width - 1, $y];
+            }
+
+            $transparent = imagecolorallocatealpha($src, 0, 0, 0, 127);
+            while ($queue) {
+                [$x, $y] = array_pop($queue);
+                if ($x < 0 || $x >= $width || $y < 0 || $y >= $height) continue;
+                $idx = $y * $width + $x;
+                if ($visited[$idx]) continue;
+                $visited[$idx] = true;
+                if (!$isBackground(imagecolorat($src, $x, $y))) continue;
+                imagesetpixel($src, $x, $y, $transparent);
+                $queue[] = [$x - 1, $y];
+                $queue[] = [$x + 1, $y];
+                $queue[] = [$x, $y - 1];
+                $queue[] = [$x, $y + 1];
+            }
+
+            ob_start();
+            imagepng($src);
+            $out = ob_get_clean();
+            if ($out === false || $out === '') {
+                throw new \RuntimeException('Color-key cutout produced no output');
+            }
+            return $out;
+        } finally {
+            imagedestroy($src);
         }
     }
 
