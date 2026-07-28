@@ -36,8 +36,17 @@ OUTPUT FORMAT — include these alongside "tables":
 Seed rules:
 - Include 3–8 realistic, domain-appropriate rows for every table that would look empty and
   meaningless without data (products, articles, menu items, portfolio items, testimonials, etc.)
+- SINGLETON/STATE tables — a table that holds ONE piece of mutable app state rather than a list of
+  items (a counter, a single settings/config row, a running score or tally) — MUST be seeded with
+  exactly ONE row of sensible starting values (e.g. a counter's value column defaults to 0). The
+  frontend will always read and UPDATE this one row; it must never need to INSERT a new row itself
+  to initialize state, because anon/authenticated INSERT on such a table is a real security risk
+  (it lets any visitor spawn unlimited rows) and is correctly NOT granted by default below. Leaving
+  seed_data empty for a singleton table is a bug: the frontend then finds nothing to read, has no
+  permission to create it, and the app is permanently broken on first load.
 - Do NOT seed auth/users tables or tables that use :current_user_id ownership (e.g. carts, orders
-  belonging to a user). Only seed "global" or "public catalogue" tables.
+  belonging to a user). Only seed "global" or "public catalogue" tables, and singleton tables per
+  the rule above.
 - Omit "id" and "created_at" — SupaBein inserts them automatically
 - Values must match the column types exactly (strings for VARCHAR/TEXT, numbers for INT/DECIMAL,
   null for nullable columns with no obvious value)

@@ -220,6 +220,33 @@ function ai_validate_plan(array $plan): ?string
              . 'PASSWORD column (e.g. email VARCHAR(255), password PASSWORD) and reference it via user_id.';
     }
 
+    // ── Cross-pass reachability: a table with UPDATE allowed but INSERT allowed
+    // for no role, and no seeded rows, can never have a row to update at all —
+    // not a style guess, a hard fact about the plan: there is no path through
+    // the real API that could ever create one. Live-observed root cause of a
+    // build whose frontend correctly wrote code to read/update a "counter"
+    // table, deployed clean, then failed every story because the table was
+    // permanently empty and nothing (including the frontend's own defensive
+    // create-if-missing fallback) was ever allowed to seed it.
+    foreach ($plan['tables'] as $t) {
+        $tableName = (string)($t['name'] ?? '?');
+        $hasSeed = !empty($plan['seed_data'][$tableName]);
+        if ($hasSeed) continue;
+        $updateAllowed = false;
+        $insertAllowedAnywhere = false;
+        foreach ($t['policies'] ?? [] as $p) {
+            $op = strtoupper((string)($p['operation'] ?? ''));
+            if ($op === 'UPDATE' && !empty($p['allowed'])) $updateAllowed = true;
+            if ($op === 'INSERT' && !empty($p['allowed'])) $insertAllowedAnywhere = true;
+        }
+        if ($updateAllowed && !$insertAllowedAnywhere) {
+            return "table '{$tableName}' allows UPDATE but no role is allowed to INSERT into it, and it has "
+                 . 'no seed_data — this table can never have a row for anyone to update. Either seed at least '
+                 . "one starting row for '{$tableName}' in seed_data, or grant INSERT to whichever role should "
+                 . 'be able to create its rows.';
+        }
+    }
+
     return null;
 }
 
