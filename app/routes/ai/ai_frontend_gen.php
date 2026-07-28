@@ -213,6 +213,7 @@ function ai_run_build_frontend_agentic(
     $consecutiveParseFailures = 0;
     $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
     $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
+    $hasPlanned = false; // must submit a "plan" action before any other tool -- see gate below
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -263,6 +264,27 @@ function ai_run_build_frontend_agentic(
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => ai_agent_history_action_json($action)];
         $loopHistory   = ai_agent_trim_history($loopHistory);
+
+        // Force a plan before any exploratory or file-writing action. Cheap
+        // forced-planning step aimed at exactly the pattern seen live: turns
+        // spent reacting incrementally (list_files, read_file, a write, more
+        // reads...) instead of committing once to which files serve which
+        // stories and then executing that. "plan" itself touches no files —
+        // it's a pure commitment step, not dispatched through the real tool
+        // executor below.
+        if ($tool === 'plan') {
+            $hasPlanned = true;
+            $turnMsg = json_encode(['tool' => 'plan', 'result' => ['ok' => true,
+                'note' => 'Plan received. Proceed to write these files now.']]);
+            continue;
+        }
+        if (!$hasPlanned) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                'Your first action must be "plan" — list every file you intend to write and which user ' .
+                'story each one serves. Call plan now, then proceed with this action afterward if it\'s ' .
+                'still needed.']);
+            continue;
+        }
 
         if ($tool === 'finish') {
             if (empty($changedFiles)) {

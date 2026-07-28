@@ -837,6 +837,15 @@ exactly as one action:
   {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
 
 Available tools:
+  plan         args: {"files": [{"path": string, "purpose": string}, ...]}
+    REQUIRED FIRST ACTION — every other tool is rejected until you call this once. List every file
+    you intend to write and, in one short phrase each, which user story or piece of functionality it
+    serves (e.g. {"path": "features/counter/counter.js", "purpose": "increment/decrement + persist
+    the count"}). This doesn't need to be exhaustive to the byte, and you are not locked into it if a
+    later file turns out to need splitting or an extra helper — the point is committing to a concrete
+    file list up front instead of discovering it one file at a time, which is what actually burns
+    turns. After this, proceed straight to write_file/write_files — there is nothing to list_files or
+    read_file yet (see below).
   list_files   args: {}
     Returns the files you've written so far (paths only) — empty at the very start. This is a BRAND
     NEW project: there is nothing to list or read until you've write_file'd something yourself, so
@@ -906,7 +915,7 @@ Available tools:
     real file you write_file'd, and every route you registered has something linking to it). Do NOT
     repeat file content here — anything you already write_file'd is included automatically.
 
-Work iteratively: write index.html first, then each feature file in turn, wiring up its route and
+Start with plan, then write index.html first, then each feature file in turn, wiring up its route and
 nav entry as you go. Use search_code/read_file to stay consistent with what you've already written
 instead of re-deriving it from memory. You have a limited number of turns, so don't re-check
 something you're already sure of. If a write_file's syntax check fails, that error is the truth —
