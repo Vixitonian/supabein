@@ -123,7 +123,12 @@ try {
         $designBrief = $payload['design_brief'] ?? [];
         $validate    = $payload['validate'] ?? true;
         $refs        = ai_job_payload_refs($payload);
-        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate, $refs);
+        // Forward-compatible: null unless the caller resends the same intent
+        // stage 1 (build_schema) already saw. Same reasoning as the 'build'
+        // (review-off) path above -- without this, the frontend has no way
+        // to know what it's actually being tested against later.
+        $approvedIntent = $payload['intent'] ?? null;
+        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate, $refs, $approvedIntent);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build_frontend'], $result)));
 
     } elseif ($mode === 'edit') {

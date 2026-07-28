@@ -807,7 +807,10 @@ PROMPT;
             // Review-on's stage 1 (build-schema/job) already saw these — the
             // caller resends them here (a fresh HTTP request, no server-side
             // memory of stage 1) if it wants stage 2's frontend generation to
-            // see them too.
+            // see them too. 'intent' is optional and forward-compatible —
+            // frontend generation falls back to just prompt+schema without
+            // it, same as before this field existed.
+            'intent'       => (isset($req['body']['intent']) && is_array($req['body']['intent'])) ? $req['body']['intent'] : null,
             'attachments'  => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build_frontend', $payload);

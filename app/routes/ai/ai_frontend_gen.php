@@ -34,6 +34,7 @@ function ai_generate_build_plan(object $client, string $prompt, ?array $approved
     $briefCtx = ai_brief_to_context($brief);
 
     $frontendMsg    = "App description: {$prompt}\n\n"
+                    . ($approvedIntent ? ai_intent_to_context($approvedIntent, 'build the frontend to satisfy') . "\n" : '')
                     . ($briefCtx ? "{$briefCtx}\n\n" : '')
                     . "Exact validated schema — use ONLY these column names in JS:\n"
                     . ai_schema_to_context($schemaPlan);
@@ -53,7 +54,7 @@ function ai_generate_build_plan(object $client, string $prompt, ?array $approved
 // "Review" build flow can run this as its own job, after the user has
 // confirmed the schema/design in the previous stage.
 /** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
-function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true, array $refs = []): array
+function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true, array $refs = [], ?array $approvedIntent = null): array
 {
     // ── Stage 3: frontend — agentic tool-calling loop (search/read/write/
     // syntax-check), same machinery the edit agent uses, instead of a single
@@ -62,7 +63,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     // wrote earlier before extending it, instead of hoping a one-shot
     // multi-file JSON blob comes back internally consistent.
     $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
-    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report, $refs);
+    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report, $refs, $approvedIntent);
     $aiTrace   = $frontendResult['aiTrace'];
     $feUsage   = $frontendResult['usage'];
 
@@ -173,15 +174,26 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
 // agent above, starting from zero files. Returns ['files'=>[...], 'aiTrace'=>[...],
 // 'usage'=>[...]] — the exact shape ai_run_build_frontend()'s old single-shot
 // $frontendResult had, so the surgical swap there needs no other changes.
-/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+/**
+ * @param array $refs See ai_generate_intent()'s doc comment for the shape.
+ * @param array|null $approvedIntent The structured actors/stories from
+ *   ai_generate_intent() (or the user's own confirmed review card), when
+ *   available. Without this, the agent only ever sees the original one-line
+ *   prompt and has no way to know what it's actually being tested against
+ *   later (e.g. a "custom step value" story the requirements stage inferred
+ *   but the free-text prompt never mentioned) -- it can't aim for acceptance
+ *   criteria it was never shown. Live-observed: a trivial counter app failed
+ *   6/6 post-deploy story tests on its first pass for exactly this reason.
+ */
 function ai_run_build_frontend_agentic(
-    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, array $refs = []
+    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, array $refs = [], ?array $approvedIntent = null
 ): array {
     $briefCtx    = ai_brief_to_context($designBrief);
     $hasRefs     = !empty($refs['attachments']) || !empty($refs['context']);
     $agentPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT, $schemaPlan)
                  . ($hasRefs ? ai_attachment_instruction_note() : '');
     $schemaCtx   = ai_schema_to_context($schemaPlan);
+    $intentCtx   = $approvedIntent ? ai_intent_to_context($approvedIntent, 'build the frontend to satisfy') : '';
 
     $byPath       = []; // a fresh build starts with nothing on disk
     $changedFiles = [];
@@ -191,6 +203,7 @@ function ai_run_build_frontend_agentic(
     $totalUsage   = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
 
     $turnMsg = "App description: {$prompt}\n\n"
+             . ($intentCtx ? "{$intentCtx}\n" : '')
              . ($briefCtx ? "{$briefCtx}\n\n" : '')
              . "Exact validated schema — use ONLY these column names in JS:\n{$schemaCtx}\n\n"
              . (!empty($refs['context']) ? "{$refs['context']}\n\n" : '')

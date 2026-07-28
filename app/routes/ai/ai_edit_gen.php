@@ -192,6 +192,68 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             $readPaths[$path] = true;
             return ['tool' => 'read_file', 'result' => ['path' => $path, 'content' => $content]];
 
+        // Batch counterpart to read_file, same pattern as write_files below —
+        // looking at N files (e.g. every file that touches a shared helper
+        // before editing it) used to cost N full round-trips through the
+        // model, each paying its own fixed per-call latency overhead for
+        // work that has nothing to do with reasoning, just fetching text
+        // already known server-side. One call, N results.
+        case 'read_files':
+            $pathsArg = is_array($args['paths'] ?? null) ? $args['paths'] : null;
+            if ($pathsArg === null) return ['tool' => 'read_files', 'error' => 'args.paths must be an array of path strings'];
+            $results = [];
+            foreach (array_slice($pathsArg, 0, 20) as $p) {
+                $results[] = is_string($p)
+                    ? ai_run_edit_agent_tool('read_file', ['path' => $p], $byPath, $changedFiles, $readPaths, $config, $projectId, $schema)
+                    : ['tool' => 'read_file', 'error' => 'each entry must be a path string'];
+            }
+            return ['tool' => 'read_files', 'result' => ['files' => $results]];
+
+        // Targeted alternative to write_file for a small change to a large
+        // file: send only the text to find and its replacement instead of
+        // regenerating the whole file. Two direct benefits over always
+        // rewriting the full file -- smaller model output (faster to
+        // generate, far less likely to hit the truncation path a big
+        // write_file response risks) and no chance of silently altering
+        // something outside the intended change, since only the exact
+        // matched span is touched. args.find must match EXACTLY ONCE in the
+        // current content -- ambiguous or missing matches are rejected
+        // rather than guessed at, the same "don't regenerate from a guess"
+        // principle write_file's own HARD RULE already enforces.
+        case 'patch_file':
+            $path = $normalizePath((string)($args['path'] ?? ''));
+            if ($path === null) return ['tool' => 'patch_file', 'error' => 'args.path is missing or unsafe'];
+            if (in_array($path, $platformPaths, true)) {
+                return ['tool' => 'patch_file', 'error' => 'platform-provided file — writes to this path are always discarded at deploy time, do not write it'];
+            }
+            $find = $args['find'] ?? null;
+            $replace = $args['replace'] ?? null;
+            if (!is_string($find) || $find === '') return ['tool' => 'patch_file', 'error' => 'args.find must be a non-empty string'];
+            if (!is_string($replace)) return ['tool' => 'patch_file', 'error' => 'args.replace must be a string'];
+            $current = $changedFiles[$path] ?? $byPath[$path] ?? null;
+            if ($current === null) return ['tool' => 'patch_file', 'error' => "no such file: {$path} — use write_file to create a new file"];
+            if (!isset($readPaths[$path])) {
+                return ['tool' => 'patch_file', 'error' =>
+                    "\"{$path}\" hasn't been read_file'd yet this session — read it first so your patch is based on its real content, not a guess."];
+            }
+            $matchCount = substr_count($current, $find);
+            if ($matchCount === 0) {
+                return ['tool' => 'patch_file', 'error' =>
+                    'args.find text was not found in the file — it must match EXACTLY, including whitespace/indentation. ' .
+                    're-read the current content and copy the exact text you mean to replace.'];
+            }
+            if ($matchCount > 1) {
+                return ['tool' => 'patch_file', 'error' =>
+                    "args.find text appears {$matchCount} times in the file — it must match exactly once. " .
+                    'Include more surrounding context in args.find to uniquely identify the one occurrence you mean to change.'];
+            }
+            $newContent = substr_replace($current, $replace, strpos($current, $find), strlen($find));
+            $changedFiles[$path] = $newContent;
+            $patchCheck = ai_check_js_syntax($path, $newContent, $config);
+            return ['tool' => 'patch_file', 'result' => [
+                'path' => $path, 'bytes' => strlen($newContent), 'syntax_ok' => $patchCheck['ok'], 'syntax_error' => $patchCheck['error'],
+            ]];
+
         case 'write_file':
             $path = $normalizePath((string)($args['path'] ?? ''));
             if ($path === null) return ['tool' => 'write_file', 'error' => 'args.path is missing or unsafe'];
@@ -416,7 +478,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             return ['tool' => 'syntax_check', 'result' => ['results' => $results]];
 
         default:
-            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, write_file, write_files, syntax_check, check_policy, curl_site, fetch_page, smoke_test, fetch_docs, validate_frontend, finish"];
+            return ['error' => "unknown tool \"{$tool}\" — must be one of: list_files, search_code, read_file, read_files, write_file, write_files, patch_file, syntax_check, check_policy, curl_site, fetch_page, smoke_test, fetch_docs, validate_frontend, finish"];
     }
 }
 

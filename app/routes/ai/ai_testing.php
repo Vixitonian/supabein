@@ -219,9 +219,15 @@ try {
   browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
   page    = await browser.newPage();
 } catch (connErr) {
-  // assert(), not a bare failed++ — the stories array is the only thing the
-  // PHP result parser counts, so this must land there to be visible upstream.
-  assert('Browser connection', false, 'Browser connect failed: ' + connErr.message);
+  // A distinct marker, NOT a fake failing story -- Browserless free-tier
+  // quota exhaustion (or any other connect-level failure) is a test
+  // INFRASTRUCTURE problem, not evidence the app itself is broken. Folding
+  // it into the stories array (as a bare failed assertion used to) made a
+  // quota error indistinguishable from a real bug to every downstream
+  // consumer, including the auto-fix loop's "still failing after N
+  // attempts" verdict -- live-observed giving up on a real bug that may
+  // never have existed, because the very last retest couldn't even connect.
+  console.log('__CONNECTION_ERROR__' + JSON.stringify({ message: connErr.message }));
   console.log('__STORIES_JSON__' + JSON.stringify(stories));
   process.exit(1);
 }
@@ -634,9 +640,21 @@ function ai_playwright_test_run(string $script, array $config): array
         }
     }
 
+    // A failure to even ESTABLISH the browser connection (Browserless quota,
+    // a network blip) is a test-infrastructure problem, not evidence the app
+    // is broken -- surfaced as its own field so callers can treat it
+    // differently from a real story failure (e.g. not count it toward "still
+    // failing after N auto-fix attempts"). See the JS connect block's own
+    // comment for the live-observed case this fixes.
+    $connectionError = null;
+    if (preg_match('/__CONNECTION_ERROR__(.+)$/m', $combinedOut, $m)) {
+        $decoded = json_decode($m[1], true);
+        $connectionError = is_array($decoded) ? ($decoded['message'] ?? 'unknown connection error') : 'unknown connection error';
+    }
+
     // Surface Node error lines when no stories were produced
     $nodeError = null;
-    if (empty($stories) && trim($stderr)) {
+    if (empty($stories) && trim($stderr) && !$connectionError) {
         $nodeError = trim(substr($stderr, 0, 500));
     }
 
@@ -649,12 +667,13 @@ function ai_playwright_test_run(string $script, array $config): array
     }
 
     return [
-        'stories'    => $stories,
-        'passed'     => $passed,
-        'failed'     => $failed,
-        'exit_code'  => $exitCode,
-        'error'      => $nodeError,
-        'screenshot' => $screenshotB64,
+        'stories'          => $stories,
+        'passed'           => $passed,
+        'failed'           => $failed,
+        'exit_code'        => $exitCode,
+        'error'            => $nodeError,
+        'connection_error' => $connectionError,
+        'screenshot'       => $screenshotB64,
     ];
 }
 
@@ -1169,7 +1188,12 @@ function ai_run_browser_test_agent(
     $init = ai_browser_agent_read($handles, 25);
     if (!empty($init['error']) && ($init['tool'] ?? '') === '__init__') {
         ai_browser_agent_shutdown($handles);
-        return ['stories' => [], 'passed' => 0, 'failed' => 1, 'error' => $init['error'], 'usage' => $zeroUsage];
+        // failed: 0, not 1 -- zero stories were actually exercised, so there
+        // is no evidence the app is broken, only that this attempt couldn't
+        // connect (Browserless quota, a network blip). connection_error lets
+        // ai_run_test_and_autofix() tell that apart from a real failure
+        // instead of counting it toward "still failing after N attempts".
+        return ['stories' => [], 'passed' => 0, 'failed' => 0, 'error' => $init['error'], 'connection_error' => $init['error'], 'usage' => $zeroUsage];
     }
 
     $storiesText = implode("\n", array_map(fn($s, $i) => ($i + 1) . '. ' . $s, $stories, array_keys($stories)));
@@ -1404,7 +1428,19 @@ function ai_track_new_rows_since(int $projectId, \SupaBein\Catalog $catalog, arr
     }
 }
 
-function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, ?object $client = null): array
+/**
+ * @param array|null $storiesOverride When provided, skips deriving the full
+ *   story set (ai_extract_saved_stories()/ai_infer_stories()) and tests only
+ *   these specific stories instead. Used by ai_run_test_and_autofix() to
+ *   re-verify just the stories that were failing after a narrowly-scoped fix
+ *   (one that only touched an isolated feature file, not anything shared)
+ *   instead of unconditionally re-running the entire suite -- real sequential
+ *   browser time for stories nowhere near the changed code isn't buying any
+ *   extra safety margin. The deterministic auth/CRUD/isolation checks below
+ *   always run regardless -- those are fast and catch broad regressions a
+ *   scoped story list wouldn't.
+ */
+function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, ?object $client = null, ?array $storiesOverride = null): array
 {
     $project = $catalog->getProjectById($projectId, $userId);
     if (!$project) throw new \RuntimeException('Project not found');
@@ -1458,13 +1494,18 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     if ($client) {
         $report(['stage' => 'stories', 'status' => 'start', 'label' => 'Testing user stories…']);
         try {
-            $stories = ai_extract_saved_stories($catalog->getProjectRequirements($projectId));
-            $source  = 'saved';
-            if (!$stories) {
-                $stories = ai_infer_stories($client, $schema, $indexHtml);
-                $source  = 'inferred';
-                $usage   = $client->getLastUsage();
-                foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
+            if ($storiesOverride) {
+                $stories = $storiesOverride;
+                $source  = 'scoped re-test';
+            } else {
+                $stories = ai_extract_saved_stories($catalog->getProjectRequirements($projectId));
+                $source  = 'saved';
+                if (!$stories) {
+                    $stories = ai_infer_stories($client, $schema, $indexHtml);
+                    $source  = 'inferred';
+                    $usage   = $client->getLastUsage();
+                    foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
+                }
             }
             $authInfo   = ai_detect_auth($schema);
             $agentResult = ai_run_browser_test_agent($client, $stories, $appUrl, $browserlessToken, !empty($authInfo['table']), $report);
@@ -1473,6 +1514,13 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
                 $result['stories'] = array_merge($result['stories'] ?? [], $agentResult['stories']);
                 $result['passed']  = ($result['passed'] ?? 0) + $agentResult['passed'];
                 $result['failed']  = ($result['failed'] ?? 0) + $agentResult['failed'];
+            }
+            // Neither side's connection_error should shadow the other's --
+            // whichever stage actually hit one (the deterministic run above,
+            // or this story agent) needs to survive the merge so the caller
+            // knows this test pass was inconclusive, not that the app failed.
+            if (!empty($agentResult['connection_error'])) {
+                $result['connection_error'] = $agentResult['connection_error'];
             }
             if (!empty($agentResult['aiTrace'])) {
                 $result['aiTrace'] = array_merge($result['aiTrace'] ?? [], $agentResult['aiTrace']);
@@ -1521,6 +1569,27 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     return array_merge($result, ['target' => $target, 'validation' => $validation, 'usage' => $totalUsage]);
 }
 
+// A connection-level failure (Browserless quota, a network blip) means the
+// test pass just run verified NOTHING -- retrying the SAME test a couple of
+// times is cheap and often just waits out a transient blip, unlike paying
+// for a whole new auto-fix edit attempt to "fix" a bug that may not even
+// exist. See ai_playwright_test_run()'s own connection_error field and its
+// doc comment for the live-observed case this exists to stop.
+function ai_run_project_tests_with_connection_retry(int $projectId, int $userId, \SupaBein\Catalog $catalog, array $config, callable $report, ?object $client, int $maxAttempts = 3, ?array $storiesOverride = null): array
+{
+    $result = [];
+    for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client, $storiesOverride);
+        if (empty($result['connection_error'])) return $result;
+        if ($attempt < $maxAttempts) {
+            $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…',
+                'detail' => 'Could not connect to the test browser — retrying…']);
+            sleep(3);
+        }
+    }
+    return $result; // still has connection_error set -- caller must check for it
+}
+
 // Runs the test suite, and if it reports failing user stories, feeds the
 // SPECIFIC failures (story label + what was actually observed, not just
 // "something failed") back in as an edit request, applies and deploys the
@@ -1545,8 +1614,19 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
         foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
     };
 
-    $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+    $result = ai_run_project_tests_with_connection_retry($projectId, $userId, $catalog, $config, $report, $client);
     $addUsage($result['usage'] ?? null);
+    if (!empty($result['connection_error'])) {
+        // Never entered the fix loop at all -- there's no signal here to act
+        // on, good or bad. Distinct from autofix_gave_up (which means real
+        // failures were found and repair was attempted) and distinct from a
+        // clean pass (which means stories were actually verified).
+        $result['test_infra_unavailable'] = true;
+        $result['autofix_attempts'] = [];
+        $result['autofix_gave_up']  = false;
+        $result['usage'] = $totalUsage;
+        return $result;
+    }
 
     for ($fixAttempt = 1; $fixAttempt <= AI_TEST_AUTOFIX_MAX_ATTEMPTS; $fixAttempt++) {
         $failingStories = array_values(array_filter($result['stories'] ?? [], fn($s) => empty($s['passed'])));
@@ -1607,13 +1687,56 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
             ],
         ];
 
-        $report(['stage' => 'autofix', 'status' => 'active', 'label' => "Auto-fix attempt {$fixAttempt}: re-testing…"]);
-        $result = ai_run_project_tests($projectId, $userId, $catalog, $config, $report, $client);
+        // Blast-radius check: a fix confined to isolated feature files (and
+        // no schema change) can't plausibly affect stories that weren't
+        // already failing, so only re-verify those instead of paying for the
+        // full suite again -- real sequential browser time for stories
+        // nowhere near the changed code isn't buying extra safety margin.
+        // Any schema change or any touched file outside features/ (core/*,
+        // index.html, a new top-level file) falls back to the full retest,
+        // since those ARE plausibly shared by everything.
+        $changedPaths = array_map(fn($f) => $f['path'] ?? '', $plan['frontend']['files'] ?? []);
+        $isFeatureScoped = empty($plan['add_tables']) && empty($plan['add_columns']) && empty($plan['update_policies'])
+            && $changedPaths && !array_filter($changedPaths, fn($p) => !str_starts_with($p, 'features/'));
+        $retestStories = $isFeatureScoped ? array_map(fn($s) => $s['label'] ?? '', $failingStories) : null;
+
+        $report(['stage' => 'autofix', 'status' => 'active', 'label' => "Auto-fix attempt {$fixAttempt}: re-testing…"
+            . ($isFeatureScoped ? ' (' . count($retestStories) . ' affected stor' . (count($retestStories) === 1 ? 'y' : 'ies') . ')' : '')]);
+        $previousStories = $result['stories'] ?? [];
+        $result = ai_run_project_tests_with_connection_retry($projectId, $userId, $catalog, $config, $report, $client, 3, $retestStories);
         $addUsage($result['usage'] ?? null);
+        if (!empty($result['connection_error'])) {
+            // The FIX just applied was never actually verified -- stop here
+            // rather than let the loop treat an empty (unverified) stories
+            // list as "clean" on the next iteration, or count this against
+            // autofix_gave_up as if the fix were confirmed still broken.
+            $result['test_infra_unavailable'] = true;
+            break;
+        }
+        if ($isFeatureScoped) {
+            // A scoped retest only re-verified the previously-failing
+            // stories -- merge those updated results back into the last
+            // full picture instead of letting the scoped subset stand in
+            // for the whole suite (which would understate "N passed" in the
+            // final report for stories that were confirmed fine earlier and
+            // simply weren't in blast radius of this fix).
+            $mergedStories = $previousStories;
+            foreach ($result['stories'] as $updated) {
+                $idx = null;
+                foreach ($mergedStories as $i => $old) {
+                    if (($old['label'] ?? null) === ($updated['label'] ?? null)) { $idx = $i; break; }
+                }
+                if ($idx !== null) $mergedStories[$idx] = $updated; else $mergedStories[] = $updated;
+            }
+            $result['stories'] = $mergedStories;
+            $result['passed']  = count(array_filter($mergedStories, fn($s) => !empty($s['passed'])));
+            $result['failed']  = count($mergedStories) - $result['passed'];
+        }
     }
 
     $result['autofix_attempts'] = $fixAttempts;
-    $result['autofix_gave_up']  = (bool)array_filter($result['stories'] ?? [], fn($s) => empty($s['passed']));
+    $result['autofix_gave_up']  = empty($result['test_infra_unavailable'])
+        && (bool)array_filter($result['stories'] ?? [], fn($s) => empty($s['passed']));
     $result['usage'] = $totalUsage;
     return $result;
 }

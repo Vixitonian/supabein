@@ -481,10 +481,10 @@ function ai_generate_intent(object $client, string $prompt, array $history = [],
  * Serialize an approved intent into a locked context block for the schema pass. Works with
  * both the new nested format and the legacy flat format.
  */
-function ai_intent_to_context(array $intent): string
+function ai_intent_to_context(array $intent, string $purpose = 'design the schema for'): string
 {
     $intent = ai_cap_intent($intent);
-    $lines  = "Locked product intent — design the schema for EXACTLY these, add nothing and drop nothing.\nActors:\n";
+    $lines  = "Locked product intent — {$purpose} EXACTLY these, add nothing and drop nothing.\nActors:\n";
     foreach ($intent['actors'] as $actor) {
         $lines .= '- ' . (is_array($actor) ? $actor['name'] : $actor) . "\n";
     }

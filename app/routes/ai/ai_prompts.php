@@ -667,6 +667,10 @@ Available tools:
     before deciding which file(s) to read.
   read_file    args: {"path": string}
     Returns the full current content of one file.
+  read_files   args: {"paths": [string, ...]}
+    Same as calling read_file once per path, but in a single turn — use this whenever you're about
+    to look at more than one file back-to-back (e.g. every file that touches a shared helper before
+    changing it) instead of spending a separate turn per file.
   write_file   args: {"path": string, "content": string}
     Works for BOTH editing an existing file and creating a brand-new one — write_file a path that
     doesn't exist yet (read_file on it will say "no such file", which just means it needs creating)
@@ -688,6 +692,15 @@ Available tools:
     you're about to write more than one file back-to-back (e.g. a new feature file plus its
     index.html wiring) instead of spending a separate turn per file. The same write_file HARD RULE
     applies to every entry individually.
+  patch_file   args: {"path": string, "find": string, "replace": string}
+    PREFER THIS over write_file whenever you're changing a small part of a file that already exists
+    and is more than a few lines — replaces only the exact text in "find" with "replace", instead of
+    you regenerating and resending the entire file's content. Faster, and impossible to accidentally
+    alter anything outside the change. args.find must match the file's CURRENT content exactly
+    (whitespace and indentation included) and must occur exactly once — if it's not found, or found
+    more than once, you'll get an error telling you so instead of a guess; add more surrounding
+    context to args.find to disambiguate, or fall back to write_file for a change too broad for one
+    find/replace span. Same read-before-write requirement as write_file.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
   check_policy args: {"table": string, "api_role": "anon"|"authenticated", "operation": "SELECT"|"INSERT"|"UPDATE"|"DELETE"}
@@ -819,6 +832,9 @@ Available tools:
     whether you already defined something (a route, a helper, a global) before writing it again.
   read_file    args: {"path": string}
     Returns the full current content of a file you've already written.
+  read_files   args: {"paths": [string, ...]}
+    Same as calling read_file once per path, but in a single turn — use this whenever you're about
+    to look at more than one file back-to-back instead of spending a separate turn per file.
   write_file   args: {"path": string, "content": string}
     Creates or overwrites one file. The result tells you immediately whether the write passed a
     syntax check — fix it and write_file again if not. Write index.html first (or early), then add
@@ -832,6 +848,14 @@ Available tools:
     Same as calling write_file once per entry, in order, but in a single turn — use this whenever
     you're about to write more than one file back-to-back (e.g. index.html plus a feature file)
     instead of spending a separate turn per file.
+  patch_file   args: {"path": string, "find": string, "replace": string}
+    PREFER THIS over write_file whenever you're changing a small part of a file that already exists
+    and is more than a few lines — replaces only the exact text in "find" with "replace", instead of
+    you regenerating and resending the entire file's content. args.find must match the file's
+    CURRENT content exactly (whitespace and indentation included) and must occur exactly once — if
+    it's not found, or found more than once, you'll get an error telling you so; add more surrounding
+    context to disambiguate, or fall back to write_file for a broader change. Same read-before-write
+    requirement as write_file.
   syntax_check args: {"path": string}  (path optional — omit to check every file you've written so far)
     Re-runs the syntax check on demand.
   validate_frontend args: {}
@@ -1334,7 +1358,9 @@ what they did):
     action first, or an index from an earlier turn may no longer point at the same thing.
   report_story  args: {"label": string, "passed": boolean, "detail": string}
     Records ONE story's real, observed result, then move on to testing the next one. "passed" must
-    reflect what a snapshot actually showed you — never assume an action worked, verify it.
+    reflect what a snapshot actually showed you — never assume an action worked, verify it. "label"
+    MUST be copied verbatim from the story text you were given, not paraphrased or shortened —
+    callers match results back to the original story list by this exact text.
   finish        args: {}
     Ends the session. Only valid once every story you were given has a report_story call.
 
