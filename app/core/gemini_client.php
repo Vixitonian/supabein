@@ -129,8 +129,9 @@ class GeminiClient
             throw new \RuntimeException('Gemini API error: ' . $msg);
         }
 
-        $envelope = json_decode($response, true);
-        $text     = $envelope['candidates'][0]['content']['parts'][0]['text'] ?? null;
+        $envelope     = json_decode($response, true);
+        $text         = $envelope['candidates'][0]['content']['parts'][0]['text'] ?? null;
+        $finishReason = $envelope['candidates'][0]['finishReason'] ?? null;
 
         $meta = $envelope['usageMetadata'] ?? [];
         $this->lastUsage = [
@@ -140,6 +141,15 @@ class GeminiClient
         ];
 
         if ($text === null) {
+            // "MAX_TOKENS" with no text at all means the reasoning trace (this
+            // model 'thinks' before answering) burned the entire budget --
+            // maxOutputTokens above is already fixed at Gemini 2.5 Flash's own
+            // ceiling (unlike the other providers, there's no higher value to
+            // retry with), so the only honest fix is a clearer error telling
+            // the caller WHY, instead of the generic "no content" message.
+            if ($finishReason === 'MAX_TOKENS') {
+                throw new \RuntimeException('Gemini output was cut off by its own reasoning before producing a reply, even at its max output size. Try a simpler prompt or a different model.');
+            }
             throw new \RuntimeException('Gemini returned no content in response');
         }
         $this->lastRawText = $text;
@@ -149,6 +159,9 @@ class GeminiClient
             $plan = ai_lenient_json($text);
         }
         if (!is_array($plan)) {
+            if ($finishReason === 'MAX_TOKENS') {
+                throw new \RuntimeException('Gemini response was cut off before finishing (hit its max output size) -- try a simpler request, or switch to a different model.');
+            }
             throw new \RuntimeException('Gemini response was not valid JSON: ' . substr($text, 0, 200));
         }
 

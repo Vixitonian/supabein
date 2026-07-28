@@ -5,14 +5,16 @@ declare(strict_types=1);
 namespace SupaBein;
 
 // Zhipu / BigModel (open.bigmodel.cn), OpenAI-compatible chat-completions
-// endpoint. Both GLM models here are "thinking" models -- every reply
+// endpoint. All three GLM models here are "thinking" models -- every reply
 // carries a separate `reasoning_content` field ahead of the real `content`,
 // and glm-4.7-flash in particular burns a LOT of budget on it: live-tested
 // against a trivial 2-field JSON request, it used ~900 tokens of pure
 // reasoning before ever emitting content, and finish_reason came back
 // "length" (content empty) at anything under a few thousand max_tokens.
 // glm-4.5-flash is far cheaper (~100 tokens total for the same prompt) and
-// is the default for exactly that reason.
+// is the default for exactly that reason. glm-5.2 is Zhipu's flagship
+// model (live-verified directly against this same endpoint) -- also a
+// reasoning model, opt-in via the model picker rather than the default.
 class ZhipuClient
 {
     private const ENDPOINT = 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
@@ -158,19 +160,32 @@ class ZhipuClient
             ];
 
             // The reasoning trace ran the whole max_tokens budget out before
-            // any real content came back -- same failure shape as Groq's
-            // "cut off" case, just far more likely to happen here given how
-            // reasoning-heavy these models are. Bumping the budget and
-            // retrying in place (rather than surfacing immediately) gives a
-            // real chance at a complete answer instead of failing a request
-            // that would have succeeded with a bit more room.
-            if (($text === null || trim($text) === '') && $finishReason === 'length') {
-                if ($attempt < 4 && $maxTokens < 98000) {
-                    $maxTokens = min(98000, $maxTokens * 2);
+            // real content ever finished -- same failure shape as every other
+            // client's "cut off" case, just far more likely to happen here
+            // given how reasoning-heavy these models are. Triggers on
+            // finish_reason alone (not just empty content) -- a NON-empty but
+            // truncated reply (e.g. a write_file call cut off mid-content)
+            // would otherwise fall straight into the JSON-parse path below
+            // and fail as "not valid JSON", spending a whole agent-loop turn
+            // on a failure this HTTP-level retry can usually just fix outright.
+            // 200000 is a deliberately generous ceiling, not a per-model
+            // limit -- if it's too high for this specific model, the
+            // "max_tokens out of range" handler above already catches that
+            // on the next attempt and corrects back down, so raising this
+            // never risks a worse failure, only gives newer/larger-ceiling
+            // models (glm-5.2 and beyond) room to actually use it.
+            if ($finishReason === 'length') {
+                if ($attempt < 4 && $maxTokens < 200000) {
+                    $maxTokens = min(200000, $maxTokens * 2);
                     MaxTokensProbe::remember($probeKey, $maxTokens);
                     continue;
                 }
-                throw new \RuntimeException('Zhipu output was cut off by its own reasoning before producing a reply. Try a simpler prompt or a different model.');
+                if ($text === null || trim($text) === '') {
+                    throw new \RuntimeException('Zhipu output was cut off by its own reasoning before producing a reply. Try a simpler prompt or a different model.');
+                }
+                // Still truncated at the ceiling, but at least partial
+                // content came back -- let the lenient-JSON salvage below
+                // have a shot at it instead of failing outright.
             }
 
             if ($text === null || trim($text) === '') {

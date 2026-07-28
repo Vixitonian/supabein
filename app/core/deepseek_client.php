@@ -159,8 +159,20 @@ class DeepSeekClient
             if ($text === null || trim($text) === '') {
                 throw new \RuntimeException('DeepSeek returned no content in response');
             }
+            // finish_reason "length" means the model got cut off mid-response --
+            // bump the budget and retry in place rather than immediately
+            // failing, same self-correcting pattern as the max_tokens-out-of-
+            // range case above. 200000 is a deliberately generous ceiling, not
+            // a per-model limit -- if it's too high for this model, the
+            // out-of-range handler above already corrects back down on the
+            // next attempt.
             if ($finishReason === 'length') {
-                throw new \RuntimeException('DeepSeek output was cut off (too long). Try a simpler description or a different model.');
+                if ($attempt < 4 && $maxTokens < 200000) {
+                    $maxTokens = min(200000, $maxTokens * 2);
+                    MaxTokensProbe::remember($probeKey, $maxTokens);
+                    continue;
+                }
+                throw new \RuntimeException('DeepSeek output was cut off (too long) even at the model\'s ceiling. Try a simpler description or a different model.');
             }
 
             $text = preg_replace('/<think>.*?<\/think>/s', '', $text);

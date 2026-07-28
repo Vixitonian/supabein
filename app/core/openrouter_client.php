@@ -174,6 +174,19 @@ class OpenRouterClient
             if ($text === null) {
                 throw new \RuntimeException('OpenRouter returned no content in response');
             }
+
+            // finish_reason "length" means the model got cut off mid-response --
+            // bump the budget and retry in place rather than immediately
+            // failing, same self-correcting pattern as the max_tokens-out-of-
+            // range case above. 200000 is a deliberately generous ceiling, not
+            // a per-model limit -- if it's too high for this model/provider,
+            // the out-of-range handler above already corrects back down on
+            // the next attempt.
+            if ($finishReason === 'length' && $attempt < 4 && $maxTokens < 200000) {
+                $maxTokens = min(200000, $maxTokens * 2);
+                MaxTokensProbe::remember($probeKey, $maxTokens);
+                continue;
+            }
             $this->lastRawText = $text;
 
             $plan = json_decode($text, true);
@@ -181,10 +194,10 @@ class OpenRouterClient
                 $plan = ai_lenient_json($text);
             }
             if (!is_array($plan)) {
-                // finish_reason "length" means the model got cut off mid-response —
-                // report that plainly instead of a generic parse error, since the
-                // fix (shorter request / different model) is completely different
-                // from an actually-malformed response.
+                // Ran out of retries and still truncated -- now it's worth
+                // reporting plainly instead of a generic parse error, since
+                // the fix (shorter request / different model) is completely
+                // different from an actually-malformed response.
                 if ($finishReason === 'length') {
                     throw new \RuntimeException(
                         "OpenRouter response was cut off before finishing (hit the {$maxTokens}-token limit for {$this->model}) — "

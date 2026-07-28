@@ -2044,22 +2044,49 @@ function ai_schema_from_db(int $projectId, \SupaBein\Catalog $catalog): array
 // ─── AI output helpers ───────────────────────────────────────────────────────
 
 /**
- * Lenient JSON extraction for models that wrap output in ```json fences or add prose.
- * Strips fences and pulls the first balanced {...} object.
+ * Lenient JSON extraction for models that wrap output in ```json fences, add
+ * prose, or otherwise produce something JSON-*shaped* rather than valid JSON.
+ * Every AI provider client falls back to this after a plain json_decode()
+ * fails, so it's the single place that determines how often "the model's
+ * output didn't parse" turns into a real retry versus a recovered result.
+ *
+ * Handles, in order: a fenced code block anywhere in the text (not just at
+ * the very start); a bare top-level array as well as an object; and, if a
+ * clean parse of the extracted candidate still fails, a string-aware repair
+ * pass (see ai_json_repair()) for the specific defects models actually
+ * produce -- then finally, if the response was truncated (ran out of
+ * max_tokens mid-structure), a best-effort salvage that drops only the
+ * incomplete trailing element instead of failing the whole response.
  */
 function ai_lenient_json(string $raw): ?array
 {
     $s = trim($raw);
+    if ($s === '') return null;
 
-    if (str_starts_with($s, '```')) {
-        $s = preg_replace('#^```[a-zA-Z]*\s*#', '', $s);
-        $s = preg_replace('#\s*```\s*$#', '', $s);
+    // Prefer a fenced code block if one exists anywhere in the text -- a
+    // model asked for raw JSON can still preface it with prose ("Here's the
+    // JSON:\n```json\n{...}\n```") or wrap it in a fence out of habit.
+    if (preg_match('/```(?:json|js)?\s*\r?\n(.*?)```/is', $s, $m)) {
+        $fenced = trim($m[1]);
+        if ($fenced !== '') $s = $fenced;
     }
 
-    $start = strpos($s, '{');
-    if ($start === false) return null;
+    // Candidate root is whichever of { or [ appears first -- a plain strpos
+    // search for only { would silently miss a bare top-level JSON array.
+    $braceStart   = strpos($s, '{');
+    $bracketStart = strpos($s, '[');
+    if ($braceStart === false && $bracketStart === false) return null;
+    $start = ($braceStart === false) ? $bracketStart
+           : (($bracketStart === false) ? $braceStart : min($braceStart, $bracketStart));
 
+    // Scan forward tracking nesting + string state so a { or [ inside a
+    // string literal can't skew depth. Each stack frame also remembers the
+    // position of the last top-level-for-that-frame comma seen (its own
+    // "safe rollback point") -- used only if the response turns out to be
+    // truncated, to drop an incomplete trailing element instead of trying
+    // to keep corrupted partial data.
     $depth = 0; $inStr = false; $esc = false; $end = null;
+    $stack = [];
     for ($i = $start, $n = strlen($s); $i < $n; $i++) {
         $c = $s[$i];
         if ($inStr) {
@@ -2068,14 +2095,151 @@ function ai_lenient_json(string $raw): ?array
             elseif ($c === '"')  { $inStr = false; }
             continue;
         }
-        if ($c === '"')      { $inStr = true; }
-        elseif ($c === '{')  { $depth++; }
-        elseif ($c === '}')  { $depth--; if ($depth === 0) { $end = $i; break; } }
+        if ($c === '"') { $inStr = true; continue; }
+        if ($c === '{' || $c === '[') { $stack[] = ['open' => $c, 'safePos' => null]; $depth++; continue; }
+        if ($c === ',' && $stack) { $stack[count($stack) - 1]['safePos'] = $i; continue; }
+        if ($c === '}' || $c === ']') {
+            if ($stack) array_pop($stack);
+            $depth--;
+            if ($depth === 0) { $end = $i; break; }
+        }
     }
-    if ($end === null) return null;
 
-    $data = json_decode(substr($s, $start, $end - $start + 1), true);
-    return is_array($data) ? $data : null;
+    $candidates = [];
+    if ($end !== null) {
+        $candidates[] = substr($s, $start, $end - $start + 1);
+    } elseif ($inStr) {
+        // Truncated mid-string -- an unambiguous "ran out of tokens here"
+        // signal. Roll back to the innermost still-open frame's own last
+        // complete sibling; if that frame never completed even its first
+        // element, keep popping outward until one that has, dropping every
+        // wholly-incomplete frame in between. Recovers as much of the
+        // response as was actually finished, instead of either keeping
+        // corrupted partial content or discarding the whole response.
+        $cutPos = null; $keepDepth = 0;
+        for ($k = count($stack) - 1; $k >= 0; $k--) {
+            if ($stack[$k]['safePos'] !== null) {
+                $cutPos = $stack[$k]['safePos'];
+                $keepDepth = $k + 1;
+                break;
+            }
+        }
+        if ($cutPos !== null) {
+            $tail = substr($s, $start, $cutPos - $start);
+            for ($k = $keepDepth - 1; $k >= 0; $k--) {
+                $tail .= $stack[$k]['open'] === '{' ? '}' : ']';
+            }
+            $candidates[] = $tail;
+        }
+    } else {
+        // Truncated, but not mid-string -- the trailing token (a number,
+        // true/false/null, or a nested structure's own closing bracket) may
+        // already be complete; don't second-guess it, just close what's
+        // still open. json_decode is the real arbiter of whether it holds up.
+        $tail = substr($s, $start);
+        $tail = preg_replace('/,\s*$/', '', $tail);
+        for ($k = count($stack) - 1; $k >= 0; $k--) {
+            $tail .= $stack[$k]['open'] === '{' ? '}' : ']';
+        }
+        $candidates[] = $tail;
+    }
+
+    foreach ($candidates as $candidate) {
+        $data = json_decode($candidate, true);
+        if (is_array($data)) return $data;
+
+        $repaired = ai_json_repair($candidate);
+        if ($repaired !== null) {
+            $data = json_decode($repaired, true);
+            if (is_array($data)) return $data;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * String-aware light repair pass for the class of "obviously meant to be
+ * JSON, one small thing wrong" replies models actually produce: a raw
+ * (unescaped) newline/tab inside a string value -- the single most common
+ * failure for this app specifically, since file contents get embedded as
+ * JSON string values -- a trailing comma before a closing bracket, a // or
+ * /* * / comment, or a bare NaN/Infinity/undefined/Python-style literal.
+ * Every repair below only ever fires OUTSIDE a string literal (except the
+ * control-character escape, which only ever fires INSIDE one) via the same
+ * single string-aware scan, so real string content -- a URL containing
+ * "//", the literal word "undefined" typed into a text field -- is never
+ * touched by anything except the one repair that's specifically about it.
+ * Returns null (meaning "nothing to repair") rather than an unchanged copy,
+ * so the caller can skip a redundant identical decode attempt.
+ */
+function ai_json_repair(string $s): ?string
+{
+    $out = '';
+    $inStr = false; $esc = false;
+    $n = strlen($s);
+    $changed = false;
+    $literals = [
+        ['Infinity', 'null'], ['NaN', 'null'], ['undefined', 'null'],
+        ['None', 'null'], ['True', 'true'], ['False', 'false'],
+    ];
+
+    for ($i = 0; $i < $n; $i++) {
+        $c = $s[$i];
+        if ($inStr) {
+            if ($esc)            { $out .= $c; $esc = false; continue; }
+            if ($c === '\\')     { $out .= $c; $esc = true; continue; }
+            if ($c === '"')      { $out .= $c; $inStr = false; continue; }
+            if ($c === "\n")     { $out .= '\\n'; $changed = true; continue; }
+            if ($c === "\r")     { $out .= '\\r'; $changed = true; continue; }
+            if ($c === "\t")     { $out .= '\\t'; $changed = true; continue; }
+            $out .= $c;
+            continue;
+        }
+
+        if ($c === '"') { $out .= $c; $inStr = true; continue; }
+
+        if ($c === '/' && ($s[$i + 1] ?? '') === '/') {
+            $nl = strpos($s, "\n", $i);
+            $i = ($nl === false) ? $n - 1 : $nl - 1;
+            $changed = true;
+            continue;
+        }
+        if ($c === '/' && ($s[$i + 1] ?? '') === '*') {
+            $endC = strpos($s, '*/', $i + 2);
+            $i = ($endC === false) ? $n - 1 : $endC + 1;
+            $changed = true;
+            continue;
+        }
+
+        if ($c === ',') {
+            $j = $i + 1;
+            while ($j < $n && ($s[$j] === ' ' || $s[$j] === "\n" || $s[$j] === "\r" || $s[$j] === "\t")) $j++;
+            if ($j < $n && ($s[$j] === '}' || $s[$j] === ']')) {
+                $changed = true;
+                continue; // drop the trailing comma
+            }
+        }
+
+        $matched = false;
+        foreach ($literals as [$needle, $replacement]) {
+            $len = strlen($needle);
+            if (substr($s, $i, $len) === $needle
+                && !ctype_alnum($s[$i - 1] ?? ' ')
+                && !ctype_alnum($s[$i + $len] ?? ' ')) {
+                $out .= $replacement;
+                $i += $len - 1;
+                $changed = true;
+                $matched = true;
+                break;
+            }
+        }
+        if ($matched) continue;
+
+        $out .= $c;
+    }
+
+    return $changed ? $out : null;
 }
 
 /**
@@ -2812,10 +2976,16 @@ const AI_ALLOWED_MODELS = [
     // reasoning overhead); glm-4.7-flash is a much heavier "thinking" model
     // that needs a large max_tokens budget to get past its own reasoning
     // trace before it ever emits real content -- see ZhipuClient's own
-    // token-budget comment for the live-measured numbers.
+    // token-budget comment for the live-measured numbers. glm-5.2 is Zhipu's
+    // flagship model, live-verified directly against open.bigmodel.cn (HTTP
+    // 200, correct completion) -- also a reasoning model (carries its own
+    // reasoning_content), same MAX_TOKENS_DEFAULT budget/retry logic applies.
+    // Kept out of index 0 deliberately -- glm-4.5-flash stays the default for
+    // an unrecognized model string; glm-5.2 is opt-in via the model picker.
     'zhipu' => [
         'glm-4.5-flash',
         'glm-4.7-flash',
+        'glm-5.2',
     ],
     // DeepSeek's own API (not NVIDIA's hosted copy, which already appears
     // under 'nvidia' above as deepseek-ai/deepseek-v4-*) -- this account's
@@ -2901,6 +3071,7 @@ const AI_MODEL_CATALOG = [
     ['label' => 'Nemotron 3 Ultra 550B', 'provider' => 'nvidia',     'model' => 'nvidia/nemotron-3-ultra-550b-a55b',                  'badge' => 'NVIDIA'],
     ['label' => 'Kimi K2',               'provider' => 'openrouter', 'model' => 'moonshotai/kimi-k2',                                 'badge' => 'OpenRouter'],
     ['label' => 'GLM 5.2',               'provider' => 'nvidia',     'model' => 'z-ai/glm-5.2',                                       'badge' => 'NVIDIA'],
+    ['label' => 'GLM 5.2 (direct)',      'provider' => 'zhipu',      'model' => 'glm-5.2',                                            'badge' => 'Zhipu'],
     ['label' => 'GLM 4.5 Flash',         'provider' => 'zhipu',      'model' => 'glm-4.5-flash',                                      'badge' => 'Zhipu'],
     ['label' => 'GLM 4.7 Flash',         'provider' => 'zhipu',      'model' => 'glm-4.7-flash',                                      'badge' => 'Zhipu'],
     ['label' => 'DeepSeek V4 Flash (direct)', 'provider' => 'deepseek', 'model' => 'deepseek-v4-flash',                             'badge' => 'DeepSeek'],

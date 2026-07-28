@@ -177,6 +177,24 @@ class AnthropicClient
             if ($text === null) {
                 throw new \RuntimeException('Anthropic returned no text content in response');
             }
+
+            // Anthropic's own field/value names for "got cut off" -- stop_reason
+            // "max_tokens" -- differ from every OpenAI-shaped provider's
+            // finish_reason "length", so this needs its own check rather than
+            // sharing the others'. Same self-correcting bump-and-retry as the
+            // max_tokens-out-of-range case above: 200000 is a deliberately
+            // generous ceiling, not a per-model limit -- if it's too high for
+            // this model, the out-of-range handler above already corrects
+            // back down on the next attempt.
+            $stopReason = $envelope['stop_reason'] ?? null;
+            if ($stopReason === 'max_tokens') {
+                if ($attempt < 3 && $maxTokens < 200000) {
+                    $maxTokens = min(200000, $maxTokens * 2);
+                    MaxTokensProbe::remember($probeKey, $maxTokens);
+                    continue;
+                }
+                throw new \RuntimeException('Anthropic output was cut off (too long) even at the model\'s ceiling. Try a simpler description or a different model.');
+            }
             $this->lastRawText = $text;
 
             $plan = json_decode($text, true);

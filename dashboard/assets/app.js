@@ -741,6 +741,7 @@ const AiPanel = (() => {
     { label: 'Nemotron 3 Ultra 550B',provider: 'nvidia',     model: 'nvidia/nemotron-3-ultra-550b-a55b',                 badge: 'NVIDIA' },
     { label: 'Kimi K2',              provider: 'openrouter', model: 'moonshotai/kimi-k2',                                badge: 'OpenRouter' },
     { label: 'GLM 5.2',              provider: 'nvidia',     model: 'z-ai/glm-5.2',                                      badge: 'NVIDIA' },
+    { label: 'GLM 5.2 (direct)',     provider: 'zhipu',      model: 'glm-5.2',                                           badge: 'Zhipu' },
     { label: 'GLM 4.5 Flash',        provider: 'zhipu',      model: 'glm-4.5-flash',                                     badge: 'Zhipu' },
     { label: 'GLM 4.7 Flash',        provider: 'zhipu',      model: 'glm-4.7-flash',                                     badge: 'Zhipu' },
     { label: 'DeepSeek V4 Pro',      provider: 'nvidia',     model: 'deepseek-ai/deepseek-v4-pro',                       badge: 'NVIDIA' },
