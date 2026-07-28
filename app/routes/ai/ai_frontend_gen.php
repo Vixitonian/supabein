@@ -297,6 +297,9 @@ function ai_run_build_frontend_agentic(
     $consecutiveFinishRejections = 0; // escalates a repeatedly-rejected finish() -- see gate below
     $lastFailedFile = null; // the file a failing smoke_test's console_errors pointed at, if any
     $lastFailedFileSnapshot = null; // that file's content at the moment of the failure -- see finish() gate below
+    $lastFailedFileErrorSignature = null; // hash of the last failing smoke_test's console_errors -- see rewrite guard below
+    $consecutiveIdenticalSmokeTestFailures = 0; // see ai_agent_check_canonical_wrapper_abandonment() gate below
+    $writesSinceLastCheck = 0; // consecutive write_file/write_files/patch_file calls with no intervening smoke_test
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -450,18 +453,61 @@ function ai_run_build_frontend_agentic(
         // guidance in between isn't still treated as stuck.
         $consecutiveFinishRejections = 0;
 
+        // Mechanical cadence gate (job 210, task #192): reject the write
+        // itself, before it's even dispatched, once too many have piled up
+        // unchecked. See AI_AGENT_MAX_UNVERIFIED_WRITES for why.
+        if (in_array($tool, ['write_file', 'write_files', 'patch_file'], true)
+            && $writesSinceLastCheck >= AI_AGENT_MAX_UNVERIFIED_WRITES) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                ai_agent_note_unverified_writes_blocked($writesSinceLastCheck)]);
+            continue;
+        }
+
+        // Repeated-failure rewrite guard (job 210, task #193): only fires
+        // once the same error has repeated enough times to make "rewrite it"
+        // a live temptation, and only when the write actually targets the
+        // implicated file.
+        if (in_array($tool, ['write_file', 'patch_file'], true) && $lastFailedFile !== null
+            && $consecutiveIdenticalSmokeTestFailures >= AI_AGENT_MAX_IDENTICAL_SMOKE_FAILURES
+            && ($args['path'] ?? null) === $lastFailedFile) {
+            $oldContent = $changedFiles[$lastFailedFile] ?? $byPath[$lastFailedFile] ?? '';
+            if ($tool === 'write_file') {
+                $newContent = (string)($args['content'] ?? '');
+            } else {
+                $find = (string)($args['find'] ?? '');
+                $replace = (string)($args['replace'] ?? '');
+                $newContent = ($find !== '' && str_contains($oldContent, $find))
+                    ? substr_replace($oldContent, $replace, strpos($oldContent, $find), strlen($find))
+                    : $oldContent;
+            }
+            if (ai_agent_check_canonical_wrapper_abandonment($oldContent, $newContent)) {
+                $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                    ai_agent_note_repeated_failure_rewrite_blocked($lastFailedFile)]);
+                continue;
+            }
+        }
+
+        if (in_array($tool, ['write_file', 'write_files', 'patch_file'], true)) {
+            $writesSinceLastCheck++;
+        }
+
         // No real project exists yet at this stage of a build — 0 is a safe
         // placeholder; this agent's own system prompt never advertises
         // check_policy, so it has no route to actually call it. validate_frontend
         // works fine here though — it only needs the schema plan, not a live DB.
         $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan);
         if ($tool === 'smoke_test') {
+            $writesSinceLastCheck = 0;
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
             $lastSmokeTestWasConnectionError = !empty($toolResult['result']['connection_error']);
             ai_pipeline_debug_log('frontend', 'smoke_test result (ok=' . json_encode($lastSmokeTestOk) . ')', ['result' => $toolResult['result'] ?? []]);
             if ($lastSmokeTestOk === false) {
                 $lastFailedFile = $toolResult['result']['next_step_file'] ?? null;
                 $lastFailedFileSnapshot = $lastFailedFile !== null ? ($changedFiles[$lastFailedFile] ?? null) : null;
+                $errorSignature = md5(json_encode($toolResult['result']['console_errors'] ?? []));
+                $consecutiveIdenticalSmokeTestFailures = ($errorSignature === $lastFailedFileErrorSignature)
+                    ? $consecutiveIdenticalSmokeTestFailures + 1 : 0;
+                $lastFailedFileErrorSignature = $errorSignature;
                 // Report the REAL outcome, not just the static pre-dispatch
                 // label — this is the only channel available while the job
                 // is still running (see ai_smoke_test_failure_progress_detail()).
@@ -470,6 +516,8 @@ function ai_run_build_frontend_agentic(
             } else {
                 $lastFailedFile = null;
                 $lastFailedFileSnapshot = null;
+                $lastFailedFileErrorSignature = null;
+                $consecutiveIdenticalSmokeTestFailures = 0;
             }
         }
         $turnMsg = json_encode($toolResult);

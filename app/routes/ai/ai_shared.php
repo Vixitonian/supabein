@@ -513,6 +513,67 @@ function ai_agent_note_finish_rejected(int &$consecutiveRejections, string $base
          . 'it actually reports, and fix that specific problem — do not call finish again until you have.';
 }
 
+// How many write_file/write_files/patch_file calls are allowed in a row
+// before a smoke_test is forced. Live-observed in job 210: 55+ writes to one
+// file against only 6 smoke_test checks across a ~13-minute phase, with
+// console_errors byte-identical for 10 straight minutes — the agent kept
+// writing blind between checks for far longer than any check-driven loop
+// would, letting drift compound before anything caught it. Nothing forced a
+// check; it was fully agent-discretionary. This is a mechanical cap, not a
+// prompt request, for the same reason the finish() gate below is mechanical:
+// an instruction the model can choose to skip isn't a fix, a fact it can't
+// route around is.
+const AI_AGENT_MAX_UNVERIFIED_WRITES = 4;
+
+function ai_agent_note_unverified_writes_blocked(int $writesSinceCheck): string
+{
+    return "You've made {$writesSinceCheck} file writes in a row without running smoke_test to check any of "
+         . 'them. Errors compound the longer they go unchecked, and a check now is far cheaper than untangling '
+         . 'several stacked changes later. Call smoke_test now before writing any more files.';
+}
+
+// Job 210's first auto-fix attempt, after several smoke_test checks came
+// back with the exact same error, didn't narrow its diagnosis — it rewrote
+// counter.js from scratch, abandoned the canonical api.* wrapper for raw
+// fetch(), and introduced two NEW bugs in the process (a `response.()`
+// syntax error and a truncated Content-Type header) on top of the original,
+// still-unfixed one. A full rewrite under repeated-failure pressure is a
+// worse failure mode than the bug itself: it discards a working 90% to
+// gamble on a new 100%, and dropping api.* specifically breaks this
+// platform's auth/error-handling contract (401 handling, the real error
+// body surfaced by the api.js fix above) that every generated app relies on.
+// Detects the abandonment mechanically — same content-fact approach as the
+// finish() file-diff gate — rather than trusting the model to notice its own
+// pattern.
+function ai_agent_check_canonical_wrapper_abandonment(string $oldContent, string $newContent): bool
+{
+    $wrapperPattern = '/\bapi\.(list|get|create|update|remove)\s*\(/';
+    $usedWrapper = (bool)preg_match($wrapperPattern, $oldContent);
+    if (!$usedWrapper) return false;
+    $stillUsesWrapper = (bool)preg_match($wrapperPattern, $newContent);
+    $nowUsesRawFetch = (bool)preg_match('/\bfetch\s*\(/', $newContent);
+    return !$stillUsesWrapper && $nowUsesRawFetch;
+}
+
+// How many times in a row smoke_test must return the exact same
+// console_errors before a write to the implicated file is checked for
+// canonical-wrapper abandonment. >=2 means this is at least the 3rd
+// identical failure — enough repeats that "try a bigger rewrite" is a
+// meaningfully different (and riskier) move than "keep narrowing," not a
+// hair-trigger on the first retry.
+const AI_AGENT_MAX_IDENTICAL_SMOKE_FAILURES = 2;
+
+function ai_agent_note_repeated_failure_rewrite_blocked(string $file): string
+{
+    return "smoke_test has failed with the exact same error 3 times in a row on {$file} — repeating the same "
+         . "small edits wasn't finding the real cause, but rewriting the file to drop the api.* wrapper for raw "
+         . 'fetch() is not the fix either: it breaks this platform\'s auth/error-handling contract and risks '
+         . "introducing new bugs on top of the one that's still unfixed. Keep using api.list/get/create/update/"
+         . "remove. Instead, read_file {$file} again, read the EXACT error text closely (not just its status "
+         . 'code or which line it points to), and make one small, targeted change addressing that specific '
+         . 'error — do not rewrite the whole file.';
+}
+
 // The full aiTrace (every tool call, every raw smoke_test result) only
 // reaches ai_jobs.result once the job finishes -- while it's still running,
 // polling ai_jobs.progress (what $report() writes, live) only ever showed a
