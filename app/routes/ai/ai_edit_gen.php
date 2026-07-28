@@ -145,7 +145,7 @@ function ai_agent_fetch_docs(string $url, int $maxChars = 6000): array
 // working code (note creation/editing) in the file that surfaced this rule.
 function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config, int $projectId, array $schema = []): array
 {
-    static $platformPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
+    $platformPaths = AI_PLATFORM_CANONICAL_PATHS;
 
     // read_file on a platform path used to return content: null, forcing the
     // model to go fetch these files from a live deployed/preview URL instead

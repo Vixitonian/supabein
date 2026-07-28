@@ -193,19 +193,40 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
 // preview's own /staging/ path (see ai_smoke_test_files() above) --
 // anchoring on that marker pulls out just the project-relative path (e.g.
 // "core/api.js"), not the whole domain+id+path blob a bare ".js" match
-// would grab. Returns [file, line] or null if nothing matched.
+// would grab.
+//
+// A JS stack trace lists the INNERMOST frame first -- for any failed
+// api.* call that's always core/*.js or features/auth/auth.js, one of
+// AI_PLATFORM_CANONICAL_PATHS: fixed content force-injected at deploy
+// time regardless of what the model writes there, so it is never
+// actually the bug. Live-observed root cause of a build that rewrote its
+// real (buggy) file 9 times without ever touching the actual defect: this
+// function took the FIRST file:line in the trace every single time, which
+// was always core/api.js's generic request wrapper, never the caller a
+// frame or two out that held the real mistake. Scans every match across
+// every console_errors line and returns the first one that ISN'T a
+// canonical path -- falling back to a canonical match only if that's
+// truly all the trace contains, since it's still better context than
+// nothing.
 function ai_smoke_test_extract_failing_location(array $result): ?array
 {
     $errors = $result['console_errors'] ?? [];
     if (!is_array($errors)) return null;
+    $fallback = null;
     foreach ($errors as $err) {
         if (!is_string($err)) continue;
-        if (preg_match('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $m)
-            || preg_match('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $m)) {
+        $matches = [];
+        preg_match_all('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $matches, PREG_SET_ORDER);
+        if (!$matches) preg_match_all('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $matches, PREG_SET_ORDER);
+        foreach ($matches as $m) {
+            if (in_array($m[1], AI_PLATFORM_CANONICAL_PATHS, true)) {
+                $fallback ??= [$m[1], (int)$m[2]];
+                continue;
+            }
             return [$m[1], (int)$m[2]];
         }
     }
-    return null;
+    return $fallback;
 }
 
 // A failing smoke_test carries console_errors/bodyText but that raw data
