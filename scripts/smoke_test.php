@@ -166,6 +166,15 @@ log_line('Submitting build job: "' . $prompt . '"...');
     'prompt'     => $prompt,
     'validate'   => true,
     'session_id' => $sessionId,
+    // Pinned rather than left to the server's own no-preference default --
+    // real dashboard users always send an explicit model (the client's own
+    // fallback is Claude Opus, a paid model this free smoke test shouldn't
+    // spend on), so omitting this entirely was accidentally exercising a
+    // rarely-hit fallback path instead of anything a real user experiences.
+    // glm-4.5-flash is free and live-verified fast/clean against this exact
+    // pipeline -- see ai_build_fallback_chain()'s own comment on this slug.
+    'provider'   => 'zhipu',
+    'model'      => 'glm-4.5-flash',
 ], $token);
 if ($status !== 202 && $status !== 200) fail("Could not create build job ({$status}): " . json_encode($jobRes));
 $jobId = $jobRes['job_id'] ?? null;

@@ -313,9 +313,19 @@ function ai_build_fallback_chain(array $config, ?string $preferredProvider, ?str
         return $chain;
     }
 
-    // 1. The one model already live-verified end-to-end against the real
-    //    flyer-planner prompt (~7.4k tokens) -- see AI_ALLOWED_MODELS's own
-    //    comment on this exact slug.
+    // 1. Live-verified head-to-head against the app-builder's own agentic
+    //    tool-calling loop (not just a single-shot prompt): glm-4.5-flash
+    //    generated a working frontend in ~90s with zero wasted exploration,
+    //    where nvidia's nano reasoning model below took 12-15 minutes on the
+    //    same request, repeatedly hallucinating unrequested API endpoints and
+    //    live-probing its own preview instead of trusting given context.
+    //    Still just the FIRST candidate, not the only one -- everything below
+    //    remains as a real fallback chain, unlike an explicit caller
+    //    preference (which intentionally has no fallback at all, see above).
+    $add('zhipu', 'glm-4.5-flash');
+    // Previously first -- demoted, not removed, since every other free
+    // candidate below (including this one) still recovers from an outage or
+    // rate limit on the new first choice above.
     $add('openrouter', 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free');
 
     // 2. Every other genuinely free model (see ai_model_is_free()), before
