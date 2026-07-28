@@ -1625,6 +1625,16 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
         foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
     };
 
+    // The auto-fix agent below is a brand-new session with no memory of the
+    // build that just finished -- without this, it has only a bare schema, a
+    // symptom sentence, and its own file exploration to reconstruct the
+    // product context the build agent already had moments earlier. Handing
+    // it the same real, requested actors/stories (now persisted at deploy
+    // time -- see ai_run_build_and_deploy()) means it can act on what the
+    // app is actually supposed to do, not just re-derive it from scratch.
+    $savedRequirements = $catalog->getProjectRequirements($projectId);
+    $intentCtx = $savedRequirements ? ai_intent_to_context($savedRequirements, 'fix the frontend to satisfy') : '';
+
     $result = ai_run_project_tests_with_connection_retry($projectId, $userId, $catalog, $config, $report, $client);
     $addUsage($result['usage'] ?? null);
     if (!empty($result['connection_error'])) {
@@ -1663,7 +1673,7 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
                 $failingStories
             ));
 
-        $editResult = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true);
+        $editResult = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true, null, $intentCtx ? ['context' => $intentCtx] : []);
         $plan       = $editResult['plan'] ?? [];
         $addUsage($editResult['usage'] ?? null);
 
