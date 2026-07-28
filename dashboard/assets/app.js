@@ -2667,9 +2667,20 @@ const AiPanel = (() => {
         saveSessions();
         renderMessages();
         await addMessage(currentSessionId, { role: 'ai', type: 'edit-intent', data: { confirmed: selected, original_prompt: msg.data.body?.prompt } });
-        const refinedPrompt = (msg.data.body?.prompt || '')
+        let refinedPrompt = (msg.data.body?.prompt || '')
           + '\n\nApply ONLY these specific changes (ignore everything else):\n'
           + selected.map((s, i) => `${i + 1}. ${s.label}`).join('\n');
+        // Every AI-call endpoint hard-rejects prompts over 2000 chars (422) --
+        // see RESOLVE_PROMPT_MAX's own comment. msg.data.body.prompt here can already
+        // be close to that cap on its own (e.g. a Resolve-built prompt listing
+        // several failing stories), so appending the confirmed-changes list on
+        // top of it easily pushes the total over 2000 and silently 422s the
+        // job before it's even created -- live-caught: an 8-item edit review
+        // failing at "Reading current schema & files" with no job ever
+        // starting. Same hard backstop as buildResolvePrompt's own truncation.
+        if (refinedPrompt.length > RESOLVE_PROMPT_MAX) {
+          refinedPrompt = refinedPrompt.slice(0, RESOLVE_PROMPT_MAX - 1) + '…';
+        }
         await proceedWithBuildDirect({ ...msg.data.body, prompt: refinedPrompt });
       },
       () => {
