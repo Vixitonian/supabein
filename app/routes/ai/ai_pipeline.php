@@ -55,6 +55,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
         $storyCount = array_sum(array_map(fn($a) => is_array($a) ? count($a['stories'] ?? []) : 0, $approvedIntent['actors'] ?? []));
         $report(['stage' => 'requirements', 'status' => 'done', 'label' => 'Requirements understood',
                  'detail' => count($actorNames) . ' actor(s): ' . implode(', ', $actorNames) . ' — ' . $storyCount . ' user stor' . ($storyCount === 1 ? 'y' : 'ies')]);
+        ai_pipeline_debug_log('requirements', "Prompt: {$prompt}", ['intent' => $approvedIntent]);
         $checkpoint('intent', ['intent' => $approvedIntent]);
     }
 

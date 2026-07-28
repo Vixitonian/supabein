@@ -759,6 +759,7 @@ function ai_run_edit_generation_agentic(
         if ($tool === 'smoke_test') {
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
             $lastSmokeTestWasConnectionError = !empty($toolResult['result']['connection_error']);
+            ai_pipeline_debug_log('edit', 'smoke_test result (ok=' . json_encode($lastSmokeTestOk) . ')', ['project_id' => $projectId, 'result' => $toolResult['result'] ?? []]);
             if ($lastSmokeTestOk === false) {
                 $lastFailedFile = $toolResult['result']['next_step_file'] ?? null;
                 $lastFailedFileSnapshot = $lastFailedFile !== null ? ($changedFiles[$lastFailedFile] ?? null) : null;

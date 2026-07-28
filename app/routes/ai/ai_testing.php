@@ -1542,6 +1542,8 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
                          ? count($stories) . ' user stories tested (' . $source . ') — '
                              . $agentResult['passed'] . ' passed, ' . $agentResult['failed'] . ' failed'
                          : (!empty($agentResult['error']) ? $agentResult['error'] : 'no stories to test')]);
+            ai_pipeline_debug_log('stories', "Tested {$source}, {$agentResult['passed']} passed / {$agentResult['failed']} failed",
+                ['project_id' => $projectId, 'stories_requested' => $stories, 'results' => $agentResult['stories'] ?? []]);
         } catch (\Throwable $e) {
             $report(['stage' => 'stories', 'status' => 'done', 'label' => 'User-story testing skipped', 'detail' => $e->getMessage()]);
         }
@@ -1690,6 +1692,8 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
         $editResult  = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true, null, $combinedCtx ? ['context' => $combinedCtx] : []);
         $plan       = $editResult['plan'] ?? [];
         $addUsage($editResult['usage'] ?? null);
+        ai_pipeline_debug_log('autofix', "Attempt {$fixAttempt} fix generated",
+            ['project_id' => $projectId, 'failing_stories' => $failingStories, 'fix_prompt' => $fixPrompt, 'delta' => $plan]);
 
         $deltaError = ai_validate_delta($plan, ai_schema_from_db($projectId, $catalog));
         if ($deltaError !== null) {

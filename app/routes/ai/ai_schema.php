@@ -709,6 +709,7 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
     $validationError = ai_validate_plan($schemaPlan);
     if ($validationError) {
         $report(['stage' => 'schema', 'status' => 'retry', 'label' => 'Refining schema…', 'detail' => $validationError]);
+        ai_pipeline_debug_log('schema', "Rejected, retrying: {$validationError}", ['rejected_schema' => $schemaPlan]);
         $retryPrompt = $schemaUserMsg
             . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
             . "\nReturn a corrected schema that fixes exactly this problem.";
@@ -723,6 +724,7 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
     }
     $tableNames = array_map(fn($t) => $t['name'], $schemaPlan['tables'] ?? []);
     $report(['stage' => 'schema', 'status' => 'done', 'label' => 'Database schema ready', 'detail' => count($tableNames) . ' table' . (count($tableNames) === 1 ? '' : 's') . ': ' . implode(', ', $tableNames)]);
+    ai_pipeline_debug_log('schema', 'Database schema ready', ['schema' => $schemaPlan]);
 
     // ── Stage 2: design brief (best-effort) ───────────────────────────────
     $report(['stage' => 'design', 'status' => 'start', 'label' => 'Choosing a visual design…']);
@@ -732,6 +734,7 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
         $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     }
     $report(['stage' => 'design', 'status' => 'done', 'label' => 'Visual design chosen', 'detail' => trim(($brief['personality'] ?? '') . (isset($brief['accent_color']) ? ' · ' . $brief['accent_color'] : '')) ?: 'default theme']);
+    ai_pipeline_debug_log('design', 'Visual design chosen', ['brief' => $brief]);
 
     return ['schema' => $schemaPlan, 'design_brief' => $brief, 'aiTrace' => $aiTrace, 'usage' => $client->getLastUsage()];
 }

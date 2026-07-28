@@ -5,6 +5,27 @@ declare(strict_types=1);
 
 
 
+// sb_log() (bootstrap.php) writes through PHP's own error_log ini setting,
+// which resolves a bare "error_log" value relative to the CURRENT WORKING
+// DIRECTORY at the time of the call. Fine for anything invoked from a web
+// request (cwd is the docroot), but the AI job worker is spawned via a bare
+// exec($phpBin ... &) with no explicit cd (see ai_spawn_job_worker()), so its
+// actual cwd is whatever the parent web request happened to have, not
+// guaranteed to be the docroot. Live-confirmed on a real job: this produced
+// zero matching log lines despite an identical manual CLI test (run with an
+// explicit cd first) working fine. Writes to an explicit absolute path
+// instead, so it lands in the same place regardless of how or from where the
+// process was launched. Diagnostic-only, own file, no byte cap the way
+// ai_jobs.progress/result have, and — critically — never read by anything
+// user-facing (see ai_log_agent_write_content()'s doc comment for why that
+// separation matters).
+function ai_pipeline_debug_log(string $context, string $message, array $data = []): void
+{
+    $line = '[' . date('Y-m-d H:i:s') . '] [' . $context . '] ' . $message
+          . ($data ? ' ' . json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '') . "\n";
+    @file_put_contents(SUPABEIN_ROOT . '/storage/ai_pipeline_debug.log', $line, FILE_APPEND | LOCK_EX);
+}
+
 // ─── AI output helpers ───────────────────────────────────────────────────────
 
 /**
@@ -512,38 +533,37 @@ function ai_smoke_test_failure_progress_detail(array $smokeTestResult): string
 // This does NOT go through $report()/ai_jobs.progress: that field is
 // rendered directly into the real dashboard's live AI panel
 // (dashboard/assets/app.js's progress-detail div) for actual customers
-// watching their app get built — dumping raw source into that UI, even
-// capped, is a real product-UX regression, not a diagnostics improvement.
-// sb_log() instead: a server-log-only channel (error_log) with zero UI
-// exposure, so the cap here only guards against one pathological write
-// blowing up a single log line, not against a real UI concern — generous
-// on purpose ("full is better" for anyone actually reading the log).
+// watching their app get built — dumping raw source into that UI is a real
+// product-UX regression, not a diagnostics improvement. ai_pipeline_debug_log()
+// instead: a server-log-only channel with zero UI exposure, so content is
+// logged in full — the cap below is only a last-resort ceiling against one
+// truly pathological generation, not a real limit for any realistic file.
 function ai_log_agent_write_content(string $agentType, string $tool, array $args, ?int $projectId = null): void
 {
     $cap = function (string $content, int $limit): string {
-        return mb_strlen($content) > $limit ? mb_substr($content, 0, $limit) . '…(truncated)' : $content;
+        return mb_strlen($content) > $limit ? mb_substr($content, 0, $limit) . '…(truncated — pathologically large)' : $content;
     };
 
     $body = null;
     if ($tool === 'write_file') {
         $path = (string)($args['path'] ?? '?');
-        $body = "write_file {$path}:\n" . $cap((string)($args['content'] ?? ''), 20000);
+        $body = "write_file {$path}:\n" . $cap((string)($args['content'] ?? ''), 100000);
     } elseif ($tool === 'write_files') {
         $files = is_array($args['files'] ?? null) ? $args['files'] : [];
         if (!$files) return;
         $parts = array_map(
-            fn($f) => '--- ' . (string)($f['path'] ?? '?') . " ---\n" . $cap((string)($f['content'] ?? ''), 20000),
+            fn($f) => '--- ' . (string)($f['path'] ?? '?') . " ---\n" . $cap((string)($f['content'] ?? ''), 100000),
             $files
         );
         $body = "write_files (" . count($files) . " file(s)):\n" . implode("\n\n", $parts);
     } elseif ($tool === 'patch_file') {
         $path = (string)($args['path'] ?? '?');
-        $body = "patch_file {$path}:\n- " . $cap((string)($args['find'] ?? ''), 5000)
-              . "\n+ " . $cap((string)($args['replace'] ?? ''), 5000);
+        $body = "patch_file {$path}:\n- " . $cap((string)($args['find'] ?? ''), 100000)
+              . "\n+ " . $cap((string)($args['replace'] ?? ''), 100000);
     }
     if ($body === null) return;
 
-    sb_log('ai_write', $body, $projectId !== null ? ['project_id' => $projectId, 'agent' => $agentType] : ['agent' => $agentType]);
+    ai_pipeline_debug_log('ai_write', $body, $projectId !== null ? ['project_id' => $projectId, 'agent' => $agentType] : ['agent' => $agentType]);
 }
 
 // Turn budgets across the three agent loops now run 60-120 turns (up from
