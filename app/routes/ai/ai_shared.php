@@ -506,6 +506,53 @@ function ai_smoke_test_failure_progress_detail(array $smokeTestResult): string
     return "smoke_test failed: {$summary}";
 }
 
+// The bare path in "Writing core/config.js…" answers WHAT changed, never
+// WHAT IT ACTUALLY WROTE — watching a job live gave no way to see the real
+// content, only find out after the fact from the finished job's aiTrace.
+// The content is already sitting right there in $args before dispatch even
+// happens, so this just surfaces it through the same progress channel
+// instead of discarding it. Capped per-file (and per-batch for write_files)
+// since, unlike ai_jobs.result, appendJobProgress()'s progress column has no
+// byte cap at all -- letting a handful of full files accumulate across many
+// turns of one long job is exactly the kind of thing that could eventually
+// trip the same packet-size truncation bug JOB_RESULT_BYTE_CAP exists to
+// prevent for 'result'. Returns null for any tool this doesn't apply to, so
+// the caller falls back to the plain label.
+function ai_agent_write_preview_detail(string $tool, array $args): ?string
+{
+    $cap = function (string $content, int $limit): string {
+        $content = trim($content);
+        return mb_strlen($content) > $limit ? mb_substr($content, 0, $limit) . '…' : $content;
+    };
+
+    if ($tool === 'write_file') {
+        $path    = (string)($args['path'] ?? '?');
+        $content = (string)($args['content'] ?? '');
+        return "Writing {$path}:\n" . $cap($content, 600);
+    }
+
+    if ($tool === 'write_files') {
+        $files = is_array($args['files'] ?? null) ? $args['files'] : [];
+        if (!$files) return null;
+        $shown = array_slice($files, 0, 3);
+        $parts = array_map(
+            fn($f) => '--- ' . (string)($f['path'] ?? '?') . " ---\n" . $cap((string)($f['content'] ?? ''), 300),
+            $shown
+        );
+        $remaining = count($files) - count($shown);
+        return implode("\n\n", $parts) . ($remaining > 0 ? "\n\n… and {$remaining} more file(s)" : '');
+    }
+
+    if ($tool === 'patch_file') {
+        $path    = (string)($args['path'] ?? '?');
+        $find    = (string)($args['find'] ?? '');
+        $replace = (string)($args['replace'] ?? '');
+        return "Patching {$path}:\n- " . $cap($find, 200) . "\n+ " . $cap($replace, 200);
+    }
+
+    return null;
+}
+
 // Turn budgets across the three agent loops now run 60-120 turns (up from
 // 12-60), and every turn appends two messages to $loopHistory with no cap —
 // resent in full on every single subsequent call. Left unbounded, a long-

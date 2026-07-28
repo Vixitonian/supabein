@@ -321,7 +321,7 @@ function ai_run_build_frontend_agentic(
             'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
 
         $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
-            'detail' => ai_edit_agent_step_label($tool, $args)]);
+            'detail' => ai_agent_write_preview_detail($tool, $args) ?? ai_edit_agent_step_label($tool, $args)]);
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => ai_agent_history_action_json($action)];

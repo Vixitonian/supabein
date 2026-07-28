@@ -667,7 +667,7 @@ function ai_run_edit_generation_agentic(
             'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
 
         $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
-            'detail' => ai_edit_agent_step_label($tool, $args)]);
+            'detail' => ai_agent_write_preview_detail($tool, $args) ?? ai_edit_agent_step_label($tool, $args)]);
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => ai_agent_history_action_json($action)];
