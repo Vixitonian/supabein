@@ -1034,7 +1034,17 @@ const api = (() => {
     // instead of showing a dead-end "not found / no permission".
     if (res.status === 401 || (hadToken && res.status === 403)) { goLogin(); throw new Error('Your session expired — please log in again.'); }
     if (!res.ok) {
-      const errMsg = `${res.status} ${res.statusText}`;
+      // The backend's own abort() always sends a real, specific reason as
+      // {"error": "..."} — surfacing only the generic status line here threw
+      // that away and left every failure indistinguishable from every other
+      // one of the same status code, forcing pure trial-and-error to find
+      // what actually went wrong. Falls back to the status line if the body
+      // isn't parseable JSON (a raw infra-level error page, for instance).
+      let errMsg = `${res.status} ${res.statusText}`;
+      try {
+        const body = await res.json();
+        if (body && typeof body.error === 'string' && body.error) errMsg = `${res.status} ${body.error}`;
+      } catch {}
       if (window.__sbReportApiError) window.__sbReportApiError(errMsg, { url, status: res.status });
       throw new Error(errMsg);
     }
