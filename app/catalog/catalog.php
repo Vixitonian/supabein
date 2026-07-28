@@ -865,6 +865,23 @@ class Catalog
         return $stmt->rowCount() > 0;
     }
 
+    // Whole-project teardown, not a single hostname unregistering itself --
+    // no registrant-ownership check needed (unlike deleteHostname() above),
+    // since the entire project is being destroyed by its owner. Without
+    // this, DELETE /v1/projects/:id leaves the hostname permanently
+    // reserved in site_registry forever, silently blocking it from ever
+    // being registered to any future project again -- live-found: 4 real
+    // orphaned rows already sitting in production pointing at project ids
+    // that no longer exist, including a smoke-test subdomain that started
+    // failing every subsequent run with "already registered to a different
+    // project" once the project itself (but not its hostname) was cleaned
+    // up.
+    public function deleteAllHostnamesForProject(int $projectId): void
+    {
+        $stmt = $this->pdo->prepare('DELETE FROM site_registry WHERE project_id = ?');
+        $stmt->execute([$projectId]);
+    }
+
     // ─── Deploys ─────────────────────────────────────────────────────────────
 
     public function createDeploy(int $siteId, string $versionLabel, int $sizeBytes): array

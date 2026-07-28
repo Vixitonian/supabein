@@ -130,6 +130,11 @@ function register_project_routes(\SupaBein\Router $router): void
         $storagePath = $config['STORAGE_PATH'] . '/files/p' . $projectId;
         if (is_dir($storagePath)) \SupaBein\Deploy::rrmdir($storagePath);
 
+        // Without this, the hostname stays permanently reserved in
+        // site_registry after the project itself is gone, silently
+        // blocking it from ever being registered again.
+        $catalog->deleteAllHostnamesForProject($projectId);
+
         $catalog->deleteProject($projectId, $userId);
         json_out(['deleted' => true]);
     }, ['auth_middleware']);
