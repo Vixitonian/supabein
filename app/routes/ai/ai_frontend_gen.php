@@ -174,12 +174,38 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
         // at. Naming the exact next action here — not just the symptom —
         // removes the inference step that was silently failing.
         if (($result['ok'] ?? true) === false) {
-            $result['next_step'] = ai_smoke_test_next_step_hint($result);
+            // Split into a raw location (for the loop to mechanically check
+            // whether that exact file was actually edited afterward -- see
+            // $lastFailedFile below) and a human-readable instruction (for
+            // the model). A hint the model can ignore was only half the
+            // fix; next_step_file is what makes the other half enforceable.
+            $failingLocation = ai_smoke_test_extract_failing_location($result);
+            $result['next_step_file'] = $failingLocation[0] ?? null;
+            $result['next_step'] = ai_smoke_test_next_step_hint($failingLocation);
         }
         return $result;
     } finally {
         \SupaBein\Deploy::rrmdir($previewRoot);
     }
+}
+
+// A stack frame in a REAL deployed error is a full URL through this
+// preview's own /staging/ path (see ai_smoke_test_files() above) --
+// anchoring on that marker pulls out just the project-relative path (e.g.
+// "core/api.js"), not the whole domain+id+path blob a bare ".js" match
+// would grab. Returns [file, line] or null if nothing matched.
+function ai_smoke_test_extract_failing_location(array $result): ?array
+{
+    $errors = $result['console_errors'] ?? [];
+    if (!is_array($errors)) return null;
+    foreach ($errors as $err) {
+        if (!is_string($err)) continue;
+        if (preg_match('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $m)
+            || preg_match('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $m)) {
+            return [$m[1], (int)$m[2]];
+        }
+    }
+    return null;
 }
 
 // A failing smoke_test carries console_errors/bodyText but that raw data
@@ -188,25 +214,14 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
 // doesn't reliably make that jump; the file:line is usually already sitting
 // right there in the error text (browsers report it), so extracting it and
 // stating the next tool call directly turns an inference into an instruction.
-function ai_smoke_test_next_step_hint(array $result): string
+function ai_smoke_test_next_step_hint(?array $failingLocation): string
 {
-    $errors = $result['console_errors'] ?? [];
-    if (is_array($errors)) {
-        foreach ($errors as $err) {
-            if (!is_string($err)) continue;
-            // A stack frame in a REAL deployed error is a full URL through
-            // this preview's own /staging/ path (see ai_smoke_test_files()
-            // above) -- anchoring on that marker pulls out just the
-            // project-relative path (e.g. "core/api.js"), not the whole
-            // domain+id+path blob a bare ".js" match would grab.
-            if (preg_match('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $m)
-                || preg_match('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $m)) {
-                return "A console error points at {$m[1]} line {$m[2]}. Call read_file on {$m[1]} next, find "
-                     . 'and fix the specific problem it reports, then re-run smoke_test to confirm it is '
-                     . 'actually clean before doing anything else. Do not re-run smoke_test unchanged again, '
-                     . "and do not call finish, until you've made a real code change.";
-            }
-        }
+    if ($failingLocation !== null) {
+        [$file, $line] = $failingLocation;
+        return "A console error points at {$file} line {$line}. Call read_file on {$file} next, find "
+             . 'and fix the specific problem it reports, then re-run smoke_test to confirm it is '
+             . 'actually clean before doing anything else. Do not re-run smoke_test unchanged again, '
+             . "and do not call finish, until you've made a real code change.";
     }
     return 'smoke_test found a real problem — read the file most likely responsible (based on the bodyText/'
          . 'console_errors above) and fix it before doing anything else. Do not re-run smoke_test unchanged '
@@ -259,6 +274,8 @@ function ai_run_build_frontend_agentic(
     $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
     $hasPlanned = false; // must submit a "plan" action before any other tool -- see gate below
     $consecutiveFinishRejections = 0; // escalates a repeatedly-rejected finish() -- see gate below
+    $lastFailedFile = null; // the file a failing smoke_test's console_errors pointed at, if any
+    $lastFailedFileSnapshot = null; // that file's content at the moment of the failure -- see finish() gate below
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -366,12 +383,23 @@ function ai_run_build_frontend_agentic(
             // pattern repeats instead of leaving it to grind to the turn
             // limit.
             if ($lastSmokeTestOk === false && !$lastSmokeTestWasConnectionError) {
-                $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
-                    $consecutiveFinishRejections,
-                    'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
-                    're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
-                    'to confirm it is clean before calling finish.'
-                )]);
+                // Live-observed: the message alone wasn't enough either -- a
+                // model can read "fix the actual problem" and still call
+                // finish() again with nothing changed, believing it already
+                // fixed it. Checking the implicated file's actual content
+                // against its state at failure time makes this a fact, not
+                // an instruction the model has to choose to follow.
+                $fileUnaddressed = $lastFailedFile !== null
+                    && ($changedFiles[$lastFailedFile] ?? null) === $lastFailedFileSnapshot;
+                $reason = $fileUnaddressed
+                    ? "smoke_test's last failure pointed at {$lastFailedFile}, and that file is unchanged since " .
+                      "then. Call read_file on {$lastFailedFile}, make an actual fix, then smoke_test again " .
+                      'before calling finish.'
+                    : 'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
+                      're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
+                      'to confirm it is clean before calling finish.';
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    ai_agent_note_finish_rejected($consecutiveFinishRejections, $reason)]);
                 continue;
             }
             $finished = true;
@@ -402,6 +430,13 @@ function ai_run_build_frontend_agentic(
         if ($tool === 'smoke_test') {
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
             $lastSmokeTestWasConnectionError = !empty($toolResult['result']['connection_error']);
+            if ($lastSmokeTestOk === false) {
+                $lastFailedFile = $toolResult['result']['next_step_file'] ?? null;
+                $lastFailedFileSnapshot = $lastFailedFile !== null ? ($changedFiles[$lastFailedFile] ?? null) : null;
+            } else {
+                $lastFailedFile = null;
+                $lastFailedFileSnapshot = null;
+            }
         }
         $turnMsg = json_encode($toolResult);
     }

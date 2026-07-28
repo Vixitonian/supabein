@@ -615,6 +615,8 @@ function ai_run_edit_generation_agentic(
     $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
     $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
     $consecutiveFinishRejections = 0; // escalates a repeatedly-rejected finish() -- see gate below
+    $lastFailedFile = null; // the file a failing smoke_test's console_errors pointed at, if any
+    $lastFailedFileSnapshot = null; // that file's content at the moment of the failure -- see finish() gate below
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -694,12 +696,23 @@ function ai_run_edit_generation_agentic(
             // specific instruction once that pattern repeats instead of
             // leaving it to grind to the turn limit.
             if ($lastSmokeTestOk === false && !$lastSmokeTestWasConnectionError) {
-                $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
-                    $consecutiveFinishRejections,
-                    'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
-                    're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
-                    'to confirm it is clean before calling finish.'
-                )]);
+                // Live-observed: the message alone wasn't enough either -- a
+                // model can read "fix the actual problem" and still call
+                // finish() again with nothing changed, believing it already
+                // fixed it. Checking the implicated file's actual content
+                // against its state at failure time makes this a fact, not
+                // an instruction the model has to choose to follow.
+                $fileUnaddressed = $lastFailedFile !== null
+                    && ($changedFiles[$lastFailedFile] ?? null) === $lastFailedFileSnapshot;
+                $reason = $fileUnaddressed
+                    ? "smoke_test's last failure pointed at {$lastFailedFile}, and that file is unchanged since " .
+                      "then. Call read_file on {$lastFailedFile}, make an actual fix, then smoke_test again " .
+                      'before calling finish.'
+                    : 'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
+                      're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
+                      'to confirm it is clean before calling finish.';
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    ai_agent_note_finish_rejected($consecutiveFinishRejections, $reason)]);
                 continue;
             }
             $candidateDelta = [
@@ -739,6 +752,13 @@ function ai_run_edit_generation_agentic(
         if ($tool === 'smoke_test') {
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
             $lastSmokeTestWasConnectionError = !empty($toolResult['result']['connection_error']);
+            if ($lastSmokeTestOk === false) {
+                $lastFailedFile = $toolResult['result']['next_step_file'] ?? null;
+                $lastFailedFileSnapshot = $lastFailedFile !== null ? ($changedFiles[$lastFailedFile] ?? null) : null;
+            } else {
+                $lastFailedFile = null;
+                $lastFailedFileSnapshot = null;
+            }
         }
         $turnMsg = json_encode($toolResult);
 
