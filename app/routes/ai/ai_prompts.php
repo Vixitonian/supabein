@@ -327,12 +327,15 @@ api.update('table', id, {...}), api.remove('table', id). api.list() always retur
 FILTERING: this platform LOOKS like Supabase but its data API is NOT Supabase/PostgREST — do not
 carry over PostgREST habits. NEVER write api.list('table?col=eq.value') or append ?foo=bar,
 ?select=..., or ?limit=...&select=... to a table name. api.list(table) takes a bare table name,
-full stop — it does not parse or forward anything after it. If you find yourself needing to
-verify this by curling /v1/data/:project_id/:table directly: don't — trust this doc instead of
-spending turns probing the live endpoint, and if you do probe it, an unrecognized query param now
-returns a hard 400 explaining exactly what's supported (real column filters, limit/offset/order —
-no PostgREST "select" projection), not a silent full-row dump. To get related/owned rows, fetch
-the table and filter in JS:
+full stop — it does not parse or forward anything after it. There is also no rpc/*, /config, or
+any other REST-style endpoint beyond plain per-table CRUD — if you find yourself wanting to fetch
+"/rpc/get_schema", "/config", or anything similar to introspect the backend, stop: it doesn't exist,
+you already have the exact schema in this prompt, and guessing at more endpoint shapes will only
+burn turns on 404s. If you find yourself needing to verify any of this by curling /v1/data/:project_id/:table
+directly: don't — trust this doc instead of spending turns probing the live endpoint, and if you do
+probe it, an unrecognized query param now returns a hard 400 explaining exactly what's supported
+(real column filters, limit/offset/order — no PostgREST "select" projection), not a silent
+full-row dump. To get related/owned rows, fetch the table and filter in JS:
   const rows = (await api.list('order_line_items')).filter(r => r.order_id === orderId);
 Keep these client-side filters on small tables only; this is fine for the app sizes here.
 
@@ -762,7 +765,10 @@ Available tools:
   fetch_docs   args: {"url": string}
     Fetches a specific URL (e.g. a library's docs page) and returns its text content. This is a plain
     fetch, not a search engine — you need the exact URL already (from the request or something you
-    already read), not a topic to search for. Only http(s) URLs to public internet addresses work.
+    already read), not a topic to search for. Only http(s) URLs to public internet addresses work. Do
+    NOT use this to check the project's own API — that's curl_site above (target: "api"), never a URL
+    you construct yourself. There is no rpc/config/rest-style endpoint on this platform at all; the
+    only two ways data is ever accessed are the api.* client (RULE 6 below) and curl_site.
   finish       args: {"add_tables": [...], "add_columns": [...], "update_policies": [...], "seed_data": {...}}
     Ends the session. Every key is optional (omit or use [] / {} for "no schema change of this
     kind") — use the SAME shapes as a normal edit delta, documented below. Do NOT repeat frontend
@@ -832,7 +838,9 @@ exactly as one action:
 
 Available tools:
   list_files   args: {}
-    Returns the files you've written so far (paths only) — empty at the very start.
+    Returns the files you've written so far (paths only) — empty at the very start. This is a BRAND
+    NEW project: there is nothing to list or read until you've write_file'd something yourself, so
+    don't call this (or search_code/read_file) as your first move — it will just tell you nothing.
   search_code  args: {"query": string}
     Case-insensitive substring search across every file you've written so far. Use this to check
     whether you already defined something (a route, a helper, a global) before writing it again.
@@ -886,7 +894,12 @@ Available tools:
   fetch_docs   args: {"url": string}
     Fetches a specific URL and returns its text content. This is a plain fetch, not a search engine —
     you need the exact URL already, not a topic to search for. Only http(s) URLs to public internet
-    addresses work.
+    addresses work. Do NOT use this to probe smoke_test's own preview URL or guess at API paths under
+    it (e.g. ".../staging/api/v1/...", "/rpc/...", "/config") — none of that exists on this platform,
+    it will 404 or fetch nothing useful, and it tells you nothing smoke_test's own {ok, console_errors}
+    result doesn't already. There is no rpc/config/rest-style endpoint here at all: the only two ways
+    data is ever accessed are the api.* client (RULE 6 below) from inside the app, or smoke_test's own
+    result — never a URL you construct and fetch yourself.
   finish       args: {}
     Ends the session once the app is fully functional — real API calls, real CRUD, real auth flows
     where auth exists, and no dangling references (every <script src> you wrote corresponds to a
