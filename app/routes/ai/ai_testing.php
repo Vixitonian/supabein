@@ -721,7 +721,18 @@ function sendResult(obj) {
 (async () => {
   let browser;
   try {
-    browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
+    try {
+      browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
+    } catch (connErr) {
+      // A distinct marker, NOT a generic {ok:false} -- same reasoning as the
+      // deterministic test runner's __CONNECTION_ERROR__: a Browserless
+      // quota/network failure here is a test-infrastructure problem, not
+      // evidence of a real bug in the generated app, and callers (smoke_test's
+      // finish() gate during frontend generation) need to tell the two apart
+      // instead of blocking completion on something outside the app's code.
+      sendResult({ ok: false, connection_error: connErr.message });
+      return;
+    }
     const page = await browser.newPage();
     page.setDefaultTimeout(15000);
     const consoleErrors = [];

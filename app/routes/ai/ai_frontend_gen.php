@@ -212,6 +212,7 @@ function ai_run_build_frontend_agentic(
     $recentCalls = [];
     $consecutiveParseFailures = 0;
     $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
+    $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -278,8 +279,15 @@ function ai_run_build_frontend_agentic(
             // exactly the gap that let the calculator app's "this.loadState
             // is not a function" crash reach a real deploy: the tool to
             // catch it existed by the time this check was added, but
-            // nothing stopped finish() from being called anyway.
-            if ($lastSmokeTestOk === false) {
+            // nothing stopped finish() from being called anyway. But a
+            // Browserless CONNECTION failure (quota, network) is not
+            // evidence of an app bug -- live-observed: the model correctly
+            // diagnosed this exact case every single time (its own "thought"
+            // said so) yet had no way to satisfy this gate since re-running
+            // smoke_test hit the same persistent quota exhaustion again, and
+            // was rejected 20 turns in a row until the turn limit forced a
+            // finish anyway. Only a REAL smoke_test failure blocks finish().
+            if ($lastSmokeTestOk === false && !$lastSmokeTestWasConnectionError) {
                 $turnMsg = json_encode(['tool' => 'finish', 'error' =>
                     'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
                     're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
@@ -306,6 +314,7 @@ function ai_run_build_frontend_agentic(
         $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan);
         if ($tool === 'smoke_test') {
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
+            $lastSmokeTestWasConnectionError = !empty($toolResult['result']['connection_error']);
         }
         $turnMsg = json_encode($toolResult);
     }
