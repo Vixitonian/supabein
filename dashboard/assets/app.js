@@ -2076,13 +2076,13 @@ const AiPanel = (() => {
   async function runBuildFrontendStage(schema, designBrief, body, existingProgressMsg) {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
-    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief, attachments: body.attachments };
+    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief, attachments: body.attachments, intent: body.intent };
     return streamGenerate(jobBody, sess, {
       jobEndpoint: '/v1/ai/build-frontend/job',
       stages: BUILD_FRONTEND_STAGES,
       mode: 'build_frontend',
       title: 'Generating frontend code',
-      onComplete: (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation, attachments: body.attachments }),
+      onComplete: (ev) => handlePlanResponse({ mode: 'build', plan: ev.plan, summary: ev.summary, usage: ev.usage, validation: ev.validation, attachments: body.attachments, intent: body.intent }),
     }, existingProgressMsg, (msg) => runBuildFrontendStage(schema, designBrief, body, msg));
   }
 
@@ -3412,7 +3412,7 @@ const AiPanel = (() => {
   }
 
   function renderPlanCard(msg) {
-    const { plan, summary, mode, attachments } = msg.data;
+    const { plan, summary, mode, attachments, intent } = msg.data;
     const lines = [];
 
     if (mode === 'build') {
@@ -3576,7 +3576,7 @@ const AiPanel = (() => {
         actionsDiv.innerHTML = '';
         actionsDiv.appendChild(el('span', { class: 'text-muted', style: 'font-size:12px' }, '⏳ Applying…'));
         card.classList.add('ai-plan-settled');
-        await applyPlan(plan, mode, msg, undefined, undefined, attachments);
+        await applyPlan(plan, mode, msg, undefined, undefined, attachments, intent);
       }}, mode === 'build' ? '✓ Deploy to Staging' : '✓ Apply');
 
       if (msg.applyError) {
@@ -4427,7 +4427,7 @@ const AiPanel = (() => {
     return lines.length ? 'Done! ' + lines.join(' ') : 'Applied successfully.';
   }
 
-  async function applyPlan(plan, mode, planMsg, validation, progressMsg, attachments) {
+  async function applyPlan(plan, mode, planMsg, validation, progressMsg, attachments, intent) {
     const sess = currentSession();
     const thinkingId = 'apply_' + Date.now();
     let autoTestProjectId = null;
@@ -4458,7 +4458,7 @@ const AiPanel = (() => {
     const { provider: aProvider, model: aModel } = getSelectedModel();
     try {
       const t0 = Date.now();
-      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel, attachments }, currentAbortController.signal);
+      const result = await Api.post('/v1/ai/apply', { mode, plan, provider: aProvider, model: aModel, attachments, intent }, currentAbortController.signal);
       liveTraceMsg.data.push({ call: 'POST /v1/ai/apply', inputs: { mode, provider: aProvider, model: aModel }, status: 200, outputs: result, ms: Date.now() - t0 });
       stopThinkingStages?.();
       if (sess) sess.messages = sess.messages.filter(m => m.id !== thinkingId);

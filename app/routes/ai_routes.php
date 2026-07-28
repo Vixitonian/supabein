@@ -1022,6 +1022,16 @@ PROMPT;
             if (!empty($result['project']['id'])) {
                 ai_prepare_attachments_for_ai(ai_validate_attachments($req['body']['attachments'] ?? null), (int)$result['project']['id']);
             }
+            // Review-on's intent-review step confirms the real actors/stories
+            // before schema/frontend generation ever runs, but review-on's
+            // job-backed stage 1/2 never had a project to persist it against
+            // until now -- without this, story-driven testing after THIS
+            // apply would fall back to inferring stories from the schema +
+            // rendered HTML alone, same gap review-off had (see
+            // ai_run_build_and_deploy()'s own persistence for that path).
+            if (!empty($req['body']['intent']) && is_array($req['body']['intent']) && !empty($result['project']['id'])) {
+                $catalog->upsertProjectRequirements((int)$result['project']['id'], $userId, $req['body']['intent']);
+            }
             json_out($result, 201);
 
         } elseif ($mode === 'edit') {
