@@ -320,8 +320,15 @@ function ai_run_build_frontend_agentic(
             'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
             'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
 
+        // The 'detail' string here is rendered directly into the real
+        // dashboard's AI panel (dashboard/assets/app.js's progress-detail
+        // div) -- a live user watching their app get built, not a
+        // diagnostics surface. Keep it to the short label; the actual write
+        // content goes to the server log instead, via
+        // ai_log_agent_write_content() below, a channel with zero UI exposure.
         $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
-            'detail' => ai_agent_write_preview_detail($tool, $args) ?? ai_edit_agent_step_label($tool, $args)]);
+            'detail' => ai_edit_agent_step_label($tool, $args)]);
+        ai_log_agent_write_content('frontend', $tool, $args);
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
         $loopHistory[] = ['role' => 'model', 'text' => ai_agent_history_action_json($action)];
