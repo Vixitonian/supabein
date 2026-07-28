@@ -56,6 +56,18 @@ try {
     $config = \App::get('config');
     $client = make_ai_client($config, $payload['provider'] ?? null, $payload['model'] ?? null);
 
+    // Every job runs through FallbackAiClient even when the caller never
+    // named a provider/model -- without this, there was no way to tell
+    // (short of re-deriving it from AI_ALLOWED_MODELS ordering) which actual
+    // candidate served a given job, only whether it later fell back away
+    // from wherever it started.
+    if ($client instanceof \SupaBein\FallbackAiClient) {
+        sb_log('ai_job', 'Starting provider', [
+            'job_id' => $jobId, 'mode' => $mode,
+            'provider' => $client->getActiveProvider(), 'model' => $client->getActiveModel(),
+        ]);
+    }
+
     $report = function (array $event) use ($catalog, $jobId): void {
         $catalog->appendJobProgress($jobId, $event);
     };

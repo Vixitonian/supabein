@@ -154,6 +154,21 @@ class Crud
         $order   = $req['query']['order'] ?? null;
         $filters = array_diff_key($req['query'], array_flip(['limit', 'offset', 'order']));
 
+        // Reject unrecognized query params outright instead of silently
+        // dropping them. A silent no-op (matching every row instead of
+        // erroring) reads as ambiguous success to anything probing the raw
+        // endpoint -- live-observed: the build agent tried PostgREST-style
+        // params like ?select=count against this exact endpoint, got a full
+        // unfiltered row list back instead of an error, and burned a dozen
+        // more turns guessing at variants before giving up. A hard 400 turns
+        // that into a one-shot, self-correcting signal.
+        $unknownFilters = array_diff(array_keys($filters), $allowedCols);
+        if ($unknownFilters) {
+            abort(400, 'Unrecognized query parameter(s): ' . implode(', ', $unknownFilters) .
+                '. This endpoint only supports limit, offset, order, and equality/operator filters on real ' .
+                'column names (e.g. ?status=eq.active) -- it does not support PostgREST "select" projections.');
+        }
+
         [$sql, $params] = QueryBuilder::select(
             $table['physical_name'],
             $allowedCols,

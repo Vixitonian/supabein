@@ -324,9 +324,15 @@ your catch block still fires, so still show/log the error, just don't also hand-
 Feature code uses ONLY: api.list('table'), api.get('table', id), api.create('table', {...}),
 api.update('table', id, {...}), api.remove('table', id). api.list() always returns an array.
 
-FILTERING: the data API does NOT support PostgREST-style query strings. NEVER write
-api.list('table?col=eq.value') or append ?foo=bar to a table name — the filter is ignored and
-you get every row (or a 404). To get related/owned rows, fetch the table and filter in JS:
+FILTERING: this platform LOOKS like Supabase but its data API is NOT Supabase/PostgREST — do not
+carry over PostgREST habits. NEVER write api.list('table?col=eq.value') or append ?foo=bar,
+?select=..., or ?limit=...&select=... to a table name. api.list(table) takes a bare table name,
+full stop — it does not parse or forward anything after it. If you find yourself needing to
+verify this by curling /v1/data/:project_id/:table directly: don't — trust this doc instead of
+spending turns probing the live endpoint, and if you do probe it, an unrecognized query param now
+returns a hard 400 explaining exactly what's supported (real column filters, limit/offset/order —
+no PostgREST "select" projection), not a silent full-row dump. To get related/owned rows, fetch
+the table and filter in JS:
   const rows = (await api.list('order_line_items')).filter(r => r.order_id === orderId);
 Keep these client-side filters on small tables only; this is fine for the app sizes here.
 

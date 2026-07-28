@@ -1675,6 +1675,27 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
             break;
         }
 
+        // A completely empty diff means the fix agent explored the failure
+        // and concluded there's nothing to change -- deploying (a no-op) and
+        // then paying for a full browser retest is guaranteed to reproduce
+        // the exact same failures, since nothing about the app changed.
+        // Stop here instead of burning another retest cycle on a foregone
+        // conclusion; live-observed: an attempt like this took ~8 minutes of
+        // exploration and changed zero files, then the blind retest that
+        // followed re-confirmed the same failures a few minutes later.
+        $isEmptyFix = empty($plan['add_tables']) && empty($plan['add_columns'])
+            && empty($plan['update_policies']) && empty($plan['frontend']['files']);
+        if ($isEmptyFix) {
+            $fixAttempts[] = [
+                'attempt'         => $fixAttempt,
+                'failing_stories' => array_map(fn($s) => $s['label'] ?? '', $failingStories),
+                'fix_summary'     => ['add_tables' => 0, 'add_columns' => 0, 'update_policies' => 0, 'frontend_files' => 0],
+                'empty_fix'       => true,
+            ];
+            $result['autofix_stalled'] = true;
+            break;
+        }
+
         ai_execute_edit($plan, $projectId, $userId);
 
         $project = $catalog->getProjectById($projectId, $userId);
