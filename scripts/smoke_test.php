@@ -39,7 +39,14 @@ $baseUrl  = rtrim($argv[1] ?? getenv('SMOKE_BASE_URL') ?: 'https://supabein.dxin
 $email    = getenv('SMOKE_EMAIL') ?: 'smoke-test-internal@supabein.local';
 $password = getenv('SMOKE_PASSWORD') ?: 'SmokeTestInternalOnly!2026';
 $prompt   = 'A simple counter app with increment and decrement buttons';
-$maxWaitSeconds  = 600; // the real pipeline can genuinely take several minutes
+// Live-observed on this platform: schema alone can take several minutes with
+// GLM's reasoning overhead, frontend generation regularly retries on invalid
+// JSON before succeeding, and auto-test then runs several more Playwright-
+// driven stories on top of that. A tight timeout here produces a false FAIL
+// on a pipeline that's genuinely still working, not one that's actually
+// broken -- 1800s gives real (if slow) runs room to finish while still
+// catching a truly stuck job.
+$maxWaitSeconds  = 1800;
 $pollIntervalSec = 5;
 
 function log_line(string $msg): void
@@ -129,6 +136,25 @@ if ($status !== 200) {
 $token = $res['token'] ?? null;
 if (!$token) fail('No auth token in response: ' . json_encode($res));
 log_line('Signed in.');
+
+// ── 1b. Sweep any leftover projects from a previous run ─────────────────────
+// This account should always be empty between runs -- the shutdown cleanup
+// above deletes what it created. But a run that gets SIGKILLed (an external
+// timeout, a killed process) skips shutdown functions entirely, and if the
+// job had already finished server-side by then, its deployed project is
+// orphaned with nothing local left to know its id. The next run then fails
+// at the deploy step on a plain name collision instead of testing anything.
+// Sweeping first makes the account self-healing regardless of why a
+// previous run failed to clean up after itself.
+[$status, $existingProjects] = api_call($baseUrl, 'GET', '/v1/projects', null, $token);
+if ($status === 200 && is_array($existingProjects)) {
+    foreach ($existingProjects as $p) {
+        $leftoverId = $p['id'] ?? null;
+        if (!$leftoverId) continue;
+        log_line("Sweeping leftover project {$leftoverId} ({$p['name']}) from a previous run...");
+        try { api_call($baseUrl, 'DELETE', "/v1/projects/{$leftoverId}", null, $token, 1); } catch (\Throwable $e) { /* best-effort */ }
+    }
+}
 
 // ── 2. Create a session and submit the real build job ──────────────────────
 [$status, $sessRes] = api_call($baseUrl, 'POST', '/v1/ai/sessions', ['name' => 'Smoke test'], $token);

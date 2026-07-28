@@ -1,0 +1,309 @@
+<?php
+
+declare(strict_types=1);
+
+
+
+// ─── Pipeline plan-generation helpers (used by background worker) ────────────
+
+function ai_generate_build_plan(object $client, string $prompt, ?array $approvedIntent, array $history): array
+{
+    $schemaUserMsg = $approvedIntent
+        ? $prompt . "\n\n" . ai_intent_to_context($approvedIntent)
+        : $prompt;
+
+    $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $schemaUserMsg);
+    $schemaPlan['frontend'] = ['files' => []];
+    $schemaPlan = ai_sanitize_plan($schemaPlan);
+
+    $validationError = ai_validate_plan($schemaPlan);
+    if ($validationError) {
+        $retryPrompt = $schemaUserMsg
+            . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
+            . "\nReturn a corrected schema that fixes exactly this problem.";
+        $schemaPlan = $client->generateJsonWithHistory(AI_BUILD_SCHEMA_PROMPT, $history, $retryPrompt);
+        $schemaPlan['frontend'] = ['files' => []];
+        $schemaPlan = ai_sanitize_plan($schemaPlan);
+        if (ai_validate_plan($schemaPlan) !== null) {
+            throw new \RuntimeException('AI returned an invalid schema after retry: ' . ai_validate_plan($schemaPlan));
+        }
+    }
+
+    // Pass 1.5 — design brief (best-effort; skip silently if it fails)
+    $brief    = ai_generate_design_brief($client, $prompt, $schemaPlan);
+    $briefCtx = ai_brief_to_context($brief);
+
+    $frontendMsg    = "App description: {$prompt}\n\n"
+                    . ($briefCtx ? "{$briefCtx}\n\n" : '')
+                    . "Exact validated schema — use ONLY these column names in JS:\n"
+                    . ai_schema_to_context($schemaPlan);
+    $frontendResult = $client->generateJson(ai_bind_auth_placeholders(AI_BUILD_FRONTEND_PROMPT, $schemaPlan), $frontendMsg);
+
+    $plan = $schemaPlan;
+    $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+    foreach ($plan['frontend']['files'] as &$file) {
+        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+    }
+    unset($file);
+    return $plan;
+}
+
+// Stage 3+4 of a build: frontend code generation against an already-confirmed
+// schema and design brief, then deterministic validation. Split out so the
+// "Review" build flow can run this as its own job, after the user has
+// confirmed the schema/design in the previous stage.
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true, array $refs = []): array
+{
+    // ── Stage 3: frontend — agentic tool-calling loop (search/read/write/
+    // syntax-check), same machinery the edit agent uses, instead of a single
+    // shot at the whole file set. Lets the model verify its own output (a
+    // deterministic syntax check on every write) and read back a file it
+    // wrote earlier before extending it, instead of hoping a one-shot
+    // multi-file JSON blob comes back internally consistent.
+    $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
+    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report, $refs);
+    $aiTrace   = $frontendResult['aiTrace'];
+    $feUsage   = $frontendResult['usage'];
+
+    $plan = $schemaPlan;
+    $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
+    foreach ($plan['frontend']['files'] as &$file) {
+        $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+    }
+    unset($file);
+    $report(['stage' => 'frontend', 'status' => 'done', 'label' => 'Frontend generated', 'detail' => count($plan['frontend']['files']) . ' file' . (count($plan['frontend']['files']) === 1 ? '' : 's')]);
+
+    // ── Stage 4: validate (deterministic; AI only explains, never detects) ──
+    $validation = [];
+    if ($validate) {
+        $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
+        $validation = ai_validator_check_project($plan, $plan['frontend']['files']);
+        if (array_filter($validation, fn($f) => $f['severity'] === 'error')) {
+            $validation = ai_validator_explain_findings($validation, $client);
+        }
+        $errCount  = count(array_filter($validation, fn($f) => $f['severity'] === 'error'));
+        $warnCount = count(array_filter($validation, fn($f) => $f['severity'] === 'warning'));
+        $report(['stage' => 'validate', 'status' => 'done',
+                 'label'  => $validation ? 'Validation found issues' : 'No issues found',
+                 'detail' => $validation ? "{$errCount} error(s), {$warnCount} warning(s)" : '']);
+    }
+
+    $summary = [
+        'project_name'   => $plan['project_name'],
+        'tables'         => array_map(fn($t) => $t['name'] . ' (' . count($t['columns'] ?? []) . ' cols)', $plan['tables']),
+        'frontend_files' => count($plan['frontend']['files'] ?? []),
+    ];
+
+    return ['plan' => $plan, 'summary' => $summary, 'usage' => $feUsage, 'aiTrace' => $aiTrace, 'validation' => $validation];
+}
+
+// Renders the agent's current in-progress files in a real headless browser
+// via a disposable, isolated preview directory — never the project's real
+// staging/live site, so a mid-generation smoke test can never clobber what a
+// user might currently be looking at. Catches exactly the class of bug
+// syntax_check/validate_frontend cannot: a file that parses fine and looks
+// correct but THROWS at runtime. Confirmed live: this is precisely what let
+// a calculator app ship with a "this.loadState is not a function" crash
+// that nobody caught until a human opened a real browser after deploy.
+// Uses a sentinel project id (real api.* calls 404 against it) on purpose —
+// this checks the app doesn't crash when the backend is unavailable, not
+// that seeded data round-trips; a real end-to-end data check is what the
+// separate browser-test-agent is for, post-deploy.
+function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authInfo = null): array
+{
+    $token = $config['BROWSERLESS_TOKEN'] ?? '';
+    if (!$token) {
+        return ['ok' => null, 'error' => 'Browserless not configured on this server — smoke_test is unavailable'];
+    }
+    $sitesPath = rtrim((string)($config['SITES_PATH'] ?? ''), '/');
+    if ($sitesPath === '') {
+        return ['ok' => null, 'error' => 'SITES_PATH not configured on this server — smoke_test is unavailable'];
+    }
+
+    // Real deployed sites are only servable at all through a narrow path
+    // shape: both the web server's rewrite rule and site-serve.php's own
+    // regex require exactly sites/s{numeric}/(current|staging)/... —
+    // anything else 403s before PHP even runs. A fake numeric ID in a range
+    // real auto-increment site IDs will never reach works fine for this:
+    // site-serve.php only hits the database at all as an SPA-fallback when
+    // the requested file is missing, and since index.html always exists
+    // here, that path never triggers — no real site or DB row needed.
+    $previewSiteId = 900000000 + random_int(0, 99999999);
+    $previewRoot   = $sitesPath . '/s' . $previewSiteId;
+    $previewDir    = $previewRoot . '/staging';
+
+    if (!mkdir($previewDir, 0755, true)) {
+        return ['ok' => null, 'error' => 'Cannot create preview directory'];
+    }
+
+    try {
+        $files = ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
+        foreach ($files as $fileDef) {
+            $relPath = ltrim((string)($fileDef['path'] ?? ''), '/');
+            if ($relPath === '') continue;
+            $fullPath = \SupaBein\Deploy::normalizePath($previewDir . '/' . $relPath);
+            if (!str_starts_with($fullPath, $previewDir . '/')) continue; // unsafe path — same traversal guard as a real deploy, skip silently
+            $parentDir = dirname($fullPath);
+            if (!is_dir($parentDir)) mkdir($parentDir, 0755, true);
+            $rawContent = (string)($fileDef['content'] ?? '');
+            if ($relPath === 'index.html') $rawContent = ai_ensure_error_script_tag($rawContent);
+            $content = str_replace('__SB_PID__', '0', $rawContent);
+            file_put_contents($fullPath, $content);
+        }
+
+        $previewUrl = rtrim((string)($config['API_BASE_URL'] ?? ''), '/') . '/sites/s' . $previewSiteId . '/staging/';
+        $script = ai_fetch_page_script_generate($previewUrl, $token, '/', false);
+        $result = ai_fetch_page_run($script, $config);
+
+        // Fold the platform's own console-error capture into the same
+        // pass/fail signal so the model doesn't have to separately notice a
+        // non-empty console_errors array on an otherwise "ok": true result.
+        if (($result['ok'] ?? false) && !empty($result['console_errors'])) {
+            $result['ok'] = false;
+        }
+        return $result;
+    } finally {
+        \SupaBein\Deploy::rrmdir($previewRoot);
+    }
+}
+
+// ── Build frontend agent: the loop itself ────────────────────────────────────
+// Same ReAct-style loop and tool executor (ai_run_edit_agent_tool) as the edit
+// agent above, starting from zero files. Returns ['files'=>[...], 'aiTrace'=>[...],
+// 'usage'=>[...]] — the exact shape ai_run_build_frontend()'s old single-shot
+// $frontendResult had, so the surgical swap there needs no other changes.
+/** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
+function ai_run_build_frontend_agentic(
+    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, array $refs = []
+): array {
+    $briefCtx    = ai_brief_to_context($designBrief);
+    $hasRefs     = !empty($refs['attachments']) || !empty($refs['context']);
+    $agentPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT, $schemaPlan)
+                 . ($hasRefs ? ai_attachment_instruction_note() : '');
+    $schemaCtx   = ai_schema_to_context($schemaPlan);
+
+    $byPath       = []; // a fresh build starts with nothing on disk
+    $changedFiles = [];
+    $readPaths    = [];
+    $aiTrace      = [];
+    $finished     = false;
+    $totalUsage   = ['prompt_tokens' => 0, 'completion_tokens' => 0, 'total_tokens' => 0];
+
+    $turnMsg = "App description: {$prompt}\n\n"
+             . ($briefCtx ? "{$briefCtx}\n\n" : '')
+             . "Exact validated schema — use ONLY these column names in JS:\n{$schemaCtx}\n\n"
+             . (!empty($refs['context']) ? "{$refs['context']}\n\n" : '')
+             . 'Respond with your first tool action.';
+    $loopHistory = [];
+    $recentCalls = [];
+    $consecutiveParseFailures = 0;
+    $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
+
+    for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
+        $_t0 = microtime(true);
+        try {
+            // Reference images/PDFs only need to be seen once — attaching
+            // them to every turn of a loop that can run dozens of tool calls
+            // would multiply the token cost of the request for no benefit,
+            // since the model already has whatever it extracted from them in
+            // its own running context after turn 1.
+            $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
+            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg, $turnAttachments);
+        } catch (\Throwable $e) {
+            if (ai_is_unrecoverable_provider_error($e->getMessage())) {
+                throw new \RuntimeException('AI provider error during frontend generation: ' . $e->getMessage());
+            }
+            // Same recoverable-turn treatment as the edit agent — a truncated
+            // write_file response cutting off mid-JSON shouldn't fail the
+            // whole build and discard every file already staged.
+            $ms = (int)((microtime(true) - $_t0) * 1000);
+            $aiTrace[] = ['stage' => 'frontend_agent', 'system' => $agentPrompt, 'history' => [],
+                'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+                'response' => ['error' => $e->getMessage()], 'tokens' => $client->getLastUsage(), 'ms' => $ms, 'retry' => true, 'error' => $e->getMessage()];
+            if (ai_agent_is_rate_limited($e->getMessage())) {
+                $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+                    'detail' => 'Rate limited by the AI provider — waiting…']);
+            } else {
+                $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+                    'detail' => 'Response was invalid, retrying…']);
+                $turnMsg .= ai_agent_note_parse_failure($consecutiveParseFailures, $e->getMessage());
+            }
+            continue;
+        }
+        $consecutiveParseFailures = 0;
+        $ms    = (int)((microtime(true) - $_t0) * 1000);
+        $usage = $client->getLastUsage();
+        foreach ($totalUsage as $k => $v) $totalUsage[$k] = $v + (int)($usage[$k] ?? 0);
+
+        $tool = is_array($action) ? (string)($action['tool'] ?? '') : '';
+        $args = is_array($action) && is_array($action['args'] ?? null) ? $action['args'] : [];
+
+        $aiTrace[] = ['stage' => 'frontend_agent', 'system' => $agentPrompt, 'history' => [],
+            'user_msg' => mb_strlen($turnMsg) > 3000 ? mb_substr($turnMsg, 0, 3000) : $turnMsg,
+            'response' => $action, 'tokens' => $usage, 'ms' => $ms, 'retry' => false];
+
+        $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+            'detail' => ai_edit_agent_step_label($tool, $args)]);
+
+        $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
+        $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+        $loopHistory   = ai_agent_trim_history($loopHistory);
+
+        if ($tool === 'finish') {
+            if (empty($changedFiles)) {
+                // Nothing written at all — reject and force at least one file
+                // before letting it stop, the same "must actually do
+                // something" guarantee ai_validate_delta gives the edit
+                // agent's finish.
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    "No files have been written yet — write_file the app's frontend before calling finish."]);
+                continue;
+            }
+            // A smoke_test that came back broken and was never fixed (or
+            // re-checked) must not be allowed to silently ship — this is
+            // exactly the gap that let the calculator app's "this.loadState
+            // is not a function" crash reach a real deploy: the tool to
+            // catch it existed by the time this check was added, but
+            // nothing stopped finish() from being called anyway.
+            if ($lastSmokeTestOk === false) {
+                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                    'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
+                    're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
+                    'to confirm it is clean before calling finish.']);
+                continue;
+            }
+            $finished = true;
+            break;
+        }
+
+        if (ai_agent_detect_stuck_repeat($recentCalls, $tool, $args)) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                'You have called this exact action with these exact arguments several times in a row with no ' .
+                'different result to show for it. Repeating it again will not work either — try a genuinely ' .
+                'different action (a different file, a different search, or finish with whatever is actually ' .
+                'ready) instead of this one.']);
+            continue;
+        }
+
+        // No real project exists yet at this stage of a build — 0 is a safe
+        // placeholder; this agent's own system prompt never advertises
+        // check_policy, so it has no route to actually call it. validate_frontend
+        // works fine here though — it only needs the schema plan, not a live DB.
+        $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan);
+        if ($tool === 'smoke_test') {
+            $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
+        }
+        $turnMsg = json_encode($toolResult);
+    }
+
+    if (!$finished) {
+        // Turn budget exhausted without a finish() — force-finish with
+        // whatever's staged rather than hang or hard-fail the whole build.
+        $report(['stage' => 'frontend', 'status' => 'active', 'label' => 'Generating frontend code…',
+            'detail' => 'Turn limit reached — finishing with what was staged']);
+    }
+
+    $files = array_map(fn($p) => ['path' => $p, 'content' => $changedFiles[$p]], array_keys($changedFiles));
+    return ['files' => $files, 'aiTrace' => $aiTrace, 'usage' => $totalUsage];
+}

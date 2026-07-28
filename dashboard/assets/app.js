@@ -732,6 +732,22 @@ const AiPanel = (() => {
   let sessionsWithActiveJob = new Set();
   let refreshingActiveJobSessions = false;
   let activeJobRefreshTimer = null;
+  // Safety net for the many call sites that mutate sess.messages/sess.name
+  // directly and are supposed to follow up with persistSession() -- if one
+  // ever forgets, this catches the drift within AUTO_PERSIST_INTERVAL_MS
+  // instead of losing it silently until the next unrelated save happens to
+  // also cover it. persistSession() itself updates sess._lastSnapshot on
+  // every successful save (manual or watchdog-triggered), so this stays a
+  // no-op the vast majority of ticks.
+  let autoPersistTimer = null;
+  const AUTO_PERSIST_INTERVAL_MS = 2000;
+  // Keyed DOM cache for renderMessages() -- msg.id -> { node, sig }. Lets a
+  // render pass reuse an existing node untouched when that message's content
+  // hasn't changed (e.g. an unrelated progress-card poll tick used to
+  // innerHTML='' the WHOLE container, destroying every other card including
+  // ones mid-edit), instead of rebuilding everything from scratch every time.
+  let renderedMsgNodes = new Map();
+  let renderedForSessionId = null;
 
   // Ordered best-to-least capable for software/frontend generation (scale, tier, coding
   // pedigree, context window, and OpenRouter pricing as a capability proxy where relevant).
@@ -1008,6 +1024,7 @@ const AiPanel = (() => {
     }
     if (activeJobPoll) {
       activeJobPoll.cancelled = true;
+      activeJobPoll.stream?.close();
       activeJobPoll = null;
     }
     const sess = currentSession();
@@ -1121,7 +1138,25 @@ const AiPanel = (() => {
           messages: sess.messages,
         });
       }
+      sess._lastSnapshot = JSON.stringify({ name: sess.name, messages: sess.messages });
     } catch(e) { /* non-fatal — UI already updated */ }
+  }
+
+  // Started while the panel is open (see open()/close()) -- periodically
+  // diffs the current session against the snapshot recorded at its last
+  // successful persist and saves it if anything changed without going
+  // through persistSession() directly.
+  function startAutoPersistWatchdog() {
+    if (autoPersistTimer) return;
+    autoPersistTimer = setInterval(() => {
+      const sess = currentSession();
+      if (!sess) return;
+      const snap = JSON.stringify({ name: sess.name, messages: sess.messages });
+      if (snap !== sess._lastSnapshot) persistSession(sess);
+    }, AUTO_PERSIST_INTERVAL_MS);
+  }
+  function stopAutoPersistWatchdog() {
+    if (autoPersistTimer) { clearInterval(autoPersistTimer); autoPersistTimer = null; }
   }
 
   // Project-scoped: pass a projectId for that project's own history, or null
@@ -1279,7 +1314,7 @@ const AiPanel = (() => {
       if (sess) {
         const stuck = sess.messages.find(m => m.type === 'progress' && m.data.jobId && !m.data.jobDone);
         if (stuck && !(jobs || []).some(j => String(j.id) === String(stuck.data.jobId))) {
-          if (activeJobPoll) activeJobPoll.cancelled = true;
+          if (activeJobPoll) { activeJobPoll.cancelled = true; activeJobPoll.stream?.close(); }
           activeJobPoll = null;
           resumeActiveJobIfAny(sess);
         }
@@ -1407,6 +1442,15 @@ const AiPanel = (() => {
     });
   }
 
+  // Cheap content fingerprint for the reuse-vs-rebuild decision below.
+  // Function-valued properties (e.g. msg.data.retry closures) are silently
+  // dropped by JSON.stringify, which is exactly what's wanted here -- a
+  // retry closure getting reassigned to a new function instance shouldn't by
+  // itself count as "this message's rendered content changed."
+  function messageSig(msg) {
+    try { return JSON.stringify(msg); } catch (e) { return 'unstringifiable_' + Math.random(); }
+  }
+
   function renderMessages() {
     if (!panelEl) return;
     const container = panelEl.querySelector('.ai-messages');
@@ -1420,12 +1464,21 @@ const AiPanel = (() => {
     // follow new content down if the user was already at (or near) the
     // bottom before this rebuild — otherwise leave their scroll position alone.
     const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
-    container.innerHTML = '';
     const sess = currentSession();
-    if (sess?._loadingOlder) {
-      container.appendChild(el('div', { class: 'ai-loading-older' }, 'Loading earlier messages…'));
+
+    // A session switch reuses the same DOM cache otherwise -- clear it so a
+    // coincidentally-matching id/content pair from the PREVIOUS session can
+    // never be reused for this one.
+    if (sess?.id !== renderedForSessionId) {
+      renderedMsgNodes.clear();
+      renderedForSessionId = sess?.id ?? null;
     }
+
     if (!sess || !sess.messages.length) {
+      container.innerHTML = '';
+      if (sess?._loadingOlder) {
+        container.appendChild(el('div', { class: 'ai-loading-older' }, 'Loading earlier messages…'));
+      }
       container.appendChild(el('div', { class: 'ai-welcome' },
         el('div', { class: 'ai-welcome-icon' }, '✦'),
         el('p', {}, 'What do you want to do?'),
@@ -1434,25 +1487,65 @@ const AiPanel = (() => {
       ));
       return;
     }
-    sess.messages.forEach(msg => {
-      // A 'trace' card that finished (live:false) with zero entries recorded
-      // nothing worth seeing — the operation it was meant to trace either
-      // failed before the first network call, or never made one at all. Each
-      // retry attempt creates its own fresh trace card, so a session with
-      // several failed retries in a row (e.g. the offline stretch fixed
-      // above) could accumulate a run of empty ones — pure clutter, with a
-      // download button that would just export "[]". Skip rendering them
-      // rather than showing a wall of indistinguishable, contentless
-      // "Session trace" rows. A still-live one is never hidden, even if
-      // momentarily empty — it may get its first entry any moment.
-      if (msg.type === 'trace' && !msg.live && (!msg.data || msg.data.length === 0)) return;
-      try {
-        container.appendChild(renderMessage(msg));
-      } catch (err) {
-        console.error('[AiPanel] failed to render message', msg?.type, err);
-        container.appendChild(el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ Could not display this message.'));
+
+    // A 'trace' card that finished (live:false) with zero entries recorded
+    // nothing worth seeing — the operation it was meant to trace either
+    // failed before the first network call, or never made one at all. Each
+    // retry attempt creates its own fresh trace card, so a session with
+    // several failed retries in a row (e.g. the offline stretch fixed
+    // above) could accumulate a run of empty ones — pure clutter, with a
+    // download button that would just export "[]". Skip rendering them
+    // rather than showing a wall of indistinguishable, contentless
+    // "Session trace" rows. A still-live one is never hidden, even if
+    // momentarily empty — it may get its first entry any moment.
+    const visible = sess.messages.filter(msg => !(msg.type === 'trace' && !msg.live && (!msg.data || msg.data.length === 0)));
+    const visibleIds = new Set(visible.map(m => m.id));
+
+    // Drop + detach cached nodes for messages that are no longer visible
+    // (removed, or a trace card that just became empty-and-non-live).
+    for (const [id, entry] of renderedMsgNodes) {
+      if (!visibleIds.has(id)) {
+        if (entry.node.parentNode === container) container.removeChild(entry.node);
+        renderedMsgNodes.delete(id);
       }
+    }
+
+    if (sess._loadingOlder) {
+      if (!(container.firstChild && container.firstChild.classList?.contains('ai-loading-older'))) {
+        container.insertBefore(el('div', { class: 'ai-loading-older' }, 'Loading earlier messages…'), container.firstChild);
+      }
+    } else if (container.firstChild && container.firstChild.classList?.contains('ai-loading-older')) {
+      container.removeChild(container.firstChild);
+    }
+
+    // Build/reuse each node, then walk them into the right order. Inserting
+    // an already-attached node just MOVES it (no destroy/recreate), and is a
+    // true no-op when it's already exactly there -- so a render pass where
+    // nothing changed touches no DOM at all beyond this cheap position check.
+    let anchor = (sess._loadingOlder && container.firstChild) ? container.firstChild : null;
+    visible.forEach(msg => {
+      const sig = messageSig(msg);
+      let entry = renderedMsgNodes.get(msg.id);
+      let node;
+      if (entry && entry.sig === sig) {
+        node = entry.node;
+      } else {
+        try {
+          node = renderMessage(msg);
+        } catch (err) {
+          console.error('[AiPanel] failed to render message', msg?.type, err);
+          node = el('div', { class: 'ai-msg ai-msg-ai ai-msg-error' }, '✗ Could not display this message.');
+        }
+        renderedMsgNodes.set(msg.id, { node, sig });
+      }
+      const wantNext = anchor ? anchor.nextSibling : container.firstChild;
+      if (wantNext !== node) container.insertBefore(node, wantNext);
+      anchor = node;
     });
+
+    // Trim any leftover trailing nodes not accounted for above.
+    while (anchor && anchor.nextSibling) container.removeChild(anchor.nextSibling);
+
     if (wasNearBottom) container.scrollTop = container.scrollHeight;
   }
 
@@ -1993,11 +2086,108 @@ const AiPanel = (() => {
     }, existingProgressMsg, (msg) => runBuildFrontendStage(schema, designBrief, body, msg));
   }
 
-  // Poll a job's progress until it resolves, replaying new stage events onto
-  // the live progress card exactly like the old NDJSON stream did. Runs as a
-  // server-side job (see ai_worker.php) independent of this page's lifetime —
-  // reloading and reopening the panel just calls this again with the same
-  // jobId (see resumeActiveJob below), picking up wherever it left off.
+  // Consumes GET /v1/ai/jobs/:id/stream (SSE) via fetch + ReadableStream
+  // rather than the native EventSource API -- EventSource can't set an
+  // Authorization header, and this app already authenticates every request
+  // that way. next() resolves with the same {status, events, event_count,
+  // result, error} shape the old plain-poll endpoint returned (so callers
+  // barely change), a {heartbeat:true} sentinel on a server keep-alive
+  // comment, or throws on a real failure. The server closes each connection
+  // after a bounded duration even mid-job (see the route's own comment) --
+  // that shows up here as a plain reconnect using the updated `since`, never
+  // as an error, unless the connection closes near-instantly with nothing
+  // ever received (a real network/route failure), which does surface as a
+  // rejection so the caller's own retry/backoff logic runs.
+  function createJobStream(jobId, sinceStart) {
+    let since = sinceStart || 0;
+    let reader = null;
+    let buffer = '';
+    let controller = null;
+    let closed = false;
+    let fastEmptyStreak = 0;
+    let connectedAt = 0;
+    const decoder = new TextDecoder();
+
+    async function connect() {
+      controller = new AbortController();
+      const headers = {};
+      const token = Auth.getToken();
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      const resp = await fetch(Api.BASE + `/v1/ai/jobs/${jobId}/stream?since=${since}`, { headers, signal: controller.signal });
+      if (!resp.ok || !resp.body) {
+        const err = new Error('stream connect failed: ' + resp.status);
+        err.status = resp.status;
+        throw err;
+      }
+      reader = resp.body.getReader();
+      buffer = '';
+      connectedAt = Date.now();
+    }
+
+    async function next() {
+      if (closed) throw new Error('stream closed');
+      for (;;) {
+        if (!reader) await connect();
+
+        const idx = buffer.indexOf('\n\n');
+        if (idx !== -1) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          fastEmptyStreak = 0;
+          const dataLine = frame.split('\n').find(l => l.startsWith('data: '));
+          if (!dataLine) return { heartbeat: true };
+          const payload = JSON.parse(dataLine.slice(6));
+          if (typeof payload.event_count === 'number') since = payload.event_count;
+          if (payload.status !== 'running') reader = null; // terminal -- server closes its end too
+          return payload;
+        }
+
+        if (closed) throw new Error('stream closed');
+        let result;
+        try {
+          result = await reader.read();
+        } catch (e) {
+          reader = null;
+          throw e;
+        }
+        if (result.done) {
+          const elapsed = Date.now() - connectedAt;
+          reader = null;
+          if (elapsed < 1000) {
+            // Closed almost instantly with nothing ever received -- not the
+            // normal bounded-duration cutoff, more likely a bad route/proxy.
+            // A couple of quick retries absorb a one-off blip; a repeating
+            // pattern throws so the caller's own backoff takes over instead
+            // of hammering a broken endpoint in a tight loop.
+            fastEmptyStreak++;
+            if (fastEmptyStreak >= 3) throw new Error('stream kept closing instantly with no data');
+            await new Promise(r => setTimeout(r, 500));
+          } else {
+            fastEmptyStreak = 0;
+          }
+          continue;
+        }
+        buffer += decoder.decode(result.value, { stream: true });
+      }
+    }
+
+    function close() {
+      closed = true;
+      if (controller) controller.abort();
+      reader = null;
+    }
+
+    return { next, close };
+  }
+
+  // Follows a job's progress until it resolves, replaying new stage events
+  // onto the live progress card exactly like the old NDJSON stream did. Runs
+  // as a server-side job (see ai_worker.php) independent of this page's
+  // lifetime — reloading and reopening the panel just calls this again with
+  // the same jobId (see resumeActiveJob below), picking up wherever it left
+  // off. Driven by createJobStream's server-pushed updates rather than a
+  // fixed polling interval -- lower latency, and no client-side timer that
+  // can drift out of sync with what the server actually has.
   async function pollJob(jobId, progressMsg, pollState, sess) {
     let since = 0;
     let consecutiveFailures = 0;
@@ -2014,10 +2204,11 @@ const AiPanel = (() => {
     const startedAt = Date.now();
     const SLOW_JOB_WARNING_MS = 20 * 60 * 1000; // 20 min — a heads-up, not a kill; real jobs can legitimately run long
     let warnedSlow = false;
+    const stream = createJobStream(jobId, since);
+    pollState.stream = stream; // abortCurrentOperation/clearStalePollIfAny close this on cancel
+    try {
     while (!pollState.cancelled) {
       lastPollTickAt = Date.now();
-      await sleepOrWakeOnVisible(2000);
-      if (pollState.cancelled) return null;
 
       if (!warnedSlow && Date.now() - startedAt > SLOW_JOB_WARNING_MS) {
         warnedSlow = true;
@@ -2027,7 +2218,7 @@ const AiPanel = (() => {
 
       let job;
       try {
-        job = await Api.get(`/v1/ai/jobs/${jobId}?since=${since}`);
+        job = await stream.next();
         consecutiveFailures = 0;
         if (progressMsg.data.reconnecting) {
           progressMsg.data.reconnecting = false;
@@ -2067,8 +2258,14 @@ const AiPanel = (() => {
           progressMsg.data.error = 'Lost connection to the server — please try again.';
           return null;
         }
-        continue; // transient network hiccup — keep polling
+        await sleepOrWakeOnVisible(1000); // brief backoff before the stream's own reconnect retries
+        continue;
       }
+
+      // A pure liveness tick from the server's keep-alive comment -- nothing
+      // new to apply, just proof the connection (and lastPollTickAt above)
+      // is current.
+      if (job.heartbeat) continue;
 
       const hadNewEvents = job.events && job.events.length > 0;
       try {
@@ -2116,6 +2313,9 @@ const AiPanel = (() => {
       }
     }
     return null;
+    } finally {
+      stream.close();
+    }
   }
 
   // Clears a failed card back to its just-started shape so a retry can reuse
@@ -2269,6 +2469,7 @@ const AiPanel = (() => {
   function clearStalePollIfAny() {
     if (activeJobPoll && Date.now() - lastPollTickAt > 10000) {
       activeJobPoll.cancelled = true;
+      activeJobPoll.stream?.close();
       activeJobPoll = null;
     }
   }
@@ -2413,7 +2614,7 @@ const AiPanel = (() => {
     const sess = currentSession();
     if (!sess) return;
     if (btn) btn.disabled = true;
-    if (activeJobPoll) { activeJobPoll.cancelled = true; activeJobPoll = null; }
+    if (activeJobPoll) { activeJobPoll.cancelled = true; activeJobPoll.stream?.close(); activeJobPoll = null; }
     try {
       await loadSessionMessages(sess.id);
       resumeActiveJobIfAny(getSession(sess.id));
@@ -4005,6 +4206,10 @@ const AiPanel = (() => {
         if (idx !== -1) {
           sessions[idx].messages = page.messages;
           sessions[idx]._hasMoreOlder = !!page.has_more;
+          // Baseline the watchdog against what the server just confirmed it
+          // has, so opening the panel doesn't immediately look "dirty" and
+          // trigger a redundant PATCH on the first tick.
+          sessions[idx]._lastSnapshot = JSON.stringify({ name: sessions[idx].name, messages: page.messages });
         }
       }
     } catch(e) {}
@@ -4659,6 +4864,7 @@ const AiPanel = (() => {
     // refresh it now and keep it current for as long as the panel stays open.
     refreshActiveJobSessions();
     if (!activeJobRefreshTimer) activeJobRefreshTimer = setInterval(refreshActiveJobSessions, 15000);
+    startAutoPersistWatchdog();
     getOrCreateBackdrop().classList.add('active');
 
     const autoProject = detectCurrentProject();
@@ -4727,6 +4933,7 @@ const AiPanel = (() => {
     sidebarVisible = false;
     toggleSidebar(false);
     if (activeJobRefreshTimer) { clearInterval(activeJobRefreshTimer); activeJobRefreshTimer = null; }
+    stopAutoPersistWatchdog();
   }
 
   // Let the phone/browser back button close the panel instead of leaving the
