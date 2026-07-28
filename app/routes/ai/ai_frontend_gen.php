@@ -163,10 +163,54 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
         if (($result['ok'] ?? false) && !empty($result['console_errors'])) {
             $result['ok'] = false;
         }
+        // Live-observed root cause of a build that should take ~3 minutes
+        // taking 15+: on a real failure, this result handed back raw
+        // console_errors/bodyText and left the model to infer its own next
+        // move. That inference didn't happen — it re-ran smoke_test twice
+        // more unchanged, then (once the stuck-repeat detector blocked
+        // that) gave up investigating entirely and spent the rest of its
+        // turn budget calling finish() with a fabricated "all done" claim,
+        // never once calling read_file on the file its own error pointed
+        // at. Naming the exact next action here — not just the symptom —
+        // removes the inference step that was silently failing.
+        if (($result['ok'] ?? true) === false) {
+            $result['next_step'] = ai_smoke_test_next_step_hint($result);
+        }
         return $result;
     } finally {
         \SupaBein\Deploy::rrmdir($previewRoot);
     }
+}
+
+// A failing smoke_test carries console_errors/bodyText but that raw data
+// alone isn't a next action — the model has to independently infer "there's
+// a 404 in core/api.js:39, I should read_file that". Live-observed: it
+// doesn't reliably make that jump; the file:line is usually already sitting
+// right there in the error text (browsers report it), so extracting it and
+// stating the next tool call directly turns an inference into an instruction.
+function ai_smoke_test_next_step_hint(array $result): string
+{
+    $errors = $result['console_errors'] ?? [];
+    if (is_array($errors)) {
+        foreach ($errors as $err) {
+            if (!is_string($err)) continue;
+            // A stack frame in a REAL deployed error is a full URL through
+            // this preview's own /staging/ path (see ai_smoke_test_files()
+            // above) -- anchoring on that marker pulls out just the
+            // project-relative path (e.g. "core/api.js"), not the whole
+            // domain+id+path blob a bare ".js" match would grab.
+            if (preg_match('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $m)
+                || preg_match('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $m)) {
+                return "A console error points at {$m[1]} line {$m[2]}. Call read_file on {$m[1]} next, find "
+                     . 'and fix the specific problem it reports, then re-run smoke_test to confirm it is '
+                     . 'actually clean before doing anything else. Do not re-run smoke_test unchanged again, '
+                     . "and do not call finish, until you've made a real code change.";
+            }
+        }
+    }
+    return 'smoke_test found a real problem — read the file most likely responsible (based on the bodyText/'
+         . 'console_errors above) and fix it before doing anything else. Do not re-run smoke_test unchanged '
+         . "and do not call finish until you've made an actual code change.";
 }
 
 // ── Build frontend agent: the loop itself ────────────────────────────────────
@@ -214,6 +258,7 @@ function ai_run_build_frontend_agentic(
     $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
     $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
     $hasPlanned = false; // must submit a "plan" action before any other tool -- see gate below
+    $consecutiveFinishRejections = 0; // escalates a repeatedly-rejected finish() -- see gate below
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -292,8 +337,10 @@ function ai_run_build_frontend_agentic(
                 // before letting it stop, the same "must actually do
                 // something" guarantee ai_validate_delta gives the edit
                 // agent's finish.
-                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
-                    "No files have been written yet — write_file the app's frontend before calling finish."]);
+                $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
+                    $consecutiveFinishRejections,
+                    "No files have been written yet — write_file the app's frontend before calling finish."
+                )]);
                 continue;
             }
             // A smoke_test that came back broken and was never fixed (or
@@ -309,11 +356,22 @@ function ai_run_build_frontend_agentic(
             // smoke_test hit the same persistent quota exhaustion again, and
             // was rejected 20 turns in a row until the turn limit forced a
             // finish anyway. Only a REAL smoke_test failure blocks finish().
+            //
+            // A rejection here used to just repeat the same static message
+            // forever -- live-observed: one build called finish() 14 times
+            // straight against an unresolved failure, each time with an
+            // identical fabricated "all done" justification, never once
+            // re-running smoke_test to check. ai_agent_note_finish_rejected()
+            // escalates to a forceful, specific instruction once that
+            // pattern repeats instead of leaving it to grind to the turn
+            // limit.
             if ($lastSmokeTestOk === false && !$lastSmokeTestWasConnectionError) {
-                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
+                    $consecutiveFinishRejections,
                     'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
                     're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
-                    'to confirm it is clean before calling finish.']);
+                    'to confirm it is clean before calling finish.'
+                )]);
                 continue;
             }
             $finished = true;
@@ -328,6 +386,13 @@ function ai_run_build_frontend_agentic(
                 'ready) instead of this one.']);
             continue;
         }
+
+        // Reached only for a real, non-finish tool call (finish() always
+        // continues or breaks above) — this is exactly the "did something
+        // else" signal ai_agent_note_finish_rejected()'s escalation should
+        // reset on, so a model that DOES follow the smoke_test/read_file
+        // guidance in between isn't still treated as stuck.
+        $consecutiveFinishRejections = 0;
 
         // No real project exists yet at this stage of a build — 0 is a safe
         // placeholder; this agent's own system prompt never advertises

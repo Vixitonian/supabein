@@ -614,6 +614,7 @@ function ai_run_edit_generation_agentic(
     $consecutiveParseFailures = 0;
     $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
     $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
+    $consecutiveFinishRejections = 0; // escalates a repeatedly-rejected finish() -- see gate below
 
     for ($turn = 1; $turn <= AI_EDIT_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -684,11 +685,21 @@ function ai_run_edit_generation_agentic(
             // smoke_test hit the same persistent quota exhaustion again,
             // rejected 20 turns straight until the turn limit forced a
             // finish anyway. Only a REAL smoke_test failure blocks finish().
+            // A rejection here used to just repeat the same static message
+            // forever -- live-observed in the frontend build agent: one run
+            // called finish() 14 times straight against an unresolved
+            // failure, each time with an identical fabricated "all done"
+            // justification, never once re-running smoke_test to check.
+            // ai_agent_note_finish_rejected() escalates to a forceful,
+            // specific instruction once that pattern repeats instead of
+            // leaving it to grind to the turn limit.
             if ($lastSmokeTestOk === false && !$lastSmokeTestWasConnectionError) {
-                $turnMsg = json_encode(['tool' => 'finish', 'error' =>
+                $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
+                    $consecutiveFinishRejections,
                     'Your last smoke_test came back with errors and you called finish() without fixing them or ' .
                     're-running smoke_test clean. Fix the actual problem it reported, then call smoke_test again ' .
-                    'to confirm it is clean before calling finish.']);
+                    'to confirm it is clean before calling finish.'
+                )]);
                 continue;
             }
             $candidateDelta = [
@@ -703,8 +714,10 @@ function ai_run_edit_generation_agentic(
                 $checkpoint(['delta_ready' => true, 'finish_args' => $finishArgs, 'changed_files' => $changedFiles]);
                 break;
             }
-            $turnMsg = json_encode(['tool' => 'finish', 'error' =>
-                "Your finish() was rejected: {$deltaError}. Continue working and call finish() again once it's fixed."]);
+            $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
+                $consecutiveFinishRejections,
+                "Your finish() was rejected: {$deltaError}. Continue working and call finish() again once it's fixed."
+            )]);
             continue;
         }
 
@@ -716,6 +729,11 @@ function ai_run_edit_generation_agentic(
                 'ready) instead of this one.']);
             continue;
         }
+
+        // Reached only for a real, non-finish tool call (finish() always
+        // continues or breaks above) — the "did something else" signal
+        // ai_agent_note_finish_rejected()'s escalation should reset on.
+        $consecutiveFinishRejections = 0;
 
         $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId, $existingSchema);
         if ($tool === 'smoke_test') {

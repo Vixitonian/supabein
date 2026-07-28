@@ -466,6 +466,26 @@ function ai_agent_note_parse_failure(int &$consecutiveFailures, string $errorMsg
          . 'switch to a completely different action, or call finish with whatever is already staged.)';
 }
 
+// finish() has its own rejection branch in both agent loops, separate from
+// the generic stuck-repeat check, so a rejected finish() was never covered
+// by any escalation at all — live-observed: one build called finish() 14
+// times in a row, each rejected for the same unresolved smoke_test failure,
+// repeating an identical fabricated "all done" justification every time
+// until the turn budget forced an exit. Mirrors
+// ai_agent_note_parse_failure()'s shape: the same static rejection reason
+// for the first couple of attempts, then a much more forceful, specific
+// instruction once it's clearly not being acted on.
+function ai_agent_note_finish_rejected(int &$consecutiveRejections, string $baseReason, int $threshold = 2): string
+{
+    $consecutiveRejections++;
+    if ($consecutiveRejections < $threshold) {
+        return $baseReason;
+    }
+    return "You have now called finish() {$consecutiveRejections} times in a row without resolving this. "
+         . 'Calling finish() again unchanged will keep being rejected. Call smoke_test right now, read what '
+         . 'it actually reports, and fix that specific problem — do not call finish again until you have.';
+}
+
 // Turn budgets across the three agent loops now run 60-120 turns (up from
 // 12-60), and every turn appends two messages to $loopHistory with no cap —
 // resent in full on every single subsequent call. Left unbounded, a long-
