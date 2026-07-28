@@ -755,6 +755,11 @@ function ai_run_edit_generation_agentic(
             if ($lastSmokeTestOk === false) {
                 $lastFailedFile = $toolResult['result']['next_step_file'] ?? null;
                 $lastFailedFileSnapshot = $lastFailedFile !== null ? ($changedFiles[$lastFailedFile] ?? null) : null;
+                // Report the REAL outcome, not just the static pre-dispatch
+                // label — this is the only channel available while the job
+                // is still running (see ai_smoke_test_failure_progress_detail()).
+                $report(['stage' => 'changes', 'status' => 'active', 'label' => 'Generating changes…',
+                    'detail' => ai_smoke_test_failure_progress_detail($toolResult['result'] ?? [])]);
             } else {
                 $lastFailedFile = null;
                 $lastFailedFileSnapshot = null;

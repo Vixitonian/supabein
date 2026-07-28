@@ -486,6 +486,26 @@ function ai_agent_note_finish_rejected(int &$consecutiveRejections, string $base
          . 'it actually reports, and fix that specific problem — do not call finish again until you have.';
 }
 
+// The full aiTrace (every tool call, every raw smoke_test result) only
+// reaches ai_jobs.result once the job finishes -- while it's still running,
+// polling ai_jobs.progress (what $report() writes, live) only ever showed a
+// static PRE-dispatch label like "Loading in a real browser to check for
+// errors…", never the actual outcome. That made it genuinely impossible to
+// tell, while a job was still running, why a given smoke_test attempt
+// failed -- not a missing tool, a real gap in what got reported at all.
+// Capped short and only called on a real failure, so it doesn't meaningfully
+// grow the cost of appendJobProgress()'s already-O(n) rewrite-the-whole-array
+// pattern the way echoing full file contents or the whole aiTrace would.
+function ai_smoke_test_failure_progress_detail(array $smokeTestResult): string
+{
+    $errors = $smokeTestResult['console_errors'] ?? [];
+    $summary = is_array($errors) && $errors
+        ? implode(' | ', array_slice(array_map('strval', $errors), 0, 2))
+        : (string)($smokeTestResult['error'] ?? 'no console errors captured');
+    if (mb_strlen($summary) > 300) $summary = mb_substr($summary, 0, 300) . '…';
+    return "smoke_test failed: {$summary}";
+}
+
 // Turn budgets across the three agent loops now run 60-120 turns (up from
 // 12-60), and every turn appends two messages to $loopHistory with no cap —
 // resent in full on every single subsequent call. Left unbounded, a long-
