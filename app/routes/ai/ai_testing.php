@@ -1259,7 +1259,7 @@ function ai_run_browser_test_agent(
         $report(['stage' => 'stories', 'status' => 'active', 'label' => 'Testing user stories…', 'detail' => ai_browser_agent_step_label($tool, $args)]);
 
         $loopHistory[] = ['role' => 'user', 'text' => $turnMsg];
-        $loopHistory[] = ['role' => 'model', 'text' => json_encode($action)];
+        $loopHistory[] = ['role' => 'model', 'text' => ai_agent_history_action_json($action)];
         $loopHistory   = ai_agent_trim_history($loopHistory);
 
         if ($tool === 'report_story') {

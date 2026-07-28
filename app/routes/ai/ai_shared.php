@@ -476,6 +476,27 @@ function ai_agent_note_parse_failure(int &$consecutiveFailures, string $errorMsg
 // this without meaningfully hurting the model's ability to continue.
 const AI_AGENT_HISTORY_WINDOW_MESSAGES = 30; // ~15 turns of (user, model) pairs
 
+// A write_file action's args.content carries the ENTIRE file being written —
+// live-observed turn latency in the frontend build agent climbing from ~50s
+// to 150s+ over one build's course pointed straight at this: replaying every
+// past write_file's full content back to the model on every later turn (up
+// to AI_AGENT_HISTORY_WINDOW_MESSAGES messages) forces it to re-transmit and
+// re-attend to hundreds of lines of its own past output, compounding turn
+// over turn. This costs nothing to trim -- write_file's own tool RESULT
+// (already in history right after this) never echoes content back either,
+// only {path, bytes, syntax_ok}; and if the model actually needs to see
+// current content again, read_file returns it fresh, not a stale historical
+// copy. Used wherever an agent loop appends its own action to $loopHistory,
+// in place of a bare json_encode($action).
+function ai_agent_history_action_json(array $action): string
+{
+    if (($action['tool'] ?? '') === 'write_file' && is_string($action['args']['content'] ?? null)) {
+        $len = strlen($action['args']['content']);
+        $action['args']['content'] = "[omitted from history — {$len} bytes already written; read_file to see current content]";
+    }
+    return json_encode($action);
+}
+
 // Compaction-lite: rather than silently dropping everything past the
 // window (the model then has zero record of, say, already having written
 // index.html, and can waste a turn re-deriving or re-checking something it
