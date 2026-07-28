@@ -147,6 +147,30 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
 {
     static $platformPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
 
+    // read_file on a platform path used to return content: null, forcing the
+    // model to go fetch these files from a live deployed/preview URL instead
+    // whenever it needed to see their real implementation (e.g. to check
+    // what api.js actually exposes) -- live-observed burning several turns
+    // per build spinning up fresh smoke_test previews just to read files
+    // that are already known, static, in-process text. Return the real
+    // canonical content instead: same content that's force-injected at
+    // deploy time regardless of what the model writes here.
+    $platformFileContent = function (string $path) use ($schema): ?string {
+        switch ($path) {
+            case 'core/router.js': return AI_CANONICAL_ROUTER_JS;
+            case 'core/api.js':    return AI_CANONICAL_API_JS;
+            case 'core/errors.js': return AI_CANONICAL_ERRORS_JS;
+            case 'features/auth/auth.js':
+                $authInfo = ai_detect_auth($schema);
+                if (!empty($authInfo['table'])) {
+                    return str_replace(['__AUTH_TABLE__', '__AUTH_FIELD__'],
+                        [$authInfo['table'], $authInfo['field'] ?? 'email'], AI_CANONICAL_AUTH_JS);
+                }
+                return AI_CANONICAL_AUTH_STUB_JS;
+            default: return null;
+        }
+    };
+
     // Reuses the exact normalize-then-prefix-check ai_deploy_files() already
     // uses against real deploy directories, just against a virtual prefix —
     // same traversal protection, no filesystem involved.
@@ -184,8 +208,10 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             $path = $normalizePath((string)($args['path'] ?? ''));
             if ($path === null) return ['tool' => 'read_file', 'error' => 'args.path is missing or unsafe'];
             if (in_array($path, $platformPaths, true)) {
-                return ['tool' => 'read_file', 'result' => ['path' => $path, 'content' => null,
-                    'note' => 'This file is platform-provided and always overwritten at deploy time — reading or writing it has no effect.']];
+                return ['tool' => 'read_file', 'result' => ['path' => $path, 'content' => $platformFileContent($path),
+                    'note' => 'This is the real, current content of this platform-provided file — read-only; ' .
+                        'write_file/patch_file on this path is always discarded at deploy time no matter what ' .
+                        'you write, so there is never a need to fetch this from a live/preview URL.']];
             }
             $content = $changedFiles[$path] ?? $byPath[$path] ?? null;
             if ($content === null) return ['tool' => 'read_file', 'error' => "no such file: {$path}"];
