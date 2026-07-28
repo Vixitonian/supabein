@@ -1635,6 +1635,19 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
     $savedRequirements = $catalog->getProjectRequirements($projectId);
     $intentCtx = $savedRequirements ? ai_intent_to_context($savedRequirements, 'fix the frontend to satisfy') : '';
 
+    // Set after each attempt below, read by the NEXT attempt. Every attempt
+    // otherwise starts as a brand-new session with zero memory of what a
+    // prior attempt IN THIS SAME JOB already tried — live-observed cost:
+    // attempt 2 re-read the same 5-6 files attempt 1 had already read (pure
+    // round-trip time for content the platform already had), and had no way
+    // to know attempt 1's change didn't work, so nothing stopped it from
+    // converging on the same wrong fix again. Carrying forward what actually
+    // changed (which this loop already has for free in $plan) plus whether
+    // it worked turns "start over" into "here's what was already tried and
+    // why it wasn't enough" — fewer redundant reads AND a real chance of not
+    // repeating the same mistake.
+    $priorAttemptContext = '';
+
     $result = ai_run_project_tests_with_connection_retry($projectId, $userId, $catalog, $config, $report, $client);
     $addUsage($result['usage'] ?? null);
     if (!empty($result['connection_error'])) {
@@ -1673,7 +1686,8 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
                 $failingStories
             ));
 
-        $editResult = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true, null, $intentCtx ? ['context' => $intentCtx] : []);
+        $combinedCtx = trim($intentCtx . ($priorAttemptContext ? "\n\n{$priorAttemptContext}" : ''));
+        $editResult  = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true, null, $combinedCtx ? ['context' => $combinedCtx] : []);
         $plan       = $editResult['plan'] ?? [];
         $addUsage($editResult['usage'] ?? null);
 
@@ -1774,6 +1788,31 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
             $result['passed']  = count(array_filter($mergedStories, fn($s) => !empty($s['passed'])));
             $result['failed']  = count($mergedStories) - $result['passed'];
         }
+
+        // Build what the NEXT attempt (if any) gets as $priorAttemptContext.
+        // Files come straight from $plan -- already in memory, no extra read.
+        // Content is capped defensively; these are frontend source files,
+        // realistically well under this in the overwhelming majority of
+        // cases, but a runaway file shouldn't blow up the next attempt's
+        // prompt size.
+        $stillFailingAfter = array_values(array_filter($result['stories'] ?? [], fn($s) => empty($s['passed'])));
+        $fixWorked = empty($stillFailingAfter);
+        $filesNote = '';
+        foreach ($plan['frontend']['files'] ?? [] as $f) {
+            $path    = (string)($f['path'] ?? '?');
+            $content = (string)($f['content'] ?? '');
+            if (mb_strlen($content) > 4000) $content = mb_substr($content, 0, 4000) . "\n… (truncated)";
+            $filesNote .= "--- {$path} ---\n{$content}\n\n";
+        }
+        $priorAttemptContext = "A previous auto-fix attempt (attempt {$fixAttempt}) already made this exact "
+            . "change to fix the same failures:\n\n" . ($filesNote ?: '(no frontend files were changed)') . "\n"
+            . ($fixWorked
+                ? 'That change resolved it — the stories that were failing are now passing.'
+                : "That change did NOT fully resolve it. Still failing after that fix:\n" . implode("\n", array_map(
+                    fn($s) => '- "' . ($s['label'] ?? 'Untitled story') . '": ' . ($s['detail'] ?? 'no detail captured'),
+                    $stillFailingAfter
+                )) . "\n\nDo not just repeat the same change — diagnose why it wasn't enough. You already have "
+                   . 'the current content of the files above; only read_file a path if you need one not shown here.');
     }
 
     $result['autofix_attempts'] = $fixAttempts;
