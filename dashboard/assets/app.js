@@ -1388,21 +1388,21 @@ const AiPanel = (() => {
         // its own live retry action, not the whole edit.
         msg.data.retry = () => runEditAutoTest(projectId, msg, sess);
       } else if (mode === 'edit' && projectId && msg.data.resumePrompt) {
-        // A stashed prompt from before the 2000-char cap (RESOLVE_PROMPT_MAX)
+        // A stashed prompt from before the 2000-char cap (PROMPT_MAX_LEN)
         // existed can itself be the reason this failed -- truncate defensively
         // so retrying never resends the exact same oversized prompt into the
         // exact same rejection. resume_job_id (read here, before streamGenerate's
         // resetProgressMsgForRetry deletes msg.data.jobId) lets the server pick
         // up from whatever this job's own agentic loop last checkpointed instead
         // of redoing every already-completed turn from scratch.
-        msg.data.retry = () => proceedWithEditStreaming({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), project_id: projectId, validate: true, resume_job_id: msg.data.jobId }, sess, msg);
+        msg.data.retry = () => proceedWithEditStreaming({ prompt: truncateText(msg.data.resumePrompt, PROMPT_MAX_LEN), project_id: projectId, validate: true, resume_job_id: msg.data.jobId }, sess, msg);
       } else if (mode === 'build' && msg.data.resumePrompt) {
         // Same resume_job_id idea as edit above, generalized to every stage of
         // the build pipeline (schema/design/frontend/deploy/test) -- the server
         // skips straight past whatever this job already finished and checkpointed
         // before it failed, so a crash during (say) the test stage doesn't also
         // re-generate the whole app and re-deploy a duplicate project.
-        msg.data.retry = () => runBuildWatchOnly({ prompt: truncateText(msg.data.resumePrompt, RESOLVE_PROMPT_MAX), validate: true, resume_job_id: msg.data.jobId }, sess, msg);
+        msg.data.retry = () => runBuildWatchOnly({ prompt: truncateText(msg.data.resumePrompt, PROMPT_MAX_LEN), validate: true, resume_job_id: msg.data.jobId }, sess, msg);
       }
     });
   }
@@ -2672,15 +2672,15 @@ const AiPanel = (() => {
           + '\n\nApply ONLY these specific changes (ignore everything else):\n'
           + selected.map((s, i) => `${i + 1}. ${s.label}`).join('\n');
         // Every AI-call endpoint hard-rejects prompts over 2000 chars (422) --
-        // see RESOLVE_PROMPT_MAX's own comment. msg.data.body.prompt here can already
+        // see PROMPT_MAX_LEN's own comment. msg.data.body.prompt here can already
         // be close to that cap on its own (e.g. a Resolve-built prompt listing
         // several failing stories), so appending the confirmed-changes list on
         // top of it easily pushes the total over 2000 and silently 422s the
         // job before it's even created -- live-caught: an 8-item edit review
         // failing at "Reading current schema & files" with no job ever
         // starting. Same hard backstop as buildResolvePrompt's own truncation.
-        if (refinedPrompt.length > RESOLVE_PROMPT_MAX) {
-          refinedPrompt = refinedPrompt.slice(0, RESOLVE_PROMPT_MAX - 1) + '…';
+        if (refinedPrompt.length > PROMPT_MAX_LEN) {
+          refinedPrompt = refinedPrompt.slice(0, PROMPT_MAX_LEN - 1) + '…';
         }
         await proceedWithBuildDirect({ ...msg.data.body, prompt: refinedPrompt });
       },
@@ -2852,11 +2852,14 @@ const AiPanel = (() => {
     }
   }
 
-  // Every AI-call endpoint hard-rejects prompts over 2000 chars (422). A run
-  // with several failing stories that each carry a verbose detail string —
-  // exactly what a real broken app produces — easily builds a prompt past
-  // that limit, so "Resolve" would silently 422 with no fix attempted at all.
-  const RESOLVE_PROMPT_MAX = 1900; // stay under the backend's 2000-char cap with margin
+  // Every AI-call endpoint hard-rejects prompts over 2000 chars (422) --
+  // single shared cap for every place in this file that builds a prompt
+  // client-side (Resolve's own failing-stories summary, a resumed job's
+  // stashed prompt, and an edit-review's confirmed-changes list appended
+  // onto an already-near-the-cap base prompt). One shared constant means
+  // a future prompt-construction path can't independently forget this
+  // limit exists the way the edit-review path once did.
+  const PROMPT_MAX_LEN = 1900; // stay under the backend's 2000-char cap with margin
   function truncateText(s, max) {
     return s.length > max ? s.slice(0, max - 1) + '…' : s;
   }
@@ -2904,8 +2907,8 @@ const AiPanel = (() => {
     // Per-field truncation above still isn't a hard guarantee (e.g. many
     // failing stories each under the cap can still add up) — this is the
     // backstop that makes the 2000-char limit impossible to exceed.
-    if (prompt.length > RESOLVE_PROMPT_MAX) {
-      const budget = RESOLVE_PROMPT_MAX - suffix.length - 20;
+    if (prompt.length > PROMPT_MAX_LEN) {
+      const budget = PROMPT_MAX_LEN - suffix.length - 20;
       prompt = prompt.slice(0, budget) + '\n[...truncated]' + suffix;
     }
     return prompt;

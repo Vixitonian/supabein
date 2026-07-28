@@ -7245,6 +7245,25 @@ function ai_job_is_orphaned(array $job): bool
     return !is_dir('/proc/' . $pid);
 }
 
+// Every AI-call endpoint that accepts a free-text prompt enforces the same
+// "required, under 2000 characters" rule -- centralized here instead of each
+// of the 8 routes below repeating its own copy of this exact check, which is
+// exactly what let the client-side prompt-cap logic (see RESOLVE_PROMPT_MAX
+// in dashboard/assets/app.js) drift out of sync with the backend in the
+// first place: a prompt built by concatenating an already-near-the-cap base
+// prompt with more text (e.g. confirming an edit-review's selected changes)
+// had no shared limit to check itself against client-side, so it 422'd here
+// with no job ever created and no clear indication why. One place enforcing
+// this means any future endpoint automatically gets it right too.
+function ai_validate_prompt(array $body): string
+{
+    $prompt = trim((string)($body['prompt'] ?? ''));
+    if ($prompt === '' || strlen($prompt) > 2000) {
+        abort(422, 'prompt is required and must be under 2000 characters');
+    }
+    return $prompt;
+}
+
 // ─── Route registration ──────────────────────────────────────────────────────
 
 function register_ai_routes(\SupaBein\Router $router): void
@@ -7256,10 +7275,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         $userId  = (int)$req['auth']['user_id'];
 
         // ── 1. Validate inputs ────────────────────────────────────────────────
-        $prompt = trim($req['body']['prompt'] ?? '');
-        if (!$prompt || strlen($prompt) > 2000) {
-            abort(422, 'prompt is required and must be under 2000 characters');
-        }
+        $prompt = ai_validate_prompt($req['body']);
 
         // Reference files (logo to match, sample document/screenshot to build
         // from, etc.) — see ai_prepare_attachments_for_ai()'s doc comment.
@@ -7375,10 +7391,7 @@ function register_ai_routes(\SupaBein\Router $router): void
         $config = \App::get('config');
         $userId = (int)$req['auth']['user_id'];
 
-        $prompt = trim($req['body']['prompt'] ?? '');
-        if (!$prompt || strlen($prompt) > 2000) {
-            abort(422, 'prompt is required and must be under 2000 characters');
-        }
+        $prompt = ai_validate_prompt($req['body']);
 
         // Optional prior turns for multi-turn context (capped at 20)
         $history = [];
@@ -7414,10 +7427,8 @@ function register_ai_routes(\SupaBein\Router $router): void
         $userId  = (int)$req['auth']['user_id'];
 
         $projectId = (int)($req['body']['project_id'] ?? 0);
-        $prompt    = trim($req['body']['prompt'] ?? '');
-
         if (!$projectId) abort(422, 'project_id is required');
-        if (!$prompt || strlen($prompt) > 2000) abort(422, 'prompt is required and must be under 2000 characters');
+        $prompt = ai_validate_prompt($req['body']);
 
         $project = $catalog->getProjectById($projectId, $userId);
         if (!$project) abort(404, 'Project not found');
@@ -7628,12 +7639,8 @@ PROMPT;
             ]);
         }
 
-        $prompt    = trim($req['body']['prompt'] ?? '');
+        $prompt    = ai_validate_prompt($req['body']);
         $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : null;
-
-        if (!$prompt || strlen($prompt) > 2000) {
-            abort(422, 'prompt is required and must be under 2000 characters');
-        }
 
         // Prior conversation turns for multi-turn context (capped at 20 turns)
         $rawHistory = $req['body']['history'] ?? [];
@@ -7942,10 +7949,7 @@ PROMPT;
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
 
-        $prompt = trim($req['body']['prompt'] ?? '');
-        if ($prompt === '' || strlen($prompt) > 2000) {
-            abort(422, 'prompt is required and must be under 2000 characters');
-        }
+        $prompt = ai_validate_prompt($req['body']);
 
         $history = [];
         foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
@@ -7988,10 +7992,7 @@ PROMPT;
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
 
-        $prompt = trim($req['body']['prompt'] ?? '');
-        if ($prompt === '' || strlen($prompt) > 2000) {
-            abort(422, 'prompt is required and must be under 2000 characters');
-        }
+        $prompt = ai_validate_prompt($req['body']);
 
         $history = [];
         foreach (array_slice((array)($req['body']['history'] ?? []), 0, 20) as $turn) {
@@ -8025,10 +8026,7 @@ PROMPT;
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
 
-        $prompt = trim($req['body']['prompt'] ?? '');
-        if ($prompt === '' || strlen($prompt) > 2000) {
-            abort(422, 'prompt is required and must be under 2000 characters');
-        }
+        $prompt = ai_validate_prompt($req['body']);
         $schema = $req['body']['schema'] ?? null;
         if (!is_array($schema) || empty($schema['tables'])) abort(422, 'schema is required');
         $designBrief = (isset($req['body']['design_brief']) && is_array($req['body']['design_brief'])) ? $req['body']['design_brief'] : [];
@@ -8059,9 +8057,8 @@ PROMPT;
         $catalog = \SupaBein\Catalog::getInstance();
         $userId  = (int)$req['auth']['user_id'];
 
-        $prompt    = trim($req['body']['prompt'] ?? '');
+        $prompt    = ai_validate_prompt($req['body']);
         $projectId = isset($req['body']['project_id']) ? (int)$req['body']['project_id'] : 0;
-        if ($prompt === '' || strlen($prompt) > 2000) abort(422, 'prompt is required and must be under 2000 characters');
         if (!$projectId) abort(422, 'project_id is required');
 
         $project = $catalog->getProjectById($projectId, $userId);
