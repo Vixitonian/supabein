@@ -101,6 +101,13 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
         'usage'      => $frontendResult['usage'],
         'aiTrace'    => array_merge($aiTrace, $schemaResult['aiTrace'], $frontendResult['aiTrace']),
         'validation' => $frontendResult['validation'],
+        // The final resolved intent -- whether passed in already-approved, just
+        // generated fresh above, or pulled from a resume checkpoint -- surfaced
+        // here so ai_run_build_and_deploy() can persist it once a project
+        // actually exists. Without this, story-driven testing has no way to
+        // know what was actually requested and silently falls back to
+        // inferring stories from the schema + rendered HTML alone.
+        'intent'     => $approvedIntent,
     ];
 }
 
@@ -156,6 +163,20 @@ function ai_run_build_and_deploy(string $prompt, array $history, ?array $approve
         $report(['stage' => 'deploy', 'status' => 'done', 'label' => 'Deployed',
                  'detail' => $applyResult['staging'] ? 'Deployed to staging' : ($applyResult['site'] ? 'Site created — no frontend deployed' : 'No site created')]);
         $checkpoint('deploy', ['plan' => $genResult['plan'], 'validation' => $genResult['validation'] ?? [], 'apply' => $applyResult]);
+
+        // Persist the real approved intent (actors/stories) the moment a
+        // project exists, so story-driven testing below reads the actual
+        // requested stories via ai_extract_saved_stories() instead of falling
+        // back to ai_infer_stories() -- which only ever sees the schema and
+        // rendered HTML, and invents plausible-sounding but unrequested
+        // features (a login page, a dark-mode toggle, an input field) that
+        // then get reported as failures and sent through auto-fix chasing
+        // something the user never asked for. Every review-off build hit
+        // this fallback before this fix, since nothing ever wrote to
+        // project_requirements outside of the one manual PUT endpoint.
+        if (!empty($genResult['intent']) && !empty($applyResult['project']['id'])) {
+            $catalog->upsertProjectRequirements((int)$applyResult['project']['id'], $userId, $genResult['intent']);
+        }
     }
 
     $hasDeployed = !empty($applyResult['deploy']) || !empty($applyResult['staging']) || !empty($applyResult['site']);
