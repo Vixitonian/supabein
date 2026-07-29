@@ -714,10 +714,10 @@ Available tools:
     e.g. "just add an About page" is not license to rewrite the notes list from memory and lose its
     create/edit form in the process. A path you're creating for the first time has nothing to read,
     so this only applies to paths list_files already showed you.
-    Your own past write_file calls show up in your history with their content replaced by
-    <<<REDACTED-CONTENT-DO-NOT-REUSE-CALL-READ-FILE>>> — that exact string is NEVER real file content
-    and must never appear in a content argument you send. It is a token-saving placeholder only; call
-    read_file to get the file's actual current content before writing to it again.
+    To save tokens, your own past write_file calls show up in your history with the content field
+    removed entirely (only path and byte count remain) — there is nothing there to copy from. If you
+    need a file's real current content, you must call read_file; never invent or reconstruct content
+    for a write_file/patch_file call from what a past turn's history entry looks like.
   write_files  args: {"files": [{"path": string, "content": string}, ...]}
     Same as calling write_file once per entry, in order, but in a single turn — use this whenever
     you're about to write more than one file back-to-back (e.g. a new feature file plus its
@@ -889,10 +889,10 @@ Available tools:
     read_file it first so your change is based on what you actually wrote, not a guess from memory —
     e.g. adding a second feature's script tag is not license to reconstruct index.html from scratch
     and lose the first feature's tag/route in the process.
-    Your own past write_file calls show up in your history with their content replaced by
-    <<<REDACTED-CONTENT-DO-NOT-REUSE-CALL-READ-FILE>>> — that exact string is NEVER real file content
-    and must never appear in a content argument you send. It is a token-saving placeholder only; call
-    read_file to get the file's actual current content before writing to it again.
+    To save tokens, your own past write_file calls show up in your history with the content field
+    removed entirely (only path and byte count remain) — there is nothing there to copy from. If you
+    need a file's real current content, you must call read_file; never invent or reconstruct content
+    for a write_file/patch_file call from what a past turn's history entry looks like.
   write_files  args: {"files": [{"path": string, "content": string}, ...]}
     Same as calling write_file once per entry, in order, but in a single turn — use this whenever
     you're about to write more than one file back-to-back (e.g. index.html plus a feature file)
@@ -1487,10 +1487,10 @@ Available tools:
     App.jsx first (or early), then each feature component, importing it into whatever renders it.
     HARD RULE: if you're rewriting a path you already write_file'd earlier this session, read_file
     it first so your change is based on what you actually wrote, not a guess from memory.
-    Your own past write_file calls show up in your history with their content replaced by
-    <<<REDACTED-CONTENT-DO-NOT-REUSE-CALL-READ-FILE>>> — that exact string is NEVER real file content
-    and must never appear in a content argument you send. It is a token-saving placeholder only; call
-    read_file to get the file's actual current content before writing to it again.
+    To save tokens, your own past write_file calls show up in your history with the content field
+    removed entirely (only path and byte count remain) — there is nothing there to copy from. If you
+    need a file's real current content, you must call read_file; never invent or reconstruct content
+    for a write_file/patch_file call from what a past turn's history entry looks like.
   write_files  args: {"files": [{"path": string, "content": string}, ...]}
     Same as write_file once per entry, in order, but in a single turn.
   patch_file   args: {"path": string, "find": string, "replace": string}

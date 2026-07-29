@@ -715,34 +715,31 @@ const AI_AGENT_HISTORY_WINDOW_MESSAGES = 30; // ~15 turns of (user, model) pairs
 // current content again, read_file returns it fresh, not a stale historical
 // copy. Used wherever an agent loop appends its own action to $loopHistory,
 // in place of a bare json_encode($action).
-// The redaction placeholder itself must never look like plausible file
-// content. Live-observed (job 224, a react-stack build): a fast/cheap model
-// (GLM-4.5-flash) at least three times copied a truncated fragment of the
-// PREVIOUS placeholder text verbatim as the `content` of a brand-new
-// write_file call -- e.g. a real deployed file whose first line read
-// "[omitted from history — 85 bytes already written; read_file to se..." --
-// which esbuild (and presumably node --check, for vanilla) then correctly
-// rejects as a syntax error, burning a full write+smoke_test turn to
-// recover from every time. The original placeholder read as ordinary
-// English prose starting with "[" and containing "from", close enough to
-// plausible JS/JSX for a small model to pattern-match onto and reproduce
-// instead of treating as opaque. A short, code-shaped-impossible sentinel
-// (angle brackets, no words a JS parser would ever expect) is far less
-// likely to get reproduced as if it were real source.
-const AI_AGENT_REDACTED_CONTENT_SENTINEL = '<<<REDACTED-CONTENT-DO-NOT-REUSE-CALL-READ-FILE>>>';
-
+// The redaction must not leave ANY string value sitting in the `content`
+// slot. First attempt used a short sentinel string here instead of the file
+// content -- live-observed (job 224, a react-stack build) a fast/cheap model
+// (GLM-4.5-flash) copied a truncated fragment of that sentinel verbatim into
+// a real write_file call, three separate times, each one a genuine esbuild
+// syntax error costing a full write+smoke_test turn to recover from. Making
+// the sentinel more obviously fake (job 225, this fix's predecessor) did NOT
+// stop it -- the model went on to reproduce GARBLED/MUTATED variants of the
+// new sentinel too (e.g. "REDACTED-CTED-CONTENT", "REDUCED-CONTENT"),
+// proving this isn't literal copy-paste the model could be talked out of
+// with clearer wording -- ANY string occupying that JSON slot gets treated
+// as a thing to reproduce or paraphrase. The only reliable fix is to leave
+// nothing there to reproduce: drop the `content` key from args entirely
+// rather than replacing its value.
 function ai_agent_history_action_json(array $action): string
 {
     $tool = $action['tool'] ?? '';
     if ($tool === 'write_file' && is_string($action['args']['content'] ?? null)) {
-        $len = strlen($action['args']['content']);
-        $action['args']['content'] = AI_AGENT_REDACTED_CONTENT_SENTINEL;
-        $action['_bytes_omitted'] = $len;
+        $action['_bytes_omitted'] = strlen($action['args']['content']);
+        unset($action['args']['content']);
     } elseif ($tool === 'write_files' && is_array($action['args']['files'] ?? null)) {
         foreach ($action['args']['files'] as &$f) {
             if (is_array($f) && is_string($f['content'] ?? null)) {
                 $f['_bytes_omitted'] = strlen($f['content']);
-                $f['content'] = AI_AGENT_REDACTED_CONTENT_SENTINEL;
+                unset($f['content']);
             }
         }
         unset($f);
