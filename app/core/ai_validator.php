@@ -375,6 +375,31 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
         $navigateCalls = array_merge($navigateCalls, ai_validator_extract_navigate_calls($content));
     }
 
+    // ── Inline onclick referencing a const/let module (silently dead) ──────
+    // Classic (non-module) scripts share one lexical scope for top-level
+    // `const`/`let` — SupaBein-generated code follows exactly that module
+    // convention (`const todo = {...}`) — but that lexical binding is NOT a
+    // property of the global object. Inline HTML event-handler attributes
+    // (onclick="...") execute in a scope chain that only sees the global
+    // OBJECT environment (var/function declarations), never the separate
+    // lexical one, so onclick="todo.deleteTask(...)" throws a swallowed
+    // "todo is not defined" and does nothing. Live-caught (job 220): a
+    // generated todo app wired its Add-task form and its checkbox via
+    // addEventListener (real closure access, works fine) but its Delete
+    // button via inline onclick — clicking Delete silently did nothing while
+    // every other action on the same page worked, and 2 auto-fix attempts
+    // both missed it since nothing ever surfaced the actual thrown error.
+    foreach ($byPath as $path => $content) {
+        if (!str_ends_with($path, '.js')) continue;
+        if (!preg_match('/\b(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*\{/', $content, $dm)) continue;
+        $ident = $dm[1];
+        if (preg_match('/onclick\s*=\s*[\'"]\s*' . preg_quote($ident, '/') . '\.[A-Za-z_$]/', $content)) {
+            $findings[] = ai_validator_finding('error', 'script',
+                "{$path} declares \"{$ident}\" with const/let, but also calls it from an inline onclick=\"{$ident}....\" attribute",
+                "Inline HTML event-handler attributes run in the global object's scope, which cannot see a top-level const/let binding — clicking will silently throw \"{$ident} is not defined\" and do nothing. Use addEventListener() instead, the same way this file's other event handlers are already wired.");
+        }
+    }
+
     // ── Route ↔ handler existence, duplicate routes ────────────────────────
     foreach ($badRouteDefs as $brd) {
         $findings[] = ai_validator_finding('error', 'route',

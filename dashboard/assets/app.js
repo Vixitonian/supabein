@@ -3614,10 +3614,35 @@ const AiPanel = (() => {
     if (data.tables && data.tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables: ' + data.tables.map(t => t.name || t).join(', ')));
     if (data.added_tables && data.added_tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables added: ' + data.added_tables.join(', ')));
     if (data.added_columns && data.added_columns.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Columns: ' + data.added_columns.join(', ')));
-    if (data.site && !data.staging) lines.push(el('div', { class: 'ai-result-row' }, '✓ Frontend deployed'));
-    if (data.staging) lines.push(el('div', { class: 'ai-result-row' }, '✓ Deployed to staging (preview)'));
+    if (data.staging) {
+      lines.push(el('div', { class: 'ai-result-row' }, '✓ Deployed to staging (preview)'));
+    } else if (data.site) {
+      // "site created but no staging deploy" only happens today when the
+      // deploy step rejected the generated files (they failed the deploy's
+      // own smoke check, or ai_deploy_files() errored) — there is no
+      // direct-to-live deploy path anymore (see the removed 'View Site'
+      // button below, which used to point at a site with nothing on it).
+      // This used to render '✓ Frontend deployed' here — the exact opposite
+      // of what happened (job 218, "Fun Facts App": 11 confirmed
+      // schema/frontend mismatches, yet the summary card still claimed success).
+      lines.push(el('div', { class: 'ai-result-row', style: 'color:var(--danger)' },
+        '✕ Frontend was not deployed' + (data.deploy_error ? ' — ' + data.deploy_error : '.')));
+    }
 
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
+
+    // If deploy failed and the validator has findings, show them here too —
+    // the "Checking for mismatches" progress row only ever showed a count,
+    // never the actual list, so a real, confirmed bug (e.g. "Frontend calls
+    // api.list('content'), but no 'content' table exists") went unseen.
+    if (!data.staging && data.validation && data.validation.length) {
+      const errCount = data.validation.filter(f => f.severity === 'error').length;
+      card.appendChild(el('details', { class: 'ai-plan-details', open: errCount > 0 },
+        el('summary', { class: 'ai-plan-details-summary' }, `⚑ Validation (${data.validation.length})`),
+        renderValidationExplainer(),
+        renderValidationList(data.validation)
+      ));
+    }
 
     const actions = el('div', { style: 'margin-top:10px;display:flex;gap:8px;flex-wrap:wrap' });
 
@@ -3626,19 +3651,6 @@ const AiPanel = (() => {
         class: 'btn btn-primary btn-sm',
         onClick: () => { close(); Router.navigate('/projects/' + data.project.id); }
       }, 'Open Project →'));
-    }
-
-    // View Site button — shown only when the build deployed straight to a
-    // live site (no staging block); builds now always stage first, so this
-    // only applies to any future/legacy live-direct path.
-    if (data.site && data.site.id && !data.staging) {
-      const siteUrl = liveSiteUrl(data.site);
-      actions.appendChild(el('a', {
-        class: 'btn btn-secondary btn-sm',
-        href: siteUrl,
-        target: '_blank',
-        rel: 'noopener'
-      }, 'View Site →'));
     }
 
     // Edit staged to preview — offer View Staging + Publish to Live.

@@ -80,6 +80,36 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     if ($validate) {
         $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
         $validation = ai_validator_check_project($plan, $plan['frontend']['files']);
+
+        // job 218 ("Fun Facts App"): the validator correctly found 11 confirmed
+        // schema/frontend mismatches (e.g. "api.list('content'), but no 'content'
+        // table exists") and nothing ever acted on that information -- the
+        // pipeline deployed anyway, deploy's own smoke check correctly refused
+        // to publish the broken files, and the job still finished 'done' with
+        // every stage checkmarked. A validator that finds a real, confirmed bug
+        // and never acts on it is pure overhead. Give the frontend agent ONE
+        // chance to fix exactly what was found -- the same retry-once pattern
+        // the schema stage already uses in ai_generate_build_plan() -- before
+        // this ever reaches deploy.
+        $errors = array_values(array_filter($validation, fn($f) => $f['severity'] === 'error'));
+        if ($errors) {
+            $report(['stage' => 'validate', 'status' => 'active', 'label' => 'Fixing validation errors…',
+                     'detail' => count($errors) . ' error(s) found — retrying frontend generation…']);
+            $fixNote = "\n\nYour previous attempt at this frontend had these CONFIRMED problems — fix every one "
+                . "of them, using only the exact table/column names in the schema above:\n"
+                . implode("\n", array_map(fn($f) => '- ' . $f['message'] . (!empty($f['detail']) ? ' (' . $f['detail'] . ')' : ''), $errors));
+            $retry = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt . $fixNote, $client, $config, $report, $refs, $approvedIntent);
+            $aiTrace = array_merge($aiTrace, $retry['aiTrace'] ?? []);
+            foreach ($feUsage as $k => $v) $feUsage[$k] = $v + (int)($retry['usage'][$k] ?? 0);
+
+            $plan['frontend'] = ['files' => $retry['files'] ?? []];
+            foreach ($plan['frontend']['files'] as &$file) {
+                $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
+            }
+            unset($file);
+            $validation = ai_validator_check_project($plan, $plan['frontend']['files']);
+        }
+
         if (array_filter($validation, fn($f) => $f['severity'] === 'error')) {
             $validation = ai_validator_explain_findings($validation, $client);
         }

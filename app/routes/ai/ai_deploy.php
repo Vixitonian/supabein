@@ -538,6 +538,7 @@ function ai_execute_build(array $plan, int $userId): array
     }
 
     $staging = null;
+    $deployError = null;
     if ($site !== null && !empty($plan['frontend']['files'])) {
         // Builds deploy to STAGING (preview), same as edits — the user
         // publishes to live explicitly via the Publish button, after
@@ -553,6 +554,13 @@ function ai_execute_build(array $plan, int $userId): array
             ai_detect_auth($plan)
         );
         if ($deployResult['error']) {
+            // Previously only logged server-side (sb_log) and silently dropped
+            // from the returned result — the caller (and the dashboard) had no
+            // way to know deploy failed at all, only that 'staging' was absent,
+            // which the UI used to misread as success (job 218). Surfaced here
+            // the same way ai_execute_edit()'s apply route already exposes
+            // 'deploy_error' for the edit path.
+            $deployError = $deployResult['error'];
             sb_log('ai_build', 'Deploy failed (non-fatal): ' . $deployResult['error']);
         } else {
             $deploy = $deployResult['deploy'];
@@ -576,11 +584,12 @@ function ai_execute_build(array $plan, int $userId): array
     ]);
 
     return [
-        'project' => $project,
-        'tables'  => $partial['tables'],
-        'site'    => $site,
-        'deploy'  => $deploy,
-        'staging' => $staging,
+        'project'      => $project,
+        'tables'       => $partial['tables'],
+        'site'         => $site,
+        'deploy'       => $deploy,
+        'staging'      => $staging,
+        'deploy_error' => $deployError,
     ];
 }
 

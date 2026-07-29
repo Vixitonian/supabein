@@ -181,7 +181,14 @@ function ai_run_build_and_deploy(string $prompt, array $history, ?array $approve
         }
     }
 
-    $hasDeployed = !empty($applyResult['deploy']) || !empty($applyResult['staging']) || !empty($applyResult['site']);
+    // A bare 'site' with no 'staging' means the deploy step itself rejected
+    // the generated files (its own smoke check failed, or ai_deploy_files()
+    // errored) -- there's nothing live to test. Previously this still
+    // counted as "hasDeployed", so the pipeline ran the test stage anyway,
+    // which then immediately failed with a confusing "No deploy found —
+    // build or edit the project first" (job 218) instead of skipping
+    // straight to the honest "Nothing to test" branch below.
+    $hasDeployed = !empty($applyResult['staging']);
     $testResult  = null;
     if ($hasDeployed && !empty($applyResult['project']['id'])) {
         $report(['stage' => 'test', 'status' => 'start', 'label' => 'Running tests…']);
