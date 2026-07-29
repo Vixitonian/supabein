@@ -389,28 +389,37 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
         $navigateCalls = array_merge($navigateCalls, ai_validator_extract_navigate_calls($content));
     }
 
-    // ── Inline onclick referencing a const/let module (silently dead) ──────
-    // Classic (non-module) scripts share one lexical scope for top-level
-    // `const`/`let` — SupaBein-generated code follows exactly that module
-    // convention (`const todo = {...}`) — but that lexical binding is NOT a
-    // property of the global object. Inline HTML event-handler attributes
-    // (onclick="...") execute in a scope chain that only sees the global
-    // OBJECT environment (var/function declarations), never the separate
-    // lexical one, so onclick="todo.deleteTask(...)" throws a swallowed
-    // "todo is not defined" and does nothing. Live-caught (job 220): a
-    // generated todo app wired its Add-task form and its checkbox via
-    // addEventListener (real closure access, works fine) but its Delete
-    // button via inline onclick — clicking Delete silently did nothing while
-    // every other action on the same page worked, and 2 auto-fix attempts
-    // both missed it since nothing ever surfaced the actual thrown error.
+    // ── RULE 2B, mechanically enforced: `this` and inline onX="" attributes ──
+    // Two prior incidents (job 220: an inline onclick="todo.deleteTask(...)"
+    // silently swallowed "todo is not defined"; job 221: a route handler
+    // called as a bare reference lost its `this` receiver) looked like
+    // unrelated one-off bugs and each got its own narrow regex here, matched
+    // to that incident's exact shape (specifically: an inline onclick that
+    // references a const/let-declared identifier by name). Both actually
+    // share one root cause — code in this stack is constantly invoked as a
+    // bare reference (route dispatch, addEventListener callbacks, inline
+    // attributes), never as obj.method() — so neither `this` nor an inline
+    // event attribute is EVER reliably bound to anything, regardless of what
+    // identifier or property it happens to reference. Rather than write a
+    // third narrow variant next time this surfaces differently, these two
+    // checks ban both categories outright, matching RULE 2B's system prompt
+    // wording exactly ("banned outright, no exceptions") — no per-incident
+    // matching required, so a new variant can't slip through a gap the old
+    // regexes didn't anticipate.
     foreach ($byPath as $path => $content) {
         if (!str_ends_with($path, '.js')) continue;
-        if (!preg_match('/\b(?:const|let)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*\{/', $content, $dm)) continue;
-        $ident = $dm[1];
-        if (preg_match('/onclick\s*=\s*[\'"]\s*' . preg_quote($ident, '/') . '\.[A-Za-z_$]/', $content)) {
+        if (preg_match('/\bthis\b/', $content)) {
             $findings[] = ai_validator_finding('error', 'script',
-                "{$path} declares \"{$ident}\" with const/let, but also calls it from an inline onclick=\"{$ident}....\" attribute",
-                "Inline HTML event-handler attributes run in the global object's scope, which cannot see a top-level const/let binding — clicking will silently throw \"{$ident} is not defined\" and do nothing. Use addEventListener() instead, the same way this file's other event handlers are already wired.");
+                "{$path} contains the word \"this\"",
+                'RULE 2B bans `this` outright in vanilla-stack code — every handler here is invoked as a bare function reference (route dispatch, addEventListener callbacks), never as module.method(), so `this` is never reliably bound to anything and using it crashes the instant that code path actually runs. Reference the module by its own top-level const name instead.');
+        }
+    }
+    foreach ($byPath as $path => $content) {
+        if (str_ends_with($path, '.jsx')) continue; // react stack never reaches this block at all (see guard above)
+        if (preg_match('/(?<=[\s"\'])on[a-z]+\s*=\s*["\']/i', $content, $m)) {
+            $findings[] = ai_validator_finding('error', 'script',
+                "{$path} contains an inline HTML event-handler attribute ({$m[0]})",
+                'Inline onX="..." attributes run in the global object\'s scope, which cannot see a module\'s top-level const/let bindings — clicking/submitting/etc. will silently throw "X is not defined" and do nothing, in whatever file built this markup (static index.html or a template string a feature module assigned to innerHTML). Use addEventListener() instead, attached once the element exists in the DOM.');
         }
     }
 

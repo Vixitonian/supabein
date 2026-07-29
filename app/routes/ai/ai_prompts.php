@@ -256,19 +256,33 @@ router.defineRoute(path, handler) registers a route; path segments starting with
 calls handler({}). router.navigate(path) and router.onHashChange() work as already described above.
 
 ═══════════════════════════════════════════════════════
-RULE 2B — NEVER USE `this` INSIDE A FEATURE MODULE
+RULE 2B — TWO THINGS THAT ARE BANNED OUTRIGHT, NO EXCEPTIONS
 ═══════════════════════════════════════════════════════
-router.onHashChange() invokes whatever function you registered as a bare call — handler(params) —
-never as a method call on your module object. So when a registered handler is a shorthand method
-that refers to a sibling method or the module's own state via `this` (this.loadState(), this.state,
-etc.), `this` is undefined inside it at call time and the app crashes with "this.xxx is not a
-function" the instant that route loads — indistinguishable from a blank/broken page to the user.
-Every feature module (and auth.js-style modules, if you ever touch one) MUST reference itself by its
-own top-level const name instead of `this`, with zero exceptions — this applies to every method in
-the module, not just ones registered as routes, since any method can end up passed around as a bare
-reference (e.g. an event listener callback has the exact same problem):
+Both of the following are enforced mechanically (any file containing either one is a hard build
+failure, not a suggestion) because both share the same root cause: code here is constantly passed
+around and invoked as a bare reference — route handlers, event listeners, callbacks — never as a
+method call on the object that defined it. Anything relying on "the thing that called me" being
+knowable from inside the function is broken by construction, whether it fails immediately or only
+on some code paths.
+
+NEVER write the word `this` anywhere in a .js file. Not `this.loadState()`, not `this.state`, not
+even in a context that looks safe today — router.onHashChange() invokes your handler as a bare call
+(handler(params)), never as module.handler(), so `this` is undefined inside it at call time and the
+app crashes with "this.xxx is not a function" the instant that path runs. Reference the module by
+its own top-level const name instead, always, in every method — not just ones registered as routes,
+since any method can end up passed around as a bare reference the same way:
   ✗ const calculator = { renderCalculator() { this.loadState().then(...); } };
   ✓ const calculator = { renderCalculator() { calculator.loadState().then(...); } };
+
+NEVER write an inline HTML event-handler attribute — no onclick="", onchange="", onsubmit="",
+oninput="", or any on*="" attribute, anywhere, whether in index.html or in a template string a
+feature module builds and assigns to innerHTML. These execute in the page's global object scope,
+which cannot see a module's top-level const/let bindings — onclick="todo.deleteTask(id)" throws a
+silently-swallowed "todo is not defined" the moment it's clicked, while every other addEventListener-
+wired action on the same page keeps working, making it look like an isolated one-button bug instead
+of the systemic scoping mismatch it actually is. Always use addEventListener(), attached once the
+element genuinely exists in the DOM (see RULE 10's ordering warning) — with zero exceptions, even
+for a single trivial button.
 
 ═══════════════════════════════════════════════════════
 RULE 3 — AUTH: PLATFORM-PROVIDED, TWO SEPARATE ROUTES
