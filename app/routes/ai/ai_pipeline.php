@@ -49,7 +49,8 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
     } elseif ($approvedIntent === null) {
         $report(['stage' => 'requirements', 'status' => 'start', 'label' => 'Understanding your requirements…']);
         $_t0 = microtime(true);
-        $approvedIntent = ai_generate_intent($client, $prompt, $history, $refs);
+        $approvedIntent = ai_generate_intent($client, $prompt, $history, $refs,
+            ai_agent_retry_reporter($report, 'requirements', 'Understanding your requirements…'));
         $aiTrace[] = ['stage' => 'intent', 'system' => AI_INTENT_PROMPT, 'history' => $history, 'user_msg' => $prompt, 'response' => $approvedIntent, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
         $actorNames = array_filter(array_map(fn($a) => is_array($a) ? ($a['name'] ?? '') : (string)$a, $approvedIntent['actors'] ?? []));
         $storyCount = array_sum(array_map(fn($a) => is_array($a) ? count($a['stories'] ?? []) : 0, $approvedIntent['actors'] ?? []));
@@ -401,7 +402,8 @@ function ai_run_project_seed(int $projectId, \SupaBein\Catalog $catalog, \PDO $p
     if ($testAccounts) {
         $userMsg .= "\n\nTest user IDs available to own seeded rows: " . implode(', ', array_column($testAccounts, 'id'));
     }
-    $result = $client->generateJson($prompt, $userMsg);
+    $result = $client->generateJson($prompt, $userMsg, [], true,
+        ai_agent_retry_reporter($report, 'generate', 'Generating sample data…'));
     $seedData = is_array($result['seed_data'] ?? null) ? $result['seed_data'] : [];
     $report(['stage' => 'generate', 'status' => 'done', 'label' => 'Sample data generated', 'detail' => count($seedData) . ' table(s)']);
 

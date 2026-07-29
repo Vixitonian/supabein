@@ -310,7 +310,8 @@ function ai_run_build_frontend_agentic(
             // since the model already has whatever it extracted from them in
             // its own running context after turn 1.
             $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
-            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg, $turnAttachments);
+            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg, $turnAttachments, true,
+                ai_agent_retry_reporter($report, 'frontend', 'Generating frontend code…'));
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
                 throw new \RuntimeException('AI provider error during frontend generation: ' . $e->getMessage());

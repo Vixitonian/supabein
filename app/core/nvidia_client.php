@@ -45,15 +45,25 @@ class NvidiaClient
      *   fallback chain after better options have failed, and dropping an
      *   image there is preferable to failing the whole request outright.
      */
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
+    // See ZhipuClient's matching comment (task #198) -- $onRetry is optional
+    // and additive, surfacing this client's own internal retry loop to
+    // whichever pipeline stage called it, instead of leaving the live
+    // progress UI silent for however long the retries take.
+    // $jsonMode is accepted (unused) purely for positional-call parity with
+    // every other client -- FallbackAiClient's call() closure passes it as
+    // the same 4th positional argument to whichever candidate is currently
+    // active regardless of provider, so this must exist at the same
+    // position $onRetry now occupies as the 5th, or a bool would land on
+    // $onRetry's ?callable-typed slot and throw a TypeError.
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
             ['role' => 'user',   'content' => $userPrompt],
-        ]);
+        ], $onRetry);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {
@@ -64,10 +74,10 @@ class NvidiaClient
             ];
         }
         $messages[] = ['role' => 'user', 'content' => $userPrompt];
-        return $this->call($messages);
+        return $this->call($messages, $onRetry);
     }
 
-    private function call(array $messages): array
+    private function call(array $messages, ?callable $onRetry = null): array
     {
         $probeKey  = 'nvidia:' . $this->model;
         $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);
@@ -134,6 +144,7 @@ class NvidiaClient
                     if ($corrected !== null) {
                         $maxTokens = $corrected;
                         MaxTokensProbe::remember($probeKey, $maxTokens);
+                        if ($onRetry) $onRetry($attempt, 4, 'Adjusting token budget and retrying…', 0.0);
                         continue;
                     }
                 }
@@ -162,6 +173,7 @@ class NvidiaClient
                     } else {
                         $wait = $attempt * 2;
                     }
+                    if ($onRetry) $onRetry($attempt, 4, ($httpCode === 429 ? 'Rate limited by the AI provider' : 'AI provider server error') . " — retrying in {$wait}s…", $wait);
                     sleep((int)ceil($wait));
                     continue;
                 }
@@ -198,6 +210,7 @@ class NvidiaClient
                 if ($attempt < 4 && $maxTokens < 200000) {
                     $maxTokens = min(200000, $maxTokens * 2);
                     MaxTokensProbe::remember($probeKey, $maxTokens);
+                    if ($onRetry) $onRetry($attempt, 4, 'Response was cut off — retrying with more room…', 0.0);
                     continue;
                 }
                 throw new \RuntimeException('NVIDIA output was cut off (too long) even at the model\'s ceiling. Try a simpler description or use Gemini for large builds.');

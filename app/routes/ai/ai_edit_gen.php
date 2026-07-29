@@ -627,7 +627,8 @@ function ai_run_edit_generation_agentic(
             // Same one-time-only attach as the frontend build agent — see its
             // matching comment in ai_run_build_frontend_agentic().
             $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
-            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg, $turnAttachments);
+            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg, $turnAttachments, true,
+                ai_agent_retry_reporter($report, 'changes', 'Generating changes…'));
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
                 throw new \RuntimeException('AI provider error during edit generation: ' . $e->getMessage());

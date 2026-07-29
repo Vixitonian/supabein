@@ -32,6 +32,27 @@ function ai_pipeline_debug_log(string $context, string $message, array $data = [
     @file_put_contents(SUPABEIN_ROOT . '/storage/ai_pipeline_debug.log', $line, FILE_APPEND | LOCK_EX);
 }
 
+// job 218 (task #198): a single generateJson*() call can silently retry
+// several times inside the AI client itself (rate limits, truncation, a
+// too-high token budget correcting itself) -- live-caught taking 6m43s on a
+// schema stage that normally finishes in 20-55s, entirely invisible to the
+// live progress UI because the outer stage only ever logs its own one
+// "start" event and has nothing more to say until the whole call resolves.
+// Every provider client now accepts an optional $onRetry(attempt, max,
+// reason, waitSeconds) callback -- this builds the closure that turns each
+// one into a real, live progress event on whichever stage called it,
+// instead of leaving the client silently working with nothing to show for
+// it. Also doubles as ai_pipeline_debug_log() so a full post-mortem always
+// has the real retry history even if nobody was watching the live UI.
+function ai_agent_retry_reporter(callable $report, string $stage, string $label, array $logContext = []): callable
+{
+    return function (int $attempt, int $maxAttempts, string $reason, float $waitSeconds) use ($report, $stage, $label, $logContext): void {
+        $report(['stage' => $stage, 'status' => 'active', 'label' => $label,
+            'detail' => "{$reason} (attempt {$attempt}/{$maxAttempts})"]);
+        ai_pipeline_debug_log($stage, "Retry {$attempt}/{$maxAttempts}: {$reason}", $logContext);
+    };
+}
+
 // ─── AI output helpers ───────────────────────────────────────────────────────
 
 /**

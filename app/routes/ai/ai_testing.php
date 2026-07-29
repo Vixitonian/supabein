@@ -1276,7 +1276,8 @@ function ai_run_browser_test_agent(
         }
         $_t0 = microtime(true);
         try {
-            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg);
+            $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory, $turnMsg, [], true,
+                ai_agent_retry_reporter($report, 'stories', 'Testing user stories…'));
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
                 throw new \RuntimeException('AI provider error during browser testing: ' . $e->getMessage());

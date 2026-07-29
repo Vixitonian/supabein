@@ -92,18 +92,26 @@ class FallbackAiClient
         return method_exists($this->client, 'getLastRawText') ? $this->client->getLastRawText() : '';
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    // See ZhipuClient's matching comment (task #198) -- $onRetry is optional
+    // and additive. Passed straight through to whichever candidate is
+    // currently active; ALSO invoked directly by this class itself (see
+    // call() below) when it jumps to the NEXT candidate after one fails
+    // outright, since that cross-provider fallback is its own silent gap --
+    // a caller watching only the active candidate's retries would otherwise
+    // see nothing at all during the moment this class swaps providers.
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
-        return $this->call(fn(object $c): array => $c->generateJson($systemPrompt, $userPrompt, $attachments, $jsonMode));
+        return $this->call(fn(object $c): array => $c->generateJson($systemPrompt, $userPrompt, $attachments, $jsonMode, $onRetry), $onRetry);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
-        return $this->call(fn(object $c): array => $c->generateJsonWithHistory($systemPrompt, $history, $userPrompt, $attachments, $jsonMode));
+        return $this->call(fn(object $c): array => $c->generateJsonWithHistory($systemPrompt, $history, $userPrompt, $attachments, $jsonMode, $onRetry), $onRetry);
     }
 
-    private function call(\Closure $invoke): array
+    private function call(\Closure $invoke, ?callable $onRetry = null): array
     {
+        $chainAttempt = 0;
         while (true) {
             try {
                 $result = $invoke($this->client);
@@ -125,6 +133,10 @@ class FallbackAiClient
                     'to_provider'   => $to['provider'],   'to_model'   => $to['model'],
                     'error'         => $e->getMessage(),
                 ];
+                $chainAttempt++;
+                if ($onRetry) {
+                    $onRetry($chainAttempt, count($this->candidates), "{$from['provider']}/{$from['model']} failed — switching to {$to['provider']}/{$to['model']}…", 0.0);
+                }
                 $this->client = $this->buildClient($to);
             }
         }

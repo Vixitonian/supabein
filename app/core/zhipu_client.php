@@ -44,15 +44,26 @@ class ZhipuClient
         return $this->lastRawText;
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    // job 218 (task #198): a single generateJson*() call can silently retry
+    // up to 4 times inside call() below -- each its own full HTTP round trip,
+    // some with a backoff sleep on top -- while the outer pipeline stage that
+    // called it (e.g. "Designing database schema…") has already logged its
+    // one "start" event and won't log anything else until this WHOLE call
+    // finally returns or exhausts its retries. Live-caught: a schema stage
+    // that took 6m43s against a normal 20-55s, entirely invisible to the
+    // live progress UI even though the retries themselves were the system
+    // correctly recovering, not something actually stuck. $onRetry is
+    // optional and additive -- every existing caller that doesn't pass it
+    // behaves exactly as before.
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
             ['role' => 'user',   'content' => $userPrompt],
-        ], $jsonMode);
+        ], $jsonMode, $onRetry);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {
@@ -63,10 +74,10 @@ class ZhipuClient
             ];
         }
         $messages[] = ['role' => 'user', 'content' => $userPrompt];
-        return $this->call($messages, $jsonMode);
+        return $this->call($messages, $jsonMode, $onRetry);
     }
 
-    private function call(array $messages, bool $jsonMode = true): array
+    private function call(array $messages, bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $probeKey  = 'zhipu:' . $this->model;
         $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);
@@ -132,12 +143,14 @@ class ZhipuClient
                     if ($corrected > 0 && $corrected < $maxTokens) {
                         $maxTokens = $corrected;
                         MaxTokensProbe::remember($probeKey, $maxTokens);
+                        if ($onRetry) $onRetry($attempt, 4, 'Adjusting token budget and retrying…', 0.0);
                         continue;
                     }
                 }
                 if (($httpCode >= 500 || $httpCode === 429) && $attempt < 4) {
                     $retryAfter = isset($responseHeaders['retry-after']) ? (float)$responseHeaders['retry-after'] : null;
                     $wait = $retryAfter !== null ? min(60.0, max(1.0, $retryAfter)) : ($attempt * 2);
+                    if ($onRetry) $onRetry($attempt, 4, ($httpCode === 429 ? 'Rate limited by the AI provider' : 'AI provider server error') . " — retrying in {$wait}s…", $wait);
                     sleep((int)ceil($wait));
                     continue;
                 }
@@ -178,6 +191,7 @@ class ZhipuClient
                 if ($attempt < 4 && $maxTokens < 200000) {
                     $maxTokens = min(200000, $maxTokens * 2);
                     MaxTokensProbe::remember($probeKey, $maxTokens);
+                    if ($onRetry) $onRetry($attempt, 4, 'Response was cut off — retrying with more room…', 0.0);
                     continue;
                 }
                 if ($text === null || trim($text) === '') {

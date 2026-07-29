@@ -36,15 +36,19 @@ class DeepSeekClient
         return $this->lastRawText;
     }
 
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    // See ZhipuClient's matching comment (task #198) -- $onRetry is optional
+    // and additive, surfacing this client's own internal retry loop to
+    // whichever pipeline stage called it, instead of leaving the live
+    // progress UI silent for however long the retries take.
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
             ['role' => 'user',   'content' => $userPrompt],
-        ], $jsonMode);
+        ], $jsonMode, $onRetry);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {
@@ -55,10 +59,10 @@ class DeepSeekClient
             ];
         }
         $messages[] = ['role' => 'user', 'content' => $userPrompt];
-        return $this->call($messages, $jsonMode);
+        return $this->call($messages, $jsonMode, $onRetry);
     }
 
-    private function call(array $messages, bool $jsonMode = true): array
+    private function call(array $messages, bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $probeKey  = 'deepseek:' . $this->model;
         $maxTokens = MaxTokensProbe::initial($probeKey, self::MAX_TOKENS_DEFAULT);
@@ -129,12 +133,14 @@ class DeepSeekClient
                     if ($corrected !== null) {
                         $maxTokens = $corrected;
                         MaxTokensProbe::remember($probeKey, $maxTokens);
+                        if ($onRetry) $onRetry($attempt, 4, 'Adjusting token budget and retrying…', 0.0);
                         continue;
                     }
                 }
                 if (($httpCode >= 500 || $httpCode === 429) && $attempt < 4) {
                     $retryAfter = isset($responseHeaders['retry-after']) ? (float)$responseHeaders['retry-after'] : null;
                     $wait = $retryAfter !== null ? min(60.0, max(1.0, $retryAfter)) : ($attempt * 2);
+                    if ($onRetry) $onRetry($attempt, 4, ($httpCode === 429 ? 'Rate limited by the AI provider' : 'AI provider server error') . " — retrying in {$wait}s…", $wait);
                     sleep((int)ceil($wait));
                     continue;
                 }
@@ -170,6 +176,7 @@ class DeepSeekClient
                 if ($attempt < 4 && $maxTokens < 200000) {
                     $maxTokens = min(200000, $maxTokens * 2);
                     MaxTokensProbe::remember($probeKey, $maxTokens);
+                    if ($onRetry) $onRetry($attempt, 4, 'Response was cut off — retrying with more room…', 0.0);
                     continue;
                 }
                 throw new \RuntimeException('DeepSeek output was cut off (too long) even at the model\'s ceiling. Try a simpler description or a different model.');

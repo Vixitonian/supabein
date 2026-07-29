@@ -55,15 +55,19 @@ class GroqClient
      *   Deliberate degrade: this client is typically reached deep in the
      *   fallback chain, and dropping an image there beats failing outright.
      */
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    // See ZhipuClient's matching comment (task #198) -- $onRetry is optional
+    // and additive, surfacing this client's own internal retry loop to
+    // whichever pipeline stage called it, instead of leaving the live
+    // progress UI silent for however long the retries take.
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         return $this->call([
             ['role' => 'system', 'content' => $systemPrompt],
             ['role' => 'user',   'content' => $userPrompt],
-        ], $jsonMode);
+        ], $jsonMode, $onRetry);
     }
 
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
         foreach ($history as $turn) {
@@ -74,10 +78,10 @@ class GroqClient
             ];
         }
         $messages[] = ['role' => 'user', 'content' => $userPrompt];
-        return $this->call($messages, $jsonMode);
+        return $this->call($messages, $jsonMode, $onRetry);
     }
 
-    private function call(array $messages, bool $jsonMode = true): array
+    private function call(array $messages, bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $probeKey  = 'groq:' . $this->model;
 
@@ -154,6 +158,7 @@ class GroqClient
                     if ($corrected !== null) {
                         $maxTokens = $corrected;
                         MaxTokensProbe::remember($probeKey, $maxTokens);
+                        if ($onRetry) $onRetry($attempt, 4, 'Adjusting token budget and retrying…', 0.0);
                         continue;
                     }
                 }
@@ -166,6 +171,7 @@ class GroqClient
                 // here instead, or it surfaces as a raw 502 straight to
                 // whatever called this (e.g. Catalog::callAiAssistant()).
                 if ($attempt < 4 && stripos($msg, 'failed to validate json') !== false) {
+                    if ($onRetry) $onRetry($attempt, 4, 'Response failed JSON validation — retrying…', 0.0);
                     continue;
                 }
                 // A daily quota 429 (TPD/RPD -- "tokens per day"/"requests
@@ -193,6 +199,7 @@ class GroqClient
                     } else {
                         $wait = $attempt * 2;
                     }
+                    if ($onRetry) $onRetry($attempt, 4, ($httpCode === 429 ? 'Rate limited by the AI provider' : 'AI provider server error') . " — retrying in {$wait}s…", $wait);
                     sleep((int)ceil($wait));
                     continue;
                 }
@@ -229,6 +236,7 @@ class GroqClient
                 if ($attempt < 4 && $maxTokens < 200000) {
                     $maxTokens = min(200000, $maxTokens * 2);
                     MaxTokensProbe::remember($probeKey, $maxTokens);
+                    if ($onRetry) $onRetry($attempt, 4, 'Response was cut off — retrying with more room…', 0.0);
                     continue;
                 }
                 throw new \RuntimeException('Groq output was cut off (too long) even at the model\'s ceiling. Try a simpler description or use Gemini for large builds.');

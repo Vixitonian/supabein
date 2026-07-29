@@ -48,9 +48,9 @@ class GeminiClient
      *   inventing plausible-looking placeholders. Gemini accepts both image/*
      *   and application/pdf as inlineData.
      */
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
-        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments, $jsonMode);
+        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments, $jsonMode, $onRetry);
     }
 
     /**
@@ -63,7 +63,11 @@ class GeminiClient
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true): array
+    // See ZhipuClient's matching comment (task #198) -- $onRetry is optional
+    // and additive, surfacing this client's own internal retry loop to
+    // whichever pipeline stage called it, instead of leaving the live
+    // progress UI silent for however long the retries take.
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $url  = sprintf(self::ENDPOINT, urlencode($this->model));
         $url .= '?key=' . urlencode($this->apiKey);
@@ -123,7 +127,9 @@ class GeminiClient
             // and burns its whole turn budget on rate-limit errors in
             // milliseconds instead of ever getting a real generation through.
             if (($httpCode >= 500 || $httpCode === 429) && $attempt < 4) {
-                sleep($attempt * 2);
+                $wait = $attempt * 2;
+                if ($onRetry) $onRetry($attempt, 4, ($httpCode === 429 ? 'Rate limited by the AI provider' : 'AI provider server error') . " — retrying in {$wait}s…", (float)$wait);
+                sleep($wait);
                 continue;
             }
             throw new \RuntimeException('Gemini API error: ' . $msg);

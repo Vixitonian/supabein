@@ -51,9 +51,15 @@ class AnthropicClient
      *   rather than inventing plausible-looking placeholders. Claude accepts
      *   images as 'image' blocks and PDFs natively as 'document' blocks.
      */
-    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = []): array
+    // $jsonMode is accepted (unused) purely for positional-call parity with
+    // every other client -- FallbackAiClient's call() closure passes it as
+    // the same 4th positional argument to whichever candidate is currently
+    // active regardless of provider, so this must exist at the same
+    // position $onRetry now occupies as the 5th, or a bool would land on
+    // $onRetry's ?callable-typed slot and throw a TypeError.
+    public function generateJson(string $systemPrompt, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
-        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments);
+        return $this->generateJsonWithHistory($systemPrompt, [], $userPrompt, $attachments, $jsonMode, $onRetry);
     }
 
     /**
@@ -66,7 +72,11 @@ class AnthropicClient
      *
      * @throws \RuntimeException on network error, HTTP error, or non-JSON response
      */
-    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = []): array
+    // See ZhipuClient's matching comment (task #198) -- $onRetry is optional
+    // and additive, surfacing this client's own internal retry loop to
+    // whichever pipeline stage called it, instead of leaving the live
+    // progress UI silent for however long the retries take.
+    public function generateJsonWithHistory(string $systemPrompt, array $history, string $userPrompt, array $attachments = [], bool $jsonMode = true, ?callable $onRetry = null): array
     {
         $messages = [];
         foreach ($history as $turn) {
@@ -136,6 +146,7 @@ class AnthropicClient
                     if ($corrected !== null) {
                         $maxTokens = $corrected;
                         MaxTokensProbe::remember($probeKey, $maxTokens);
+                        if ($onRetry) $onRetry($attempt, 3, 'Adjusting token budget and retrying…', 0.0);
                         continue;
                     }
                 }
@@ -146,7 +157,9 @@ class AnthropicClient
                 // rate-limit errors in milliseconds instead of ever getting a
                 // real generation through.
                 if (($httpCode >= 500 || $httpCode === 429) && $attempt < 3) {
-                    sleep($attempt * 2);
+                    $wait = $attempt * 2;
+                    if ($onRetry) $onRetry($attempt, 3, ($httpCode === 429 ? 'Rate limited by the AI provider' : 'AI provider server error') . " — retrying in {$wait}s…", (float)$wait);
+                    sleep($wait);
                     continue;
                 }
                 throw new \RuntimeException('Anthropic API error: ' . $msg);
@@ -191,6 +204,7 @@ class AnthropicClient
                 if ($attempt < 3 && $maxTokens < 200000) {
                     $maxTokens = min(200000, $maxTokens * 2);
                     MaxTokensProbe::remember($probeKey, $maxTokens);
+                    if ($onRetry) $onRetry($attempt, 3, 'Response was cut off — retrying with more room…', 0.0);
                     continue;
                 }
                 throw new \RuntimeException('Anthropic output was cut off (too long) even at the model\'s ceiling. Try a simpler description or a different model.');

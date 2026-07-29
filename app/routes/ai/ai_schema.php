@@ -479,16 +479,16 @@ function ai_validate_intent(array $intent): ?string
  *   ['attachments' => [{media_type, data_base64}, ...], 'context' => string]
  *   — see ai_prepare_attachments_for_ai(). Defaults to none.
  */
-function ai_generate_intent(object $client, string $prompt, array $history = [], array $refs = []): array
+function ai_generate_intent(object $client, string $prompt, array $history = [], array $refs = [], ?callable $onRetry = null): array
 {
     $attachments = $refs['attachments'] ?? [];
     $promptWithCtx = $prompt . (($refs['context'] ?? '') !== '' ? "\n\n" . $refs['context'] : '');
     $systemPrompt = AI_INTENT_PROMPT . ($attachments || !empty($refs['context']) ? ai_attachment_instruction_note() : '');
 
-    $call = static function (string $user) use ($client, $history, $attachments, $systemPrompt) {
+    $call = static function (string $user) use ($client, $history, $attachments, $systemPrompt, $onRetry) {
         return $history
-            ? $client->generateJsonWithHistory($systemPrompt, $history, $user, $attachments)
-            : $client->generateJson($systemPrompt, $user, $attachments);
+            ? $client->generateJsonWithHistory($systemPrompt, $history, $user, $attachments, true, $onRetry)
+            : $client->generateJson($systemPrompt, $user, $attachments, true, $onRetry);
     };
 
     $intent = $call($promptWithCtx);
@@ -639,7 +639,7 @@ function ai_schema_from_db(int $projectId, \SupaBein\Catalog $catalog): array
 }
 
 /** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
-function ai_generate_design_brief(object $client, string $prompt, array $schemaPlan, array $refs = []): array
+function ai_generate_design_brief(object $client, string $prompt, array $schemaPlan, array $refs = [], ?callable $onRetry = null): array
 {
     $attachments = $refs['attachments'] ?? [];
     $schemaCtx = ai_schema_to_context($schemaPlan);
@@ -647,7 +647,7 @@ function ai_generate_design_brief(object $client, string $prompt, array $schemaP
                . (!empty($refs['context']) ? "\n\n" . $refs['context'] : '');
     $systemPrompt = AI_DESIGN_BRIEF_PROMPT . ($attachments || !empty($refs['context']) ? ai_attachment_instruction_note() : '');
     try {
-        $brief = $client->generateJson($systemPrompt, $userMsg, $attachments);
+        $brief = $client->generateJson($systemPrompt, $userMsg, $attachments, true, $onRetry);
     } catch (\Throwable) {
         return [];
     }
@@ -700,7 +700,8 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
     }
     if (!empty($refs['context'])) $schemaUserMsg .= "\n\n" . $refs['context'];
     $_t0 = microtime(true);
-    $schemaPlan = $client->generateJsonWithHistory($schemaSystemPrompt, $history, $schemaUserMsg, $attachments);
+    $schemaPlan = $client->generateJsonWithHistory($schemaSystemPrompt, $history, $schemaUserMsg, $attachments, true,
+        ai_agent_retry_reporter($report, 'schema', 'Designing database schema…'));
     $aiTrace[] = ['stage' => 'schema_pass_1', 'system' => $schemaSystemPrompt, 'history' => $history, 'user_msg' => $schemaUserMsg, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     $schemaPlan['frontend'] = ['files' => []];
     $schemaPlan = ai_sanitize_plan($schemaPlan);
@@ -714,7 +715,8 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
             . "\n\nYour previous schema was rejected for this reason:\n  " . $validationError
             . "\nReturn a corrected schema that fixes exactly this problem.";
         $_t0 = microtime(true);
-        $schemaPlan = $client->generateJsonWithHistory($schemaSystemPrompt, $history, $retryPrompt, $attachments);
+        $schemaPlan = $client->generateJsonWithHistory($schemaSystemPrompt, $history, $retryPrompt, $attachments, true,
+            ai_agent_retry_reporter($report, 'schema', 'Refining schema…'));
         $aiTrace[] = ['stage' => 'schema_retry', 'system' => $schemaSystemPrompt, 'history' => $history, 'user_msg' => $retryPrompt, 'response' => $schemaPlan, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => true, 'error' => $validationError];
         $schemaPlan['frontend'] = ['files' => []];
         $schemaPlan = ai_sanitize_plan($schemaPlan);
@@ -729,7 +731,8 @@ function ai_run_build_schema_design(string $prompt, array $history, ?array $appr
     // ── Stage 2: design brief (best-effort) ───────────────────────────────
     $report(['stage' => 'design', 'status' => 'start', 'label' => 'Choosing a visual design…']);
     $_t0   = microtime(true);
-    $brief = ai_generate_design_brief($client, $prompt, $schemaPlan, $refs);
+    $brief = ai_generate_design_brief($client, $prompt, $schemaPlan, $refs,
+        ai_agent_retry_reporter($report, 'design', 'Choosing a visual design…'));
     if (!empty($brief)) {
         $aiTrace[] = ['stage' => 'design_brief', 'system' => AI_DESIGN_BRIEF_PROMPT, 'history' => [], 'user_msg' => "App description: {$prompt}\n\nSchema:\n" . ai_schema_to_context($schemaPlan), 'response' => $brief, 'tokens' => $client->getLastUsage(), 'ms' => (int)((microtime(true) - $_t0) * 1000), 'retry' => false];
     }
