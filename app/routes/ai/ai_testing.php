@@ -1688,6 +1688,30 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
                 $failingStories
             ));
 
+        // job 211 (task #194): a failure detail literally stating "remained
+        // at 0 instead of decrementing to -1" was enough information to spot
+        // the bug -- a `if (this.currentCount <= 0) return` guard the
+        // decrement handler itself had, silently no-op'ing the exact click
+        // the story was testing -- yet 2 full autofix attempts each rewrote
+        // the file with that identical guard still in place, never once
+        // identifying it as the cause. This failure shape (a value that
+        // should have changed after an action didn't) generalizes past
+        // counters to any stateful mutation -- inventory, balances, health,
+        // quantities, toggles -- so the hint is generic, not counter-specific.
+        $hasUnchangedValueFailure = (bool)array_filter(
+            $failingStories,
+            fn($s) => preg_match('/\b(remained|stayed|unchanged|did not change|didn\'t change|no change)\b/i', (string)($s['detail'] ?? ''))
+        );
+        if ($hasUnchangedValueFailure) {
+            $fixPrompt .= "\n\nAt least one failure above describes a value that should have changed after an "
+                . 'action but did not. Before rewriting anything, read the actual handler for that action in full '
+                . 'and look specifically for an early-return / guard condition (a bounds check, a validation gate, '
+                . "an `if (...) return` before the real logic runs) that could be silently blocking it. If the "
+                . "failure detail states what the value SHOULD have become, and a guard's condition would prevent "
+                . 'reaching exactly that outcome, that guard is very likely the actual bug — fix or remove it '
+                . 'specifically, rather than regenerating the surrounding code structure and leaving it in place.';
+        }
+
         $combinedCtx = trim($intentCtx . ($priorAttemptContext ? "\n\n{$priorAttemptContext}" : ''));
         $editResult  = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true, null, $combinedCtx ? ['context' => $combinedCtx] : []);
         $plan       = $editResult['plan'] ?? [];

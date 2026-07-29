@@ -386,6 +386,15 @@ Absolute paths like /core/config.js break the site. No frameworks, no npm, no bu
 index.html still needs <script src="./core/api.js"> and <script src="./core/router.js"> tags in that
 load order — the platform writes the files to disk, you just need to reference them normally.
 
+Do NOT read_file or read_files core/router.js, core/api.js, core/errors.js, or features/auth/auth.js
+either — not just "do not write" them. They are identical on every project and force-injected at
+deploy time regardless of what's on disk, so their content can never be the bug and never varies from
+what's already documented here: router.defineRoute/navigate/onHashChange above, api.list/get/create/
+update/remove in RULE 6 below, errors.js's automatic capture (nothing to call), auth.js's exported
+functions wherever this project's own auth rules are documented. Reading any of them spends a full
+turn to learn nothing you don't already have — live-observed burning 4-5 wasted turns doing exactly
+this on a bug report that had nothing to do with routing, auth, or error reporting.
+
 ═══════════════════════════════════════════════════════
 STYLING
 ═══════════════════════════════════════════════════════
