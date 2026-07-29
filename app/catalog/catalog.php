@@ -612,6 +612,43 @@ class Catalog
         return self::castRow($stmt->fetch() ?: null, ['id', 'allowed']);
     }
 
+    /**
+     * Mirror image of backfillAuthenticatedAccess() for the opposite, structurally
+     * worse gap: a project with zero PASSWORD columns anywhere can never issue a
+     * login token, so "authenticated" can never actually be reached by a real
+     * request -- every real request is anon. On such a project, a policy that
+     * leaves authenticated allowed while anon is denied (explicitly false, or
+     * missing) is unreachable-by-design, not a deliberate access decision -- it
+     * blocks every real user, 100% of the time.
+     *
+     * Live-caught (job 219): an auto-fix created a new table to satisfy a
+     * frontend reference and wrote anon INSERT=false / authenticated INSERT=true
+     * on a login-less todo app, so every "add task" 403'd immediately. Only fires
+     * when the project truly has no PASSWORD column anywhere -- a project WITH
+     * real auth keeps an explicit anon=false as-is, same reasoning as
+     * backfillAuthenticatedAccess's own docblock.
+     */
+    public function reconcileNoAuthAnonAccess(int $projectId, int $tableId): void
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM project_columns pc
+             JOIN project_tables pt ON pt.id = pc.project_table_id
+             WHERE pt.project_id = ? AND UPPER(pc.data_type) = 'PASSWORD'"
+        );
+        $stmt->execute([$projectId]);
+        if ((int)$stmt->fetchColumn() > 0) return; // real auth exists -- anon=false can be deliberate here
+
+        $byRole = [];
+        foreach ($this->listPolicies($tableId) as $p) $byRole[$p['api_role']][$p['operation']] = $p;
+
+        foreach ($byRole['authenticated'] ?? [] as $op => $p) {
+            if (!$p['allowed']) continue;
+            $anon = $byRole['anon'][$op] ?? null;
+            if ($anon !== null && $anon['allowed']) continue; // anon already fine
+            $this->upsertPolicy($tableId, 'anon', $op, true, $p['constraint_sql']);
+        }
+    }
+
     // ─── BLogic (tenant business logic, executed by app/core/blogic.php) ──────
 
     public function createBlogic(int $tableId, string $triggerType, ?string $actionName, string $name, ?string $description, string $source, ?array $contextSpec): array

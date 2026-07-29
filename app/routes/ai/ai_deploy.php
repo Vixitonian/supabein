@@ -504,6 +504,7 @@ function ai_execute_build(array $plan, int $userId): array
             }
         }
         $catalog->backfillAuthenticatedAccess($table['id']);
+        $catalog->reconcileNoAuthAnonAccess($projectId, $table['id']);
 
         $partial['tables'][] = ['name' => $tableName, 'columns' => count($columns)];
     }
@@ -644,6 +645,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
                 } catch (\Throwable $e) {}
             }
             $catalog->backfillAuthenticatedAccess($table['id']);
+            $catalog->reconcileNoAuthAnonAccess($projectId, $table['id']);
             $addedTables[] = $tableDef['name'];
         } catch (\Throwable $e) {
             sb_log('ai_edit', 'add_table failed: ' . $e->getMessage(), ['table' => $tableDef['name']]);
@@ -697,6 +699,7 @@ function ai_execute_edit(array $delta, int $projectId, int $userId): array
     }
     foreach (array_keys($policyTouchedTableIds) as $touchedTableId) {
         $catalog->backfillAuthenticatedAccess((int)$touchedTableId);
+        $catalog->reconcileNoAuthAnonAccess($projectId, (int)$touchedTableId);
     }
 
     $seeded = [];

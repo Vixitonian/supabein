@@ -1748,6 +1748,37 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
                 . 'specific line — do not regenerate the surrounding code structure and leave the real problem in place.';
         }
 
+        // job 219: a story failure literally surfacing "Table not found" (the
+        // platform's own 404 for a logical table name the schema doesn't have)
+        // was "fixed" by autofix creating a brand-new table via add_tables to
+        // match the frontend's (wrong) name, rather than correcting the
+        // frontend to call the table that already existed. That left two
+        // tables for one concept (the original orphaned), and the invented
+        // table's own policies then denied anon INSERT while allowing only
+        // authenticated — which 403'd every real request, since the project
+        // had no login system and 100% of its traffic is anon. A "Table not
+        // found" failure is almost always a NAMING MISMATCH to reconcile, not
+        // a genuinely missing table — so hand the fix agent the real live
+        // schema and tell it to check there first.
+        $hasTableNotFoundFailure = (bool)array_filter(
+            $failingStories,
+            fn($s) => stripos((string)($s['detail'] ?? ''), 'table not found') !== false
+        );
+        if ($hasTableNotFoundFailure) {
+            $liveSchemaCtx = ai_schema_to_context(ai_schema_from_db($projectId, $catalog));
+            $fixPrompt .= "\n\nAt least one failure above is a \"Table not found\" 404 — the frontend called a "
+                . 'table name the schema does not have. This is almost always a NAMING MISMATCH, not a genuinely '
+                . 'missing table: check the actual current schema below for a table that already represents the '
+                . "same data under a different name (e.g. a todo/task app calling 'todos' when the schema already "
+                . "has 'tasks'). If a matching table exists, fix the FRONTEND CODE to call the correct existing "
+                . 'table/column names — do NOT add a new table via add_tables to paper over the mismatch. That '
+                . "leaves the real table orphaned, and if the new table's policies differ from what the app "
+                . 'actually needs (e.g. anon denied an operation that only authenticated is allowed), it can make '
+                . 'every real request start failing instead, since most apps like this have no login system and '
+                . 'all traffic is anon. Only use add_tables if the data genuinely does not exist under any name '
+                . "below.\n\nCurrent live schema:\n{$liveSchemaCtx}";
+        }
+
         $combinedCtx = trim($intentCtx . ($priorAttemptContext ? "\n\n{$priorAttemptContext}" : ''));
         $editResult  = ai_run_edit_generation($projectId, $fixPrompt, [], $client, $catalog, $config, $report, true, null, $combinedCtx ? ['context' => $combinedCtx] : []);
         $plan       = $editResult['plan'] ?? [];
