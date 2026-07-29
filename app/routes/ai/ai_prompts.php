@@ -1320,6 +1320,13 @@ App.jsx is the root component — the platform's main.jsx (never written by you)
 Import between files with normal ES `import`/`export` — every file is its own module scope, so
 two files can never collide on a name the way two <script> tags sharing one global scope can.
 There is no "declare it twice and the whole page goes blank" failure class here at all.
+ALWAYS `export default function Name() {...}` and ALWAYS import it as a plain default import
+(`import Name from './Name.jsx'`) — never `export { Name }` / `import { Name } from ...` for a
+component, and never mix the two styles for the same file. A default/named mismatch compiles fine
+(esbuild can't catch it) but crashes at render with "Element type is invalid... you likely forgot
+to export your component from the file it's defined in, or mixed up default and named imports" —
+if you ever see that error, this is the first thing to check: open the named file and the file
+importing it, and confirm both sides use `export default` / plain default import.
 
 ═══════════════════════════════════════════════════════
 RULE 2B — FUNCTION COMPONENTS + HOOKS ONLY, NEVER `this`

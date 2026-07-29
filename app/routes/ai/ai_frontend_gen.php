@@ -158,7 +158,7 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
     // nothing servable at all until this succeeds (there's no "each file is
     // independently loadable" story for JSX the way there is for plain JS).
     if ($frontendStack === 'react') {
-        $build = ai_react_build_bundle($frontendFiles, $config, $authInfo, $projectTitle);
+        $build = ai_react_build_bundle($frontendFiles, $config, $authInfo, $projectTitle, true);
         if (!$build['ok']) {
             return ['ok' => false, 'error' => $build['error'], 'console_errors' => [$build['error']],
                 'next_step' => 'The build itself failed — this is a real JSX/import error, not a runtime bug. ' .

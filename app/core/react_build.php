@@ -393,7 +393,7 @@ function ai_react_write_build_file(string $buildDir, string $relPath, string $co
  * expects from the vanilla pipeline, so no other part of deploy needs to
  * change to accept them.
  */
-function ai_react_build_bundle(array $agentFiles, array $config, ?array $authInfo = null, string $projectTitle = 'App'): array
+function ai_react_build_bundle(array $agentFiles, array $config, ?array $authInfo = null, string $projectTitle = 'App', bool $devMode = false): array
 {
     ['runtime' => $runtimeDir, 'nodeBin' => $nodeBinDir] = ai_react_runtime_paths($config);
     $esbuildBin = $runtimeDir . '/node_modules/.bin/esbuild';
@@ -429,10 +429,24 @@ function ai_react_build_bundle(array $agentFiles, array $config, ?array $authInf
             }
         }
 
+        // React's own production build (the one esbuild picks by default,
+        // since it defines process.env.NODE_ENV as "production" when nothing
+        // else does) replaces every runtime error's real message with a bare
+        // numeric code ("Minified React error #130") and a decoder-site link
+        // — confirmed live: that's genuinely all the agent had to go on while
+        // debugging a real invalid-element-type bug, and it burned its whole
+        // turn budget rewriting unrelated files by guesswork because of it.
+        // The dev build's errors instead name the actual problem, e.g. "You
+        // likely forgot to export your component... Check the render method
+        // of `X`." — for smoke_test's own throwaway preview (never what a
+        // real deploy serves) that's worth the larger, unminified bundle.
         $esbuildArg = escapeshellarg($esbuildBin);
         $dirArg     = escapeshellarg($buildDir);
+        $envFlag    = $devMode
+            ? '--define:process.env.NODE_ENV=\'"development"\''
+            : '--minify --define:process.env.NODE_ENV=\'"production"\'';
         $cmd = "cd {$dirArg} && PATH=" . escapeshellarg($nodeBinDir) . ":\$PATH {$esbuildArg} main.jsx "
-             . '--bundle --minify --outfile=bundle.js --loader:.jsx=jsx --jsx=automatic 2>&1';
+             . "--bundle {$envFlag} --outfile=bundle.js --loader:.jsx=jsx --jsx=automatic 2>&1";
         exec($cmd, $output, $returnCode);
 
         $bundlePath = $buildDir . '/bundle.js';
