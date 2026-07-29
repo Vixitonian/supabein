@@ -400,6 +400,27 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
         }
     }
 
+    // ── Dangling <script src> — index.html links a file that was never written ──
+    // The opposite direction of the module/route check below (which catches a
+    // written file that ISN'T loaded); this catches a LOADED path that was
+    // never written at all. Live-caught (job 218, "Fun Facts App"): index.html
+    // linked ./features/content/detail.js, which the frontend agent never got
+    // around to writing — nothing detected this until deploy's own (separate,
+    // more expensive) smoke check caught it and refused to publish, with no
+    // corrective retry ever attempted. core/router.js, core/api.js,
+    // core/errors.js and features/auth/auth.js are injected by the platform
+    // at deploy time (see ai_inject_canonical_frontend_files()) so they never
+    // appear in $frontendFiles here — excluded, not a bug.
+    $canonicalScriptPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
+    foreach (array_unique($scriptSrcs) as $src) {
+        if (in_array($src, $canonicalScriptPaths, true)) continue;
+        if (!isset($byPath[$src])) {
+            $findings[] = ai_validator_finding('error', 'script',
+                "index.html loads \"{$src}\" via <script src>, but that file was never written",
+                'This will 404 in the browser the moment the page loads, and deploy\'s own smoke check will refuse to publish the build at all until this is fixed.');
+        }
+    }
+
     // ── Route ↔ handler existence, duplicate routes ────────────────────────
     foreach ($badRouteDefs as $brd) {
         $findings[] = ai_validator_finding('error', 'route',
