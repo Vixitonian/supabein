@@ -54,7 +54,7 @@ function ai_generate_build_plan(object $client, string $prompt, ?array $approved
 // "Review" build flow can run this as its own job, after the user has
 // confirmed the schema/design in the previous stage.
 /** @param array $refs See ai_generate_intent()'s doc comment for the shape. */
-function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true, array $refs = [], ?array $approvedIntent = null): array
+function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, bool $validate = true, array $refs = [], ?array $approvedIntent = null, string $frontendStack = 'vanilla'): array
 {
     // ── Stage 3: frontend — agentic tool-calling loop (search/read/write/
     // syntax-check), same machinery the edit agent uses, instead of a single
@@ -63,11 +63,12 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     // wrote earlier before extending it, instead of hoping a one-shot
     // multi-file JSON blob comes back internally consistent.
     $report(['stage' => 'frontend', 'status' => 'start', 'label' => 'Generating frontend code…']);
-    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report, $refs, $approvedIntent);
+    $frontendResult = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt, $client, $config, $report, $refs, $approvedIntent, $frontendStack);
     $aiTrace   = $frontendResult['aiTrace'];
     $feUsage   = $frontendResult['usage'];
 
     $plan = $schemaPlan;
+    $plan['frontend_stack'] = $frontendStack;
     $plan['frontend'] = ['files' => $frontendResult['files'] ?? []];
     foreach ($plan['frontend']['files'] as &$file) {
         $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
@@ -79,7 +80,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
     $validation = [];
     if ($validate) {
         $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
-        $validation = ai_validator_check_project($plan, $plan['frontend']['files']);
+        $validation = ai_validator_check_project($plan, $plan['frontend']['files'], $frontendStack);
 
         // job 218 ("Fun Facts App"): the validator correctly found 11 confirmed
         // schema/frontend mismatches (e.g. "api.list('content'), but no 'content'
@@ -98,7 +99,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
             $fixNote = "\n\nYour previous attempt at this frontend had these CONFIRMED problems — fix every one "
                 . "of them, using only the exact table/column names in the schema above:\n"
                 . implode("\n", array_map(fn($f) => '- ' . $f['message'] . (!empty($f['detail']) ? ' (' . $f['detail'] . ')' : ''), $errors));
-            $retry = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt . $fixNote, $client, $config, $report, $refs, $approvedIntent);
+            $retry = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt . $fixNote, $client, $config, $report, $refs, $approvedIntent, $frontendStack);
             $aiTrace = array_merge($aiTrace, $retry['aiTrace'] ?? []);
             foreach ($feUsage as $k => $v) $feUsage[$k] = $v + (int)($retry['usage'][$k] ?? 0);
 
@@ -107,7 +108,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
                 $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
             }
             unset($file);
-            $validation = ai_validator_check_project($plan, $plan['frontend']['files']);
+            $validation = ai_validator_check_project($plan, $plan['frontend']['files'], $frontendStack);
         }
 
         if (array_filter($validation, fn($f) => $f['severity'] === 'error')) {
@@ -141,7 +142,7 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
 // this checks the app doesn't crash when the backend is unavailable, not
 // that seeded data round-trips; a real end-to-end data check is what the
 // separate browser-test-agent is for, post-deploy.
-function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authInfo = null): array
+function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authInfo = null, string $frontendStack = 'vanilla', string $projectTitle = 'App'): array
 {
     $token = $config['BROWSERLESS_TOKEN'] ?? '';
     if (!$token) {
@@ -150,6 +151,20 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
     $sitesPath = rtrim((string)($config['SITES_PATH'] ?? ''), '/');
     if ($sitesPath === '') {
         return ['ok' => null, 'error' => 'SITES_PATH not configured on this server — smoke_test is unavailable'];
+    }
+
+    // For react, bundle FIRST — a real esbuild build error is a stronger,
+    // earlier signal than anything a browser could report, and there is
+    // nothing servable at all until this succeeds (there's no "each file is
+    // independently loadable" story for JSX the way there is for plain JS).
+    if ($frontendStack === 'react') {
+        $build = ai_react_build_bundle($frontendFiles, $config, $authInfo, $projectTitle);
+        if (!$build['ok']) {
+            return ['ok' => false, 'error' => $build['error'], 'console_errors' => [$build['error']],
+                'next_step' => 'The build itself failed — this is a real JSX/import error, not a runtime bug. ' .
+                    'Read the esbuild output above, fix the file it names, then call smoke_test again.'];
+        }
+        $frontendFiles = $build['files'];
     }
 
     // Real deployed sites are only servable at all through a narrow path
@@ -167,16 +182,21 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
     if (!mkdir($previewDir, 0755, true)) {
         return ['ok' => null, 'error' => 'Cannot create preview directory'];
     }
+    // See app/core/react_build.php's doc comment: a mkdir() immediately
+    // followed by file_put_contents() into the directory it just created can
+    // silently fail (stale PHP stat-cache entry for the just-created path) —
+    // confirmed reproducible, fixed by clearing the cache between the two.
+    clearstatcache();
 
     try {
-        $files = ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
+        $files = $frontendStack === 'react' ? $frontendFiles : ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
         foreach ($files as $fileDef) {
             $relPath = ltrim((string)($fileDef['path'] ?? ''), '/');
             if ($relPath === '') continue;
             $fullPath = \SupaBein\Deploy::normalizePath($previewDir . '/' . $relPath);
             if (!str_starts_with($fullPath, $previewDir . '/')) continue; // unsafe path — same traversal guard as a real deploy, skip silently
             $parentDir = dirname($fullPath);
-            if (!is_dir($parentDir)) mkdir($parentDir, 0755, true);
+            if (!is_dir($parentDir)) { mkdir($parentDir, 0755, true); clearstatcache(); }
             $rawContent = (string)($fileDef['content'] ?? '');
             if ($relPath === 'index.html') $rawContent = ai_ensure_error_script_tag($rawContent);
             $content = str_replace('__SB_PID__', '0', $rawContent);
@@ -296,11 +316,12 @@ function ai_smoke_test_next_step_hint(?array $failingLocation): string
  *   6/6 post-deploy story tests on its first pass for exactly this reason.
  */
 function ai_run_build_frontend_agentic(
-    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, array $refs = [], ?array $approvedIntent = null
+    array $schemaPlan, array $designBrief, string $prompt, object $client, array $config, callable $report, array $refs = [], ?array $approvedIntent = null, string $frontendStack = 'vanilla'
 ): array {
     $briefCtx    = ai_brief_to_context($designBrief);
     $hasRefs     = !empty($refs['attachments']) || !empty($refs['context']);
-    $agentPrompt = ai_bind_auth_placeholders(AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT, $schemaPlan)
+    $basePrompt  = $frontendStack === 'react' ? AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT_REACT : AI_BUILD_FRONTEND_AGENT_SYSTEM_PROMPT;
+    $agentPrompt = ai_bind_auth_placeholders($basePrompt, $schemaPlan)
                  . ($hasRefs ? ai_attachment_instruction_note() : '');
     $schemaCtx   = ai_schema_to_context($schemaPlan);
     $intentCtx   = $approvedIntent ? ai_intent_to_context($approvedIntent, 'build the frontend to satisfy') : '';
@@ -526,7 +547,7 @@ function ai_run_build_frontend_agentic(
         // placeholder; this agent's own system prompt never advertises
         // check_policy, so it has no route to actually call it. validate_frontend
         // works fine here though — it only needs the schema plan, not a live DB.
-        $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan);
+        $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan, $frontendStack, (string)($schemaPlan['project_name'] ?? 'App'));
         if ($tool === 'smoke_test') {
             $writesSinceLastCheck = 0;
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;

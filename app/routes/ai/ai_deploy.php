@@ -68,9 +68,24 @@ function ai_deploy_files(
     array $frontendFiles,
     bool $mergeFromCurrent = false,
     bool $publishLive = true,
-    ?array $authInfo = null
+    ?array $authInfo = null,
+    string $frontendStack = 'vanilla'
 ): array {
-    $frontendFiles = ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
+    if ($frontendStack === 'react') {
+        // The agent's raw .jsx files are never deployed as-is — bundle them
+        // (with the platform's canonical React modules force-injected) into
+        // the same {index.html, bundle.js} shape the rest of this function
+        // already knows how to write, smoke-check, and publish.
+        $build = ai_react_build_bundle($frontendFiles, $config, $authInfo, (string)($project['name'] ?? 'App'));
+        if (!$build['ok']) {
+            $deploy = $catalog->createDeploy($siteId, 'ai-generated-' . date('Y-m-d'), 0);
+            $catalog->updateDeploy((int)$deploy['id'], 'failed');
+            return ['error' => 'React build failed: ' . $build['error'], 'deploy' => null];
+        }
+        $frontendFiles = $build['files'];
+    } else {
+        $frontendFiles = ai_inject_canonical_frontend_files($frontendFiles, $authInfo);
+    }
     $sitesPath = rtrim($config['SITES_PATH'], '/');
     $label     = 'ai-generated-' . date('Y-m-d');
 
@@ -422,11 +437,12 @@ function ai_execute_build(array $plan, int $userId): array
     $catalog = \SupaBein\Catalog::getInstance();
     $pdo     = \App::get('db');
 
-    $projectName = trim($plan['project_name']);
-    $partial     = ['project' => null, 'tables' => [], 'site' => null];
+    $projectName   = trim($plan['project_name']);
+    $frontendStack = ($plan['frontend_stack'] ?? 'vanilla') === 'react' ? 'react' : 'vanilla';
+    $partial       = ['project' => null, 'tables' => [], 'site' => null];
 
     try {
-        $project   = $catalog->createProject($userId, $projectName, '');
+        $project   = $catalog->createProject($userId, $projectName, '', $frontendStack);
         $projectId = (int)$project['id'];
         $serviceKey = make_service_key($projectId);
         $catalog->setServiceKey($projectId, $serviceKey);
@@ -551,7 +567,8 @@ function ai_execute_build(array $plan, int $userId): array
             $plan['frontend']['files'],
             false,
             false,
-            ai_detect_auth($plan)
+            ai_detect_auth($plan),
+            $frontendStack
         );
         if ($deployResult['error']) {
             // Previously only logged server-side (sb_log) and silently dropped

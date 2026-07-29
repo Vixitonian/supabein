@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS `projects` (
     `owner_user_id` INT UNSIGNED NOT NULL,
     `name`          VARCHAR(128) NOT NULL,
     `service_key`   TEXT DEFAULT NULL,
+    `frontend_stack` ENUM('vanilla','react') NOT NULL DEFAULT 'vanilla',
     `created_at`    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`owner_user_id`) REFERENCES `users`(`id`) ON DELETE CASCADE,
     UNIQUE KEY `uq_owner_name` (`owner_user_id`, `name`)
@@ -540,6 +541,9 @@ SET foreign_key_checks = 1;
 -- ALTER TABLE `projects`
 --   ADD COLUMN `anon_key`    TEXT DEFAULT NULL AFTER `name`,
 --   ADD COLUMN `service_key` TEXT DEFAULT NULL AFTER `anon_key`;
+--
+-- ALTER TABLE `projects`
+--   ADD COLUMN `frontend_stack` ENUM('vanilla','react') NOT NULL DEFAULT 'vanilla' AFTER `service_key`;
 --
 -- CREATE TABLE IF NOT EXISTS `password_reset_tokens` (
 --     `id`              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

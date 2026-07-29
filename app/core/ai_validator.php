@@ -330,7 +330,7 @@ function ai_validator_extract_literal_equalities(string $js, string $column): ar
  * seed-data check is a no-op in that case, everything else still runs).
  * $frontendFiles is [{path, content}, ...].
  */
-function ai_validator_check_project(array $schema, array $frontendFiles): array
+function ai_validator_check_project(array $schema, array $frontendFiles, string $frontendStack = 'vanilla'): array
 {
     $findings = [];
     $tables   = [];
@@ -345,6 +345,20 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
     }
     if (!$byPath) return $findings; // nothing to check (schema-only change)
 
+    // Everything in this block is tied to the vanilla stack's own
+    // conventions -- the inline onclick=/const-module pattern, the
+    // features/<name>/<name>.js naming+export convention, router.defineRoute/
+    // <script src>/nav-href-based routing. None of it applies to a react-
+    // stack project: components are ES modules (no shared-scope onclick
+    // trap possible), routing goes through core/router.js's useHashRoute()/
+    // matchRoute()/navigate() instead of router.defineRoute()/<script src>,
+    // and there is no index.html to check nav hrefs against (it's build-
+    // generated, never agent-written). A failed esbuild build (see
+    // ai_react_build_bundle()) is the stronger, more general gate that
+    // replaces all of this for react — skip it entirely rather than run
+    // regexes that were never designed to match JSX syntax and would only
+    // ever produce false positives or false "all clear" here.
+    if ($frontendStack !== 'react') {
     // Feature module exports, e.g. 'home' => ['renderView'], 'budgets' => ['renderBudgetsList', 'renderBudgetDetail']
     // Keyed by the JS identifier the file actually declares (see
     // ai_validator_detect_module_identifier()'s doc comment), falling back to
@@ -545,7 +559,13 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
         }
     }
 
+    } // end vanilla-only checks ($frontendStack !== 'react')
+
     // ── API table references ↔ schema, CRUD completeness ──────────────────
+    // Stack-agnostic: react's canonical core/api.js exposes the exact same
+    // api.list/get/create/update/remove('table', ...) call shape the agent
+    // writes directly in JSX, so this regex-based check is just as valid
+    // there as it is for vanilla.
     $apiCallsByTable = [];
     foreach ($byPath as $content) {
         foreach (ai_validator_extract_api_calls($content) as $call) {

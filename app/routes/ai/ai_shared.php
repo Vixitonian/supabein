@@ -771,6 +771,10 @@ function ai_check_js_syntax(string $path, string $content, array $config): array
     $nodeBin = $config['NODE_BIN'] ?? '/opt/alt/alt-nodejs16/root/usr/bin/node';
     $ext     = strtolower((string)pathinfo($path, PATHINFO_EXTENSION));
 
+    if ($ext === 'jsx') {
+        return ai_react_syntax_check($content, $config);
+    }
+
     $blocks = [];
     if ($ext === 'js') {
         $blocks[] = $content;

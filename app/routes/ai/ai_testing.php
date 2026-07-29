@@ -1577,7 +1577,7 @@ function ai_run_project_tests(int $projectId, int $userId, \SupaBein\Catalog $ca
     $report(['stage' => 'validate', 'status' => 'start', 'label' => 'Checking for mismatches…']);
     try {
         $frontendFiles = ai_read_full_frontend_files($config, $catalog, $projectId, $target);
-        $validation    = ai_validator_check_project($schema, $frontendFiles);
+        $validation    = ai_validator_check_project($schema, $frontendFiles, ($project['frontend_stack'] ?? 'vanilla') === 'react' ? 'react' : 'vanilla');
         if ($client && array_filter($validation, fn($f) => $f['severity'] === 'error')) {
             $validation = ai_validator_explain_findings($validation, $client);
             $usage = $client->getLastUsage();

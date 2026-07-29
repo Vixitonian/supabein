@@ -143,9 +143,9 @@ function ai_agent_fetch_docs(string $url, int $maxChars = 6000): array
 // regenerate an existing file from general knowledge instead of its real
 // content: exactly the class of bug that dropped a whole feature's worth of
 // working code (note creation/editing) in the file that surfaced this rule.
-function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config, int $projectId, array $schema = []): array
+function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array &$changedFiles, array &$readPaths, array $config, int $projectId, array $schema = [], string $frontendStack = 'vanilla', string $projectTitle = 'App'): array
 {
-    $platformPaths = AI_PLATFORM_CANONICAL_PATHS;
+    $platformPaths = $frontendStack === 'react' ? AI_REACT_CANONICAL_PATHS : AI_PLATFORM_CANONICAL_PATHS;
 
     // read_file on a platform path used to return content: null, forcing the
     // model to go fetch these files from a live deployed/preview URL instead
@@ -155,7 +155,14 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
     // that are already known, static, in-process text. Return the real
     // canonical content instead: same content that's force-injected at
     // deploy time regardless of what the model writes here.
-    $platformFileContent = function (string $path) use ($schema): ?string {
+    $platformFileContent = function (string $path) use ($schema, $frontendStack): ?string {
+        if ($frontendStack === 'react') {
+            $authInfo = ai_detect_auth($schema);
+            foreach (ai_react_canonical_source_files($authInfo) as $f) {
+                if ($f['path'] === $path) return $f['content'];
+            }
+            return null;
+        }
         switch ($path) {
             case 'core/router.js': return AI_CANONICAL_ROUTER_JS;
             case 'core/api.js':    return AI_CANONICAL_API_JS;
@@ -230,7 +237,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             $results = [];
             foreach (array_slice($pathsArg, 0, 20) as $p) {
                 $results[] = is_string($p)
-                    ? ai_run_edit_agent_tool('read_file', ['path' => $p], $byPath, $changedFiles, $readPaths, $config, $projectId, $schema)
+                    ? ai_run_edit_agent_tool('read_file', ['path' => $p], $byPath, $changedFiles, $readPaths, $config, $projectId, $schema, $frontendStack, $projectTitle)
                     : ['tool' => 'read_file', 'error' => 'each entry must be a path string'];
             }
             return ['tool' => 'read_files', 'result' => ['files' => $results]];
@@ -455,7 +462,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             $merged = $byPath;
             foreach ($changedFiles as $p => $c) $merged[$p] = $c;
             $files = array_map(fn($p) => ['path' => $p, 'content' => $merged[$p]], array_keys($merged));
-            $findings = ai_validator_check_project($schema, $files);
+            $findings = ai_validator_check_project($schema, $files, $frontendStack);
             $errors = array_values(array_filter($findings, fn($f) => $f['severity'] === 'error'));
             return ['tool' => 'validate_frontend', 'result' => [
                 'error_count' => count($errors),
@@ -469,7 +476,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             foreach ($changedFiles as $p => $c) $merged[$p] = $c;
             $files = array_map(fn($p) => ['path' => $p, 'content' => $merged[$p]], array_keys($merged));
             $authInfo = ai_detect_auth($schema);
-            return ['tool' => 'smoke_test', 'result' => ai_smoke_test_files($files, $config, $authInfo)];
+            return ['tool' => 'smoke_test', 'result' => ai_smoke_test_files($files, $config, $authInfo, $frontendStack, $projectTitle)];
 
         case 'write_files':
             $filesArg = is_array($args['files'] ?? null) ? $args['files'] : null;
@@ -477,7 +484,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             $results = [];
             foreach ($filesArg as $f) {
                 $results[] = is_array($f)
-                    ? ai_run_edit_agent_tool('write_file', $f, $byPath, $changedFiles, $readPaths, $config, $projectId, $schema)
+                    ? ai_run_edit_agent_tool('write_file', $f, $byPath, $changedFiles, $readPaths, $config, $projectId, $schema, $frontendStack, $projectTitle)
                     : ['tool' => 'write_file', 'error' => 'each entry must be an object with path and content'];
             }
             return ['tool' => 'write_files', 'result' => ['files' => $results]];
@@ -877,6 +884,20 @@ function ai_run_edit_generation_agentic(
 function ai_run_edit_generation(int $projectId, string $prompt, array $history, object $client, \SupaBein\Catalog $catalog, array $config, callable $report, bool $validate = true, ?array $resumeState = null, array $refs = [], ?callable $checkpoint = null): array
 {
     $aiTrace = [];
+
+    // AI-driven editing of a react-stack project isn't supported yet — the
+    // edit agent's system prompt and tool executor (ai_run_edit_agent_tool)
+    // still assume the vanilla <script src>/router.defineRoute contract.
+    // Running it against a project's real JSX files would silently corrupt
+    // them (wrong platform-path list, wrong canonical file content injected
+    // on read_file, wrong validator rules) rather than fail loudly, so this
+    // is refused up front instead. Building from scratch (ai_run_build_frontend)
+    // already fully supports frontend_stack === 'react'; only the edit path
+    // is scoped out of this first iteration.
+    $projectRow = $catalog->getProjectByIdInternal($projectId);
+    if (($projectRow['frontend_stack'] ?? 'vanilla') === 'react') {
+        throw new \RuntimeException('AI-assisted editing of React-stack projects is not supported yet — this is on the roadmap.');
+    }
 
     $report(['stage' => 'read', 'status' => 'start', 'label' => 'Reading current schema & files…']);
     $existingSchema = ai_schema_from_db($projectId, $catalog);

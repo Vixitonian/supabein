@@ -90,6 +90,7 @@ try {
         $approvedIntent = $payload['intent']  ?? null;
         $validate       = $payload['validate'] ?? true;
         $refs           = ai_job_payload_refs($payload);
+        $frontendStack  = ($payload['frontend_stack'] ?? '') === 'react' ? 'react' : 'vanilla';
 
         // Continuing a previous 'build' job that died partway through (a
         // worker crash, most commonly during the browser-driven test stage) —
@@ -113,7 +114,7 @@ try {
         // build_schema/build_frontend jobs below — so it's safe for this one
         // job to also deploy and test, giving the whole pipeline one
         // reload-proof progress trail instead of three separately-tracked steps.
-        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId, $refs, $resumeCheckpoint, $checkpointFn);
+        $result = ai_run_build_and_deploy($prompt, $history, $approvedIntent, $client, $report, $validate, $config, $catalog, $userId, $refs, $resumeCheckpoint, $checkpointFn, $frontendStack);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build'], $result)));
 
     } elseif ($mode === 'build_schema') {
@@ -140,7 +141,8 @@ try {
         // (review-off) path above -- without this, the frontend has no way
         // to know what it's actually being tested against later.
         $approvedIntent = $payload['intent'] ?? null;
-        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate, $refs, $approvedIntent);
+        $frontendStack  = ($payload['frontend_stack'] ?? '') === 'react' ? 'react' : 'vanilla';
+        $result = ai_run_build_frontend($schemaPlan, $designBrief, $prompt, $client, $config, $report, $validate, $refs, $approvedIntent, $frontendStack);
         $catalog->markJobDone($jobId, $withFallbackInfo(array_merge(['mode' => 'build_frontend'], $result)));
 
     } elseif ($mode === 'edit') {

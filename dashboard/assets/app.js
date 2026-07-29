@@ -707,6 +707,10 @@ const AiPanel = (() => {
   let sidebarVisible = false;
   let reviewEnabled = localStorage.getItem('sb:ai_review') === '1';
   let buildMode = localStorage.getItem('sb:ai_build') === '1';
+  // Only meaningful for a brand-new project's first build — an existing
+  // project's stack is fixed at creation time (see projects.frontend_stack),
+  // so this toggle has no effect once effectiveProjectId is set in sendMessage().
+  let frontendStack = localStorage.getItem('sb:ai_frontend_stack') === 'react' ? 'react' : 'vanilla';
   let liveTraceMsg = null;
   let operationInProgress = false;
   let operationMode = null;
@@ -2077,7 +2081,7 @@ const AiPanel = (() => {
   async function runBuildFrontendStage(schema, designBrief, body, existingProgressMsg) {
     let sess = currentSession();
     if (!sess) { sess = await createSession(selectedProjectId); currentSessionId = sess.id; }
-    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief, attachments: body.attachments, intent: body.intent };
+    const jobBody = { prompt: body.prompt, schema, design_brief: designBrief, attachments: body.attachments, intent: body.intent, frontend_stack: body.frontend_stack };
     return streamGenerate(jobBody, sess, {
       jobEndpoint: '/v1/ai/build-frontend/job',
       stages: BUILD_FRONTEND_STAGES,
@@ -4359,6 +4363,9 @@ const AiPanel = (() => {
     // existing project into a fresh build, with no project_id attached.
     const effectiveProjectId = sess?.projectId ?? selectedProjectId;
     if (effectiveProjectId) body.project_id = effectiveProjectId;
+    // Only relevant when this is going to CREATE a project — an existing
+    // project's stack was fixed at build time and can't change via edits.
+    else body.frontend_stack = frontendStack;
     const priorMessages = (sess ? sess.messages : []).filter(m => m.type !== 'thinking');
     if (priorMessages.length > 0) {
       body.history = priorMessages.slice(-20).map(m => {
@@ -4790,6 +4797,24 @@ const AiPanel = (() => {
     // Hide review toggle when starting in chat mode
     if (!buildMode) reviewToggle.style.display = 'none';
 
+    // Only affects a brand-new project's first build (see the frontendStack
+    // doc comment above) — left visible in every mode/session since there's
+    // no reliable client-side signal for "this session will start a new
+    // project" vs. "this session already has one" at button-construction
+    // time; sendMessage() only actually applies it when there's no
+    // effectiveProjectId yet.
+    const stackToggle = el('button', {
+      class: 'ai-mode-btn' + (frontendStack === 'react' ? ' active' : ''),
+      title: 'Frontend stack for a new project (no effect once a project exists): ' + (frontendStack === 'react' ? 'React' : 'Vanilla JS'),
+      onClick: () => {
+        frontendStack = frontendStack === 'react' ? 'vanilla' : 'react';
+        localStorage.setItem('sb:ai_frontend_stack', frontendStack);
+        stackToggle.className = 'ai-mode-btn' + (frontendStack === 'react' ? ' active' : '');
+        stackToggle.textContent = frontendStack === 'react' ? '⚛️ React' : '🍦 Vanilla';
+        stackToggle.title = 'Frontend stack for a new project (no effect once a project exists): ' + (frontendStack === 'react' ? 'React' : 'Vanilla JS');
+      }
+    }, frontendStack === 'react' ? '⚛️ React' : '🍦 Vanilla');
+
     // Model selector button + dropdown — lives in the bottom input bar with
     // the other toggles, opening upward since it sits at the bottom.
     function buildModelSelector() {
@@ -4832,7 +4857,8 @@ const AiPanel = (() => {
             runTestsBtn,
             modelSelectorBtn,
             modeBtn,
-            reviewToggle
+            reviewToggle,
+            stackToggle
           ),
           // Right cluster: the two actions that directly act on THIS
           // message (attach a file to it, send it) — same size, paired,

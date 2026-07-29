@@ -26,7 +26,7 @@ declare(strict_types=1);
  * @param callable|null $checkpoint Called as $checkpoint(string $stage, array
  *   $data) right after each stage completes, so the caller can persist it.
  */
-function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true, array $refs = [], ?array $resumeCheckpoint = null, ?callable $checkpoint = null): array
+function ai_run_build_generation(string $prompt, array $history, ?array $approvedIntent, object $client, array $config, callable $report, bool $validate = true, array $refs = [], ?array $resumeCheckpoint = null, ?callable $checkpoint = null, string $frontendStack = 'vanilla'): array
 {
     $checkpoint = $checkpoint ?? function (string $stage, array $data): void {};
     $aiTrace = [];
@@ -90,7 +90,7 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
             $report(['stage' => 'validate', 'status' => 'done', 'label' => $frontendResult['validation'] ? 'Validation found issues (resumed)' : 'No issues found (resumed)']);
         }
     } else {
-        $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate, $refs, $approvedIntent);
+        $frontendResult = ai_run_build_frontend($schemaResult['schema'], $schemaResult['design_brief'], $prompt, $client, $config, $report, $validate, $refs, $approvedIntent, $frontendStack);
         $checkpoint('frontend', [
             'intent' => $approvedIntent, 'schema' => $schemaResult['schema'], 'design_brief' => $schemaResult['design_brief'],
             'plan' => $frontendResult['plan'], 'validation' => $frontendResult['validation'],
@@ -137,10 +137,10 @@ function ai_run_build_generation(string $prompt, array $history, ?array $approve
  *   checkpoint to this job's own row after each stage — see
  *   Catalog::saveJobCheckpoint().
  */
-function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId, array $refs = [], ?array $resumeCheckpoint = null, ?callable $checkpoint = null): array
+function ai_run_build_and_deploy(string $prompt, array $history, ?array $approvedIntent, object $client, callable $report, bool $validate, array $config, \SupaBein\Catalog $catalog, int $userId, array $refs = [], ?array $resumeCheckpoint = null, ?callable $checkpoint = null, string $frontendStack = 'vanilla'): array
 {
     $checkpoint = $checkpoint ?? function (string $stage, array $data): void {};
-    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate, $refs, $resumeCheckpoint, $checkpoint);
+    $genResult = ai_run_build_generation($prompt, $history, $approvedIntent, $client, $config, $report, $validate, $refs, $resumeCheckpoint, $checkpoint, $frontendStack);
 
     if (!empty($resumeCheckpoint['apply'])) {
         // The prior run already deployed this exact plan before it died —

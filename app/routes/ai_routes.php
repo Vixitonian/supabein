@@ -14,6 +14,7 @@ require_once SUPABEIN_ROOT . '/app/core/fallback_ai_client.php';
 require_once SUPABEIN_ROOT . '/app/core/deploy.php';
 require_once SUPABEIN_ROOT . '/app/core/ai_validator.php';
 require_once SUPABEIN_ROOT . '/app/core/storage.php';
+require_once SUPABEIN_ROOT . '/app/core/react_build.php';
 
 require_once __DIR__ . '/ai/ai_attachments.php';
 require_once __DIR__ . '/ai/ai_deploy.php';
@@ -734,14 +735,15 @@ PROMPT;
         $resumeJobId = isset($req['body']['resume_job_id']) ? (int)$req['body']['resume_job_id'] : 0;
 
         $payload = [
-            'prompt'        => $prompt,
-            'history'       => $history,
-            'intent'        => $intent,
-            'provider'      => $req['body']['provider'] ?? null,
-            'model'         => $req['body']['model'] ?? null,
-            'validate'      => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
-            'resume_job_id' => $resumeJobId ?: null,
-            'attachments'   => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
+            'prompt'         => $prompt,
+            'history'        => $history,
+            'intent'         => $intent,
+            'provider'       => $req['body']['provider'] ?? null,
+            'model'          => $req['body']['model'] ?? null,
+            'validate'       => !isset($req['body']['validate']) || (bool)$req['body']['validate'],
+            'resume_job_id'  => $resumeJobId ?: null,
+            'attachments'    => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
+            'frontend_stack' => ($req['body']['frontend_stack'] ?? '') === 'react' ? 'react' : 'vanilla',
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
@@ -812,6 +814,7 @@ PROMPT;
             // it, same as before this field existed.
             'intent'       => (isset($req['body']['intent']) && is_array($req['body']['intent'])) ? $req['body']['intent'] : null,
             'attachments'  => ai_validate_attachments_for_job($req['body']['attachments'] ?? null),
+            'frontend_stack' => ($req['body']['frontend_stack'] ?? '') === 'react' ? 'react' : 'vanilla',
         ];
         $job = $catalog->createJob($userId, $sessionId, 'build_frontend', $payload);
         ai_spawn_job_worker($config, (int)$job['id']);
