@@ -143,7 +143,7 @@ function ai_deploy_files(
         }
 
         $rawContent = (string)($fileDef['content'] ?? '');
-        if ($relPath === 'index.html') {
+        if ($relPath === 'index.html' && $frontendStack !== 'react') {
             $rawContent = ai_ensure_error_script_tag($rawContent);
         }
         $content = str_replace(
@@ -171,12 +171,18 @@ function ai_deploy_files(
     // back off disk after both the merge and the write loop is what makes
     // this actually unconditional on every deploy, matching the doc comment
     // on ai_ensure_error_script_tag().
-    $indexPath = $deployDir . '/index.html';
-    if (is_file($indexPath)) {
-        $indexHtml = file_get_contents($indexPath);
-        $patched   = ai_ensure_error_script_tag((string)$indexHtml);
-        if ($patched !== $indexHtml) {
-            file_put_contents($indexPath, $patched);
+    // Skipped for react: core/errors.js has no standalone deployed file to
+    // point a <script src> at — its exact same error-capture behavior is
+    // already active via main.jsx's `import './core/errors.js'`, bundled
+    // directly into bundle.js. Adding the tag here would just 404.
+    if ($frontendStack !== 'react') {
+        $indexPath = $deployDir . '/index.html';
+        if (is_file($indexPath)) {
+            $indexHtml = file_get_contents($indexPath);
+            $patched   = ai_ensure_error_script_tag((string)$indexHtml);
+            if ($patched !== $indexHtml) {
+                file_put_contents($indexPath, $patched);
+            }
         }
     }
 
