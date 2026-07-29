@@ -903,6 +903,16 @@ const TEST_PASS = 'TestPass123!';
 let browser, page;
 let lastHandles = [];
 let lastPath = '/';
+// job 213 (task #196): unlike the single-shot smoke_test/fetch_page script
+// above, this interactive agent never captured console/page errors at all --
+// doSnapshot() returned only {url, elements, bodyText}, so a click that
+// silently threw (e.g. a ReferenceError from calling a sibling object
+// method as a bare identifier) surfaced to the model as nothing more than
+// "the value didn't change", the same uninformative symptom regardless of
+// the real cause. Reset on every connectAndLogin() call -- including
+// __recycle__'s reconnect at each story boundary -- so each story's errors
+// don't bleed into the next one's report.
+let consoleErrors = [];
 
 function sendResult(obj) {
   process.stdout.write('@@RESULT@@' + JSON.stringify(obj) + '\n');
@@ -917,6 +927,9 @@ async function connectAndLogin() {
   browser = await chromium.connectOverCDP(`wss://chrome.browserless.io?token=${TOKEN}`);
   page = await browser.newPage();
   page.setDefaultTimeout(15000);
+  consoleErrors = [];
+  page.on('pageerror', (e) => consoleErrors.push(String((e && e.message) || e)));
+  page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
 __LOGIN_BLOCK__
 }
 
@@ -947,6 +960,7 @@ async function doSnapshot() {
     url: page.url(),
     elements: items.map((it, i) => Object.assign({ index: i }, it.info)),
     bodyText: bodyText.slice(0, 1500),
+    console_errors: consoleErrors.slice(0, 10),
   };
 }
 
@@ -1688,7 +1702,7 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
                 $failingStories
             ));
 
-        // job 211 (task #194): a failure detail literally stating "remained
+        // job 211 (task #195): a failure detail literally stating "remained
         // at 0 instead of decrementing to -1" was enough information to spot
         // the bug -- a `if (this.currentCount <= 0) return` guard the
         // decrement handler itself had, silently no-op'ing the exact click
@@ -1698,18 +1712,39 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
         // should have changed after an action didn't) generalizes past
         // counters to any stateful mutation -- inventory, balances, health,
         // quantities, toggles -- so the hint is generic, not counter-specific.
+        //
+        // job 213 (task #196): the SAME symptom text ("remains at 0") also
+        // showed up for a completely different root cause -- a bare
+        // `updateCounter(newValue)` call inside a click handler where the
+        // method was only ever defined as `counter.updateCounter`, throwing
+        // a ReferenceError the moment either button was clicked. No guard
+        // existed to remove; 2 autofix attempts still failed because nothing
+        // told the model to check for a THROWN error before assuming a
+        // guard. Two fixes for that: (1) the original regex only matched
+        // "remained" (past tense), missing "remains" -- broadened below to
+        // catch the verb stem regardless of tense; (2) the story-test agent
+        // now captures real console_errors (see the browser-test-agent
+        // script's consoleErrors additions) and is told to put the exact
+        // thrown error text in its own detail -- so checking for a real
+        // error message is listed FIRST, before the guard-check advice,
+        // since a thrown exception is strictly more specific and actionable
+        // than "there might be a blocking conditional somewhere."
         $hasUnchangedValueFailure = (bool)array_filter(
             $failingStories,
-            fn($s) => preg_match('/\b(remained|stayed|unchanged|did not change|didn\'t change|no change)\b/i', (string)($s['detail'] ?? ''))
+            fn($s) => preg_match('/\b(remain(?:s|ed|ing)?|stay(?:s|ed|ing)?|unchanged|did(?:n\'t| not) change|no change)\b/i', (string)($s['detail'] ?? ''))
         );
         if ($hasUnchangedValueFailure) {
             $fixPrompt .= "\n\nAt least one failure above describes a value that should have changed after an "
-                . 'action but did not. Before rewriting anything, read the actual handler for that action in full '
-                . 'and look specifically for an early-return / guard condition (a bounds check, a validation gate, '
-                . "an `if (...) return` before the real logic runs) that could be silently blocking it. If the "
-                . "failure detail states what the value SHOULD have become, and a guard's condition would prevent "
-                . 'reaching exactly that outcome, that guard is very likely the actual bug — fix or remove it '
-                . 'specifically, rather than regenerating the surrounding code structure and leaving it in place.';
+                . "action but did not. First check whether the failure detail already names a real thrown error "
+                . '(a ReferenceError, TypeError, etc.) — if so, that IS the bug; go straight to the line it names '
+                . 'and fix that specific problem (a common one: calling a sibling method as a bare name, e.g. '
+                . '`updateCounter(x)`, when it was only ever defined as a property of another object, e.g. '
+                . '`counter.updateCounter`). If no error is named, read the actual handler for that action in full '
+                . 'and look for an early-return / guard condition (a bounds check, a validation gate, an '
+                . '`if (...) return` before the real logic runs) that could be silently blocking it — if the '
+                . "failure detail states what the value SHOULD have become and a guard's condition would prevent "
+                . 'reaching exactly that outcome, that guard is very likely the actual bug. Either way, fix the '
+                . 'specific line — do not regenerate the surrounding code structure and leave the real problem in place.';
         }
 
         $combinedCtx = trim($intentCtx . ($priorAttemptContext ? "\n\n{$priorAttemptContext}" : ''));

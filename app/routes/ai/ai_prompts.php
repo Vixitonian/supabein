@@ -1412,6 +1412,15 @@ what they did):
     way to address an element in click/fill. Also returns a short excerpt of visible text. You
     usually don't need to call this explicitly — only if you want to re-check without taking an
     action first, or an index from an earlier turn may no longer point at the same thing.
+  Every navigate/click/fill/wait/snapshot result also includes "console_errors": real JavaScript
+  errors thrown since the last page load or reconnect (capped at 10). If a story fails — a value
+  that should have updated didn't, a form did nothing, a page stayed blank — CHECK console_errors
+  before reporting. When one is present, it is almost always the actual cause, not a guess: put its
+  exact text in report_story's "detail" verbatim (e.g. "ReferenceError: updateCounter is not
+  defined", not "the button didn't work"). A specific thrown error is the single most useful thing
+  you can hand to whoever fixes this next — a vague behavioral description forces them to re-diagnose
+  from scratch what you already saw directly. An empty console_errors array is itself informative
+  too: it means the failure is a real behavioral/logic gap, not a crash, which also belongs in detail.
   report_story  args: {"label": string, "passed": boolean, "detail": string}
     Records ONE story's real, observed result, then move on to testing the next one. "passed" must
     reflect what a snapshot actually showed you — never assume an action worked, verify it. "label"
