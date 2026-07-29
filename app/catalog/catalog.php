@@ -630,13 +630,7 @@ class Catalog
      */
     public function reconcileNoAuthAnonAccess(int $projectId, int $tableId): void
     {
-        $stmt = $this->pdo->prepare(
-            "SELECT COUNT(*) FROM project_columns pc
-             JOIN project_tables pt ON pt.id = pc.project_table_id
-             WHERE pt.project_id = ? AND UPPER(pc.data_type) = 'PASSWORD'"
-        );
-        $stmt->execute([$projectId]);
-        if ((int)$stmt->fetchColumn() > 0) return; // real auth exists -- anon=false can be deliberate here
+        if ($this->projectHasAuth($projectId)) return; // real auth exists -- anon=false can be deliberate here
 
         $byRole = [];
         foreach ($this->listPolicies($tableId) as $p) $byRole[$p['api_role']][$p['operation']] = $p;
@@ -647,6 +641,49 @@ class Catalog
             if ($anon !== null && $anon['allowed']) continue; // anon already fine
             $this->upsertPolicy($tableId, 'anon', $op, true, $p['constraint_sql']);
         }
+    }
+
+    private function projectHasAuth(int $projectId): bool
+    {
+        $stmt = $this->pdo->prepare(
+            "SELECT COUNT(*) FROM project_columns pc
+             JOIN project_tables pt ON pt.id = pc.project_table_id
+             WHERE pt.project_id = ? AND UPPER(pc.data_type) = 'PASSWORD'"
+        );
+        $stmt->execute([$projectId]);
+        return (int)$stmt->fetchColumn() > 0;
+    }
+
+    /**
+     * Independent, read-only backstop for reconcileNoAuthAnonAccess() — verifies
+     * the ACTUAL end state across every table in the project, rather than
+     * trusting that whichever code path created/touched a table remembered to
+     * call the fixer. Part of the unified health gate (see ai_assess_deploy_health()
+     * in ai_shared.php): every operation on every table must be reachable by
+     * SOME role a real request can actually hold — anon always can; authenticated
+     * only if the project has a PASSWORD column anywhere (only then can anyone
+     * ever log in). An operation neither role can reach is unreachable-by-design,
+     * not a deliberate access decision, no matter which code path produced it.
+     */
+    public function findUnreachablePolicies(int $projectId): array
+    {
+        $hasAuth = $this->projectHasAuth($projectId);
+        $issues  = [];
+        foreach ($this->listTables($projectId) as $table) {
+            $byOp = [];
+            foreach ($this->listPolicies($table['id']) as $p) {
+                $byOp[$p['operation']][$p['api_role']] = $p['allowed'];
+            }
+            foreach ($byOp as $op => $roles) {
+                $anonOk = !empty($roles['anon']);
+                $authOk = !empty($roles['authenticated']);
+                $reachable = $hasAuth ? ($anonOk || $authOk) : $anonOk;
+                if (!$reachable) {
+                    $issues[] = ['table' => $table['table_name'], 'operation' => $op];
+                }
+            }
+        }
+        return $issues;
     }
 
     // ─── BLogic (tenant business logic, executed by app/core/blogic.php) ──────

@@ -1890,6 +1890,7 @@ const AiPanel = (() => {
       plan: ev.plan || null,
       test: ev.test || null,
       validation: ev.validation || [],
+      health: ev.health || null,
     } });
 
     if (!progressMsg) return;
@@ -3614,30 +3615,45 @@ const AiPanel = (() => {
     if (data.tables && data.tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables: ' + data.tables.map(t => t.name || t).join(', ')));
     if (data.added_tables && data.added_tables.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Tables added: ' + data.added_tables.join(', ')));
     if (data.added_columns && data.added_columns.length) lines.push(el('div', { class: 'ai-result-row' }, '✓ Columns: ' + data.added_columns.join(', ')));
+    // The unified health gate (ai_assess_deploy_health(), server-side) is the
+    // single source of truth for "did this actually work" — checked FIRST,
+    // instead of re-deriving success from staging/site presence per field
+    // the way this used to (job 218: that re-derivation showed "✓ Frontend
+    // deployed" on a build that never actually deployed, "done" checkmarks
+    // and all). `health` is undefined only for a message rendered before
+    // this field existed (a cached session from before this fix shipped) —
+    // falls back to the old site-presence check just for that case.
+    const health = data.health;
     if (data.staging) {
       lines.push(el('div', { class: 'ai-result-row' }, '✓ Deployed to staging (preview)'));
-    } else if (data.site) {
-      // "site created but no staging deploy" only happens today when the
-      // deploy step rejected the generated files (they failed the deploy's
-      // own smoke check, or ai_deploy_files() errored) — there is no
-      // direct-to-live deploy path anymore (see the removed 'View Site'
-      // button below, which used to point at a site with nothing on it).
-      // This used to render '✓ Frontend deployed' here — the exact opposite
-      // of what happened (job 218, "Fun Facts App": 11 confirmed
-      // schema/frontend mismatches, yet the summary card still claimed success).
+    } else if (health ? !health.ok : data.site) {
       lines.push(el('div', { class: 'ai-result-row', style: 'color:var(--danger)' },
         '✕ Frontend was not deployed' + (data.deploy_error ? ' — ' + data.deploy_error : '.')));
     }
 
     const card = el('div', { class: 'ai-msg ai-msg-ai ai-result-card' }, ...lines);
 
-    // If deploy failed and the validator has findings, show them here too —
-    // the "Checking for mismatches" progress row only ever showed a count,
-    // never the actual list, so a real, confirmed bug (e.g. "Frontend calls
-    // api.list('content'), but no 'content' table exists") went unseen.
-    if (!data.staging && data.validation && data.validation.length) {
+    // health.issues is the plain-language summary every completion path now
+    // computes (deploy failure, unresolved validator errors, a policy no
+    // real request can reach) — shown up front, in one place, instead of
+    // requiring a click into "Validation" to discover why something's wrong.
+    if (health && !health.ok && health.issues.length) {
+      card.appendChild(el('details', { class: 'ai-plan-details', open: true },
+        el('summary', { class: 'ai-plan-details-summary' }, `⚠ ${health.issues.length} issue${health.issues.length === 1 ? '' : 's'} found`),
+        el('div', { style: 'display:flex;flex-direction:column;gap:4px;font-size:0.8rem' },
+          ...health.issues.map(issue => el('div', { style: 'color:var(--danger)' }, issue))
+        )
+      ));
+    }
+
+    // The validator's own detailed findings (with explanations) — shown
+    // whenever present regardless of health.ok, since a build can deploy
+    // successfully yet still carry warning/info findings worth a look; the
+    // health.issues line above only gives a count for unresolved errors,
+    // never the actual list.
+    if (data.validation && data.validation.length) {
       const errCount = data.validation.filter(f => f.severity === 'error').length;
-      card.appendChild(el('details', { class: 'ai-plan-details', open: errCount > 0 },
+      card.appendChild(el('details', { class: 'ai-plan-details', open: errCount > 0 && !(health && !health.ok) },
         el('summary', { class: 'ai-plan-details-summary' }, `⚑ Validation (${data.validation.length})`),
         renderValidationExplainer(),
         renderValidationList(data.validation)
@@ -4490,7 +4506,11 @@ const AiPanel = (() => {
       // ("watch only" — everything runs straight through); with Review on,
       // testing is its own confirmable stage — the user clicks "Run Full Test"
       // in the input bar manually instead of it firing on its own.
-      const hasDeployed = !!(result.deploy || result.staging || result.site);
+      // 'site' alone does NOT mean deployed -- it's set even when deploy
+      // failed (see ai_execute_build()'s deploy_error). 'staging'/'deploy'
+      // are only ever set together, in the same success branch, on both the
+      // build and edit apply paths.
+      const hasDeployed = !!(result.deploy || result.staging);
       const willAutoTest = mode === 'edit' ? hasDeployed : (hasDeployed && !reviewEnabled);
       const canIntegrate = mode === 'edit' && willAutoTest && testStage;
 

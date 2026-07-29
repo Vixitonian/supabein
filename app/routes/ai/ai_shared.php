@@ -53,6 +53,45 @@ function ai_agent_retry_reporter(callable $report, string $stage, string $label,
     };
 }
 
+// The single, mandatory "did this actually work" check every generation+deploy
+// path must run before reporting success. Root-cause finding across a whole
+// run of separate bugs (job 218's swallowed deploy error and ignored
+// validator findings, job 219's anon-INSERT policy gap, the dead "✓ Frontend
+// deployed" UI line): every one was the SAME shape — a real signal the app
+// was broken already existed somewhere in the pipeline, and nothing was
+// required to check it before the job got called "done". This replaces five
+// separate, ad hoc, per-call-site completion checks with one that every path
+// must run and whose result the UI renders directly off, instead of
+// re-deriving "success" from unrelated field presence/absence per call site.
+//
+// Deliberately does NOT try to fix anything itself — that's the validator-
+// retry loop (ai_run_build_frontend()) and Catalog::reconcileNoAuthAnonAccess()'s
+// job, both running earlier in the pipeline. This is the backstop that
+// verifies the real end state, catching whatever those miss (or whatever a
+// future code path forgets to call) rather than trusting any of them ran.
+function ai_assess_deploy_health(array $validation, ?string $deployError, ?array $staging, array $unreachablePolicies = []): array
+{
+    $issues = [];
+
+    if ($deployError !== null) {
+        $issues[] = "Deploy failed: {$deployError}";
+    } elseif ($staging === null) {
+        $issues[] = 'No frontend was deployed.';
+    }
+
+    $errCount = count(array_filter($validation, fn($f) => ($f['severity'] ?? '') === 'error'));
+    if ($errCount > 0) {
+        $issues[] = "{$errCount} unresolved validation error(s) — the generated app has confirmed bugs.";
+    }
+
+    foreach ($unreachablePolicies as $p) {
+        $issues[] = "Table \"{$p['table']}\" {$p['operation']} is unreachable by any real request "
+            . '(denied for anon and authenticated, or no login system exists to reach authenticated at all).';
+    }
+
+    return ['ok' => empty($issues), 'issues' => $issues];
+}
+
 // ─── AI output helpers ───────────────────────────────────────────────────────
 
 /**

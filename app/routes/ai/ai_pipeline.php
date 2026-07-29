@@ -225,7 +225,21 @@ function ai_run_build_and_deploy(string $prompt, array $history, ?array $approve
         $report(['stage' => 'test', 'status' => 'done', 'label' => 'Nothing to test', 'detail' => 'No frontend was deployed']);
     }
 
-    return array_merge($genResult, ['apply' => $applyResult, 'test' => $testResult]);
+    // The unified health gate (see ai_assess_deploy_health()'s doc comment) —
+    // every completion path returns this, and the UI is expected to check it
+    // FIRST rather than re-deriving "success" from staging/site presence the
+    // way it used to.
+    $unreachablePolicies = !empty($applyResult['project']['id'])
+        ? $catalog->findUnreachablePolicies((int)$applyResult['project']['id'])
+        : [];
+    $health = ai_assess_deploy_health(
+        $genResult['validation'] ?? [],
+        $applyResult['deploy_error'] ?? null,
+        $applyResult['staging'] ?? null,
+        $unreachablePolicies
+    );
+
+    return array_merge($genResult, ['apply' => $applyResult, 'test' => $testResult, 'health' => $health]);
 }
 
 // Seeds a small number of test login accounts when the app has auth, with a

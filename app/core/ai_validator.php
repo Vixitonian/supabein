@@ -411,9 +411,8 @@ function ai_validator_check_project(array $schema, array $frontendFiles): array
     // core/errors.js and features/auth/auth.js are injected by the platform
     // at deploy time (see ai_inject_canonical_frontend_files()) so they never
     // appear in $frontendFiles here — excluded, not a bug.
-    $canonicalScriptPaths = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
     foreach (array_unique($scriptSrcs) as $src) {
-        if (in_array($src, $canonicalScriptPaths, true)) continue;
+        if (in_array($src, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
         if (!isset($byPath[$src])) {
             $findings[] = ai_validator_finding('error', 'script',
                 "index.html loads \"{$src}\" via <script src>, but that file was never written",

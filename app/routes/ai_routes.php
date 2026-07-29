@@ -1032,6 +1032,22 @@ PROMPT;
             if (!empty($req['body']['intent']) && is_array($req['body']['intent']) && !empty($result['project']['id'])) {
                 $catalog->upsertProjectRequirements((int)$result['project']['id'], $userId, $req['body']['intent']);
             }
+
+            // Review-off's job-backed path already validates before deploy (see
+            // ai_run_build_frontend()'s retry loop); this apply-then-deploy
+            // path never ran the validator at all before now — recompute it
+            // here (cheap, deterministic, no AI call) so the unified health
+            // gate below has real evidence instead of assuming success.
+            $result['validation'] = ai_validator_check_project($plan, $plan['frontend']['files'] ?? []);
+            $unreachablePolicies  = !empty($result['project']['id'])
+                ? $catalog->findUnreachablePolicies((int)$result['project']['id'])
+                : [];
+            $result['health'] = ai_assess_deploy_health(
+                $result['validation'],
+                $result['deploy_error'] ?? null,
+                $result['staging'] ?? null,
+                $unreachablePolicies
+            );
             json_out($result, 201);
 
         } elseif ($mode === 'edit') {
@@ -1077,6 +1093,22 @@ PROMPT;
                     }
                 }
             }
+
+            // Same unified health gate as build mode. Skips a full validator
+            // re-check here — this delta only carries the files it actually
+            // changed, not the project's complete current file set, so
+            // re-running ai_validator_check_project against just that subset
+            // would misfire on anything the OTHER, already-deployed files
+            // already satisfy (a route another feature file defines, etc.).
+            // deploy_error/staging and policy reachability don't have that
+            // problem — both reflect real, whole-project state either way.
+            $unreachablePolicies = $catalog->findUnreachablePolicies($projectId);
+            $result['health'] = ai_assess_deploy_health(
+                $result['validation'] ?? [],
+                $result['deploy_error'] ?? null,
+                $result['staging'] ?? null,
+                $unreachablePolicies
+            );
             json_out($result);
 
         } else {
