@@ -1484,7 +1484,10 @@ Available tools:
   write_file   args: {"path": string, "content": string}
     Creates or overwrites one .jsx or .js file. The result tells you immediately whether it passed
     a syntax check (a real esbuild parse of that file) — fix it and write_file again if not. Write
-    App.jsx first (or early), then each feature component, importing it into whatever renders it.
+    bottom-up: leaf/child components first, then whatever imports them, with App.jsx LAST (it
+    imports everything else, so writing it first just means editing it again once its imports
+    actually exist — and smoke_test/deploy will fail to bundle in the meantime with a "Could not
+    resolve" error for every import that doesn't have a file yet).
     HARD RULE: if you're rewriting a path you already write_file'd earlier this session, read_file
     it first so your change is based on what you actually wrote, not a guess from memory.
     To save tokens, your own past write_file calls show up in your history with the content field
@@ -1521,8 +1524,8 @@ Available tools:
     write_file'd, and every entry in your routes map has something linking to it). Do NOT repeat
     file content here — anything you already write_file'd is included automatically.
 
-Start with plan, then write App.jsx first, then each feature component in turn, wiring it into
-App.jsx (or a parent component) and its route as you go. Use search_code/read_file to stay
+Start with plan, then write each feature/leaf component first, and write App.jsx (or any other
+file that imports the rest) LAST, once everything it needs to import already exists. Use search_code/read_file to stay
 consistent with what you've already written instead of re-deriving it from memory. You have a
 limited number of turns, so don't re-check something you're already sure of. If a write_file's
 syntax check fails, that error is the truth — fix the actual problem it names, don't just retry

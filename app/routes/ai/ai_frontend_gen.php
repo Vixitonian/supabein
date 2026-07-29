@@ -351,6 +351,7 @@ function ai_run_build_frontend_agentic(
     $lastFailedFileErrorSignature = null; // hash of the last failing smoke_test's console_errors -- see rewrite guard below
     $consecutiveIdenticalSmokeTestFailures = 0; // see ai_agent_check_canonical_wrapper_abandonment() gate below
     $writesSinceLastCheck = 0; // consecutive write_file/write_files/patch_file calls with no intervening smoke_test
+    $lastSyntaxFailedFile = null; // path of the last write/patch whose OWN syntax_ok came back false -- see gate below
 
     for ($turn = 1; $turn <= AI_BUILD_FRONTEND_AGENT_MAX_TURNS; $turn++) {
         $_t0 = microtime(true);
@@ -465,6 +466,13 @@ function ai_run_build_frontend_agentic(
             // escalates to a forceful, specific instruction once that
             // pattern repeats instead of leaving it to grind to the turn
             // limit.
+            if ($lastSyntaxFailedFile !== null) {
+                $turnMsg = json_encode(['tool' => 'finish', 'error' => ai_agent_note_finish_rejected(
+                    $consecutiveFinishRejections,
+                    "{$lastSyntaxFailedFile} still fails its syntax check. Fix it before calling finish."
+                )]);
+                continue;
+            }
             if ($lastSmokeTestOk === false && !$lastSmokeTestWasConnectionError) {
                 // Live-observed: the message alone wasn't enough either -- a
                 // model can read "fix the actual problem" and still call
@@ -515,6 +523,31 @@ function ai_run_build_frontend_agentic(
             continue;
         }
 
+        // Syntax-failure gate: write_file/patch_file already return syntax_ok
+        // for free (a real esbuild/node parse of just that one file — no
+        // Browserless round trip needed), cheaper and faster than waiting for
+        // smoke_test to rediscover the exact same broken file. Live-observed
+        // (a real react-stack build): a write_file's own syntax_ok:false was
+        // sitting right there in its result, unacted on, while the model kept
+        // moving on to write OTHER files -- the same broken file then had to
+        // be rediscovered via a full smoke_test call minutes later. Blocking
+        // any write/patch to a DIFFERENT path (and any batched write_files,
+        // which touches multiple paths at once) until the one broken file is
+        // fixed forces the cheap signal to be acted on immediately.
+        if ($lastSyntaxFailedFile !== null && $tool === 'write_files') {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                "{$lastSyntaxFailedFile} failed its syntax check and hasn't been fixed yet. Fix it with a single " .
+                'write_file or patch_file call to that exact path before writing any other files.']);
+            continue;
+        }
+        if ($lastSyntaxFailedFile !== null && in_array($tool, ['write_file', 'patch_file'], true)
+            && ($args['path'] ?? null) !== $lastSyntaxFailedFile) {
+            $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                "{$lastSyntaxFailedFile} failed its syntax check and hasn't been fixed yet. Fix that file before " .
+                'writing or patching anything else.']);
+            continue;
+        }
+
         // Repeated-failure rewrite guard (job 210, task #193): only fires
         // once the same error has repeated enough times to make "rewrite it"
         // a live temptation, and only when the write actually targets the
@@ -548,6 +581,23 @@ function ai_run_build_frontend_agentic(
         // check_policy, so it has no route to actually call it. validate_frontend
         // works fine here though — it only needs the schema plan, not a live DB.
         $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, 0, $schemaPlan, $frontendStack, (string)($schemaPlan['project_name'] ?? 'App'));
+
+        // Update the syntax-failure gate's state from this write/patch's own
+        // result -- see the pre-dispatch checks above for why this is worth
+        // tracking separately from (and ahead of) smoke_test's own tracking.
+        if ($tool === 'write_file' || $tool === 'patch_file') {
+            $syntaxOk = $toolResult['result']['syntax_ok'] ?? true;
+            $lastSyntaxFailedFile = $syntaxOk ? null : ($toolResult['result']['path'] ?? $args['path'] ?? null);
+        } elseif ($tool === 'write_files') {
+            $lastSyntaxFailedFile = null;
+            foreach ($toolResult['result']['files'] ?? [] as $fileResult) {
+                if (($fileResult['result']['syntax_ok'] ?? true) === false) {
+                    $lastSyntaxFailedFile = $fileResult['result']['path'] ?? null;
+                    break;
+                }
+            }
+        }
+
         if ($tool === 'smoke_test') {
             $writesSinceLastCheck = 0;
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;
