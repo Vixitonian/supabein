@@ -2262,10 +2262,19 @@ const AiPanel = (() => {
         continue;
       }
 
-      // A pure liveness tick from the server's keep-alive comment -- nothing
-      // new to apply, just proof the connection (and lastPollTickAt above)
-      // is current.
-      if (job.heartbeat) continue;
+      // A pure liveness tick from the server's keep-alive comment (every 10s
+      // -- see the stream route) -- nothing new to APPLY, but the active
+      // stage's elapsed-time label and the card's total-elapsed label are
+      // both computed live off serverNow() in renderProgressCard(), so they
+      // only ever visibly tick forward when something calls renderMessages()
+      // again. Skipping that here left the whole card looking frozen (timer
+      // included) for as long as a stage's own AI call ran without emitting
+      // a new progress event -- live-caught on a schema stage that silently
+      // retried for several minutes inside the provider client (invisible
+      // to progress reporting, which only logs stage start/done): the
+      // stream was alive and heartbeating the entire time, proving the
+      // connection was fine, but nothing ever redrew to show it.
+      if (job.heartbeat) { renderMessages(); continue; }
 
       const hadNewEvents = job.events && job.events.length > 0;
       try {
