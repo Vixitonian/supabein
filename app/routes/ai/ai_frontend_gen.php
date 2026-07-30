@@ -620,6 +620,12 @@ function ai_run_build_frontend_agentic(
                 $changedFiles[$args['path']], (string)($args['content'] ?? '')
             );
             if ($rewritePct !== null) {
+                // Logged (not just returned to the model) so this gate's real
+                // firing rate is directly observable in storage/ai_pipeline_debug.log
+                // -- otherwise its only trace is $turnMsg, which never reaches any
+                // log, making "is this gate actually blocking anything?" impossible
+                // to answer after the fact.
+                ai_pipeline_debug_log('gate', "wasteful-rewrite blocked: {$args['path']} ({$rewritePct}% identical)");
                 $turnMsg = json_encode(['tool' => $tool, 'error' =>
                     ai_agent_note_wasteful_rewrite_blocked($args['path'], $rewritePct)]);
                 continue;
@@ -631,6 +637,7 @@ function ai_run_build_frontend_agentic(
         if ($tool === 'write_file' && ($args['path'] ?? null) === 'index.html') {
             $degenerateError = ai_agent_check_degenerate_index_html((string)($args['content'] ?? ''));
             if ($degenerateError !== null) {
+                ai_pipeline_debug_log('gate', 'degenerate index.html blocked (write_file)');
                 $turnMsg = json_encode(['tool' => $tool, 'error' => $degenerateError]);
                 continue;
             }
@@ -640,6 +647,7 @@ function ai_run_build_frontend_agentic(
                 if (($f['path'] ?? null) !== 'index.html') continue;
                 $degenerateError = ai_agent_check_degenerate_index_html((string)($f['content'] ?? ''));
                 if ($degenerateError !== null) {
+                    ai_pipeline_debug_log('gate', 'degenerate index.html blocked (write_files)');
                     $turnMsg = json_encode(['tool' => $tool, 'error' => $degenerateError]);
                     continue 2;
                 }
