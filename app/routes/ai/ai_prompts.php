@@ -212,10 +212,19 @@ bootstrap anyway, because only the two defineRoute lines below carried an inline
 marked the OTHER auth-touching lines the same way. Treat the two variants below as mutually
 exclusive, not layers to combine.
 
+EVERY page needs exactly ONE mount point for feature content: a `<div id="app">`, a sibling of
+`<nav>`, NEVER wrapping it — every renderView()/renderDetail() function in every feature file sets
+`document.getElementById('app').innerHTML = ...`, so if header/nav markup lives inside that same div,
+the next render silently wipes them out. Use the id "app" and only "app" for this — a feature file
+calling getElementById on any other name for the SAME purpose (a typo, a rename mid-build, a second
+mount div) gets null back and crashes the instant that route renders, with no signal at write time
+that anything was wrong.
+
 IF THE SCHEMA HAS NO PASSWORD COLUMN, the bootstrap has no nav-login/nav-logout/auth code at all:
   <nav id="nav-menu" ...>
     <a href="#/" ...>Notes</a>
   </nav>
+  <div id="app"></div>
   <script>
     router.defineRoute('/', featureA.renderView);
     router.defineRoute('/items/:id', featureA.renderDetail); // ':id' → handler receives {id}
@@ -241,6 +250,7 @@ gets class="nav-authed-only" and is toggled the same way, in the same function:
     <a href="#/login" id="nav-login" ...>Login</a>
     <button id="nav-logout" class="hidden ...">Logout</button>
   </nav>
+  <div id="app"></div>
   <script>
     /* define updateNav() here ONCE (function declaration is fine) */
     function updateNav() {

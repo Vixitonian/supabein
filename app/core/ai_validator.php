@@ -436,6 +436,44 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
         }
     }
 
+    // ── getElementById() targeting an id that exists nowhere ────────────────
+    // Live-caught (job 229): renderView() called document.getElementById('X')
+    // where "X" was never present as an id="X" attribute anywhere the model
+    // wrote -- getElementById() returns null for a nonexistent id, and the
+    // very next line (almost always .innerHTML = ...) throws "Cannot set
+    // properties of null" the instant that route renders. Root cause: RULE
+    // 2's own worked example never actually shows a concrete <div id="app">
+    // markup (only the nav/bootstrap script fragment), so nothing pins down
+    // one canonical mount-point id, and the model's index.html and its
+    // feature files can drift apart on what that id is called.
+    // "Known ids" is built from literal id="X" occurrences across EVERY
+    // file, not just index.html's real markup -- a feature file that both
+    // creates an id inside its own innerHTML template string (e.g.
+    // `id="add-task-form"`) and later queries it by that same literal id is
+    // a common, entirely legitimate pattern that must not false-positive
+    // here. Only a genuinely interpolated id (e.g. id="${task.id}") never
+    // matches this literal-string regex in the first place, so dynamic
+    // per-row ids are naturally excluded on both sides — never collected as
+    // "known" and never checked as a getElementById() target, since a
+    // dynamic id is looked up by class/attribute selector in idiomatic code,
+    // not a literal getElementById() call.
+    $knownIds = [];
+    foreach ($byPath as $content) {
+        if (preg_match_all('/\bid=["\']([\w-]+)["\']/', $content, $m)) {
+            foreach ($m[1] as $id) $knownIds[$id] = true;
+        }
+    }
+    foreach ($byPath as $path => $content) {
+        if (!str_ends_with($path, '.js') || in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
+        if (!preg_match_all('/getElementById\(\s*["\']([\w-]+)["\']\s*\)/', $content, $m2)) continue;
+        foreach (array_unique($m2[1]) as $id) {
+            if (isset($knownIds[$id])) continue;
+            $findings[] = ai_validator_finding('error', 'script',
+                "{$path} calls document.getElementById('{$id}'), but no element with id=\"{$id}\" exists anywhere",
+                'getElementById() returns null for a nonexistent id — the next line (almost always .innerHTML = ... or .addEventListener(...)) throws "Cannot set properties of null" the instant this code runs.');
+        }
+    }
+
     // ── Dangling <script src> — index.html links a file that was never written ──
     // The opposite direction of the module/route check below (which catches a
     // written file that ISN'T loaded); this catches a LOADED path that was
