@@ -95,19 +95,44 @@ function ai_run_build_frontend(array $schemaPlan, array $designBrief, string $pr
         $errors = array_values(array_filter($validation, fn($f) => $f['severity'] === 'error'));
         if ($errors) {
             $report(['stage' => 'validate', 'status' => 'active', 'label' => 'Fixing validation errors…',
-                     'detail' => count($errors) . ' error(s) found — retrying frontend generation…']);
-            $fixNote = "\n\nYour previous attempt at this frontend had these CONFIRMED problems — fix every one "
-                . "of them, using only the exact table/column names in the schema above:\n"
+                     'detail' => count($errors) . ' error(s) found — patching…']);
+            // Live-caught (job 228): this used to call ai_run_build_frontend_agentic()
+            // again -- a full FRESH build, starting from an empty $byPath (see that
+            // function's own "a fresh build starts with nothing on disk" comment) --
+            // even though the files it just wrote are already mostly correct and
+            // sitting right there in $plan. The agent had no way to know that, so it
+            // paid for a second complete rebuild (write every file, run the whole
+            // smoke_test cycle again) just to fix a handful of confirmed findings --
+            // measured live at 810s, on par with the ORIGINAL 549s first pass, for a
+            // fix that touched two files. ai_run_edit_generation_agentic() (the same
+            // loop autofix uses) is built exactly for "here are the current files, fix
+            // these specific confirmed problems" -- seeding it with $plan's own files
+            // means the agent can read_file/patch_file the two or three implicated
+            // files directly instead of regenerating everything, and it inherits every
+            // other efficiency gate that loop already has (wasteful-rewrite,
+            // cadence, syntax-failure). $projectId=0 is a safe placeholder here --
+            // ai_run_edit_agent_tool() already tolerates it (see its own
+            // "$projectId <= 0" guards) since nothing here needs a real persisted
+            // project; validate_frontend-equivalent checks only need the schema plan.
+            $fixNote = "Fix the following CONFIRMED problems in the current frontend code. Read each implicated "
+                . "file first, then make the smallest change that actually fixes it -- prefer patch_file over "
+                . "write_file unless a file needs to be created from scratch:\n"
                 . implode("\n", array_map(fn($f) => '- ' . $f['message'] . (!empty($f['detail']) ? ' (' . $f['detail'] . ')' : ''), $errors));
-            $retry = ai_run_build_frontend_agentic($schemaPlan, $designBrief, $prompt . $fixNote, $client, $config, $report, $refs, $approvedIntent, $frontendStack);
-            $aiTrace = array_merge($aiTrace, $retry['aiTrace'] ?? []);
-            foreach ($feUsage as $k => $v) $feUsage[$k] = $v + (int)($retry['usage'][$k] ?? 0);
+            $retryDelta = ai_run_edit_generation_agentic($fixNote, [], $schemaPlan, $plan['frontend']['files'], $client, $config, $report, 0, null, $refs, null);
+            $aiTrace = array_merge($aiTrace, $retryDelta['aiTrace'] ?? []);
+            foreach ($feUsage as $k => $v) $feUsage[$k] = $v + (int)($retryDelta['usage'][$k] ?? 0);
 
-            $plan['frontend'] = ['files' => $retry['files'] ?? []];
-            foreach ($plan['frontend']['files'] as &$file) {
-                $file['path'] = ltrim(preg_replace('#^\./+#', '', $file['path'] ?? ''), '/');
-            }
-            unset($file);
+            // ai_run_edit_generation_agentic() only returns what actually CHANGED
+            // (it's designed to merge against a real project's own disk state at
+            // apply time) -- here $plan['frontend']['files'] is the only full file
+            // set that exists pre-deploy, so the merge happens here instead.
+            $mergedByPath = [];
+            foreach ($plan['frontend']['files'] as $f) $mergedByPath[$f['path']] = $f['content'];
+            foreach ($retryDelta['frontend']['files'] ?? [] as $f) $mergedByPath[$f['path']] = $f['content'];
+            $plan['frontend']['files'] = array_map(
+                fn($p) => ['path' => ltrim(preg_replace('#^\./+#', '', $p), '/'), 'content' => $mergedByPath[$p]],
+                array_keys($mergedByPath)
+            );
             $validation = ai_validator_check_project($plan, $plan['frontend']['files'], $frontendStack);
         }
 
