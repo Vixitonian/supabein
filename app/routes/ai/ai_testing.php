@@ -961,6 +961,16 @@ let lastPath = '/';
 // __recycle__'s reconnect at each story boundary -- so each story's errors
 // don't bleed into the next one's report.
 let consoleErrors = [];
+// Same reasoning and same placeholder-project-id-0 caveat as the single-shot
+// smoke_test script (see ai_fetch_page_script_generate()) -- this interactive
+// agent is what actually drives the autofix loop's read/write turns on a
+// failure, so without this it was diagnosing "tasks is not defined" with
+// LESS information than the initial build's smoke_test call: no stack (just
+// the bare message), and no filter for the guaranteed-unfixable /errors/0
+// 404 noise. Live-observed (jobs 233/234): stuck cycling many turns on this
+// exact error without resolving it.
+let failedResources = [];
+let sawPlaceholderProjectDataError = false;
 
 function sendResult(obj) {
   process.stdout.write('@@RESULT@@' + JSON.stringify(obj) + '\n');
@@ -976,8 +986,18 @@ async function connectAndLogin() {
   page = await browser.newPage();
   page.setDefaultTimeout(15000);
   consoleErrors = [];
-  page.on('pageerror', (e) => consoleErrors.push(String((e && e.message) || e)));
+  failedResources = [];
+  sawPlaceholderProjectDataError = false;
+  page.on('pageerror', (e) => consoleErrors.push(String((e && e.stack) || (e && e.message) || e).slice(0, 500)));
   page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
+  page.on('response', (r) => {
+    try {
+      if (r.status() === 404 && /\/api\/v1\/(data\/0\/|errors\/0\b)/.test(r.url())) sawPlaceholderProjectDataError = true;
+      if (r.status() >= 400 && failedResources.length < 10) {
+        failedResources.push({ url: r.url(), status: r.status() });
+      }
+    } catch (_) {}
+  });
 __LOGIN_BLOCK__
 }
 
@@ -1004,11 +1024,15 @@ async function doSnapshot() {
   lastHandles = items.map(it => it.handle);
   let bodyText = '';
   try { bodyText = await page.evaluate(() => document.body.innerText); } catch (_) {}
+  const filteredConsoleErrors = sawPlaceholderProjectDataError
+    ? consoleErrors.filter((e) => !/^Failed to load resource: the server responded with a status of 404/.test(e))
+    : consoleErrors;
   return {
     url: page.url(),
     elements: items.map((it, i) => Object.assign({ index: i }, it.info)),
     bodyText: bodyText.slice(0, 1500),
-    console_errors: consoleErrors.slice(0, 10),
+    console_errors: filteredConsoleErrors.slice(0, 10),
+    failed_resources: failedResources,
   };
 }
 
