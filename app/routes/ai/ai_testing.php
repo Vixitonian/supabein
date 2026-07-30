@@ -1665,6 +1665,11 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
     // repeating the same mistake.
     $priorAttemptContext = '';
 
+    // Fetched once -- frontend_stack doesn't change across attempts, only
+    // used to pick the right validator ruleset below.
+    $autofixProject = $catalog->getProjectById($projectId, $userId);
+    $autofixStack   = ($autofixProject['frontend_stack'] ?? 'vanilla') === 'react' ? 'react' : 'vanilla';
+
     $result = ai_run_project_tests_with_connection_retry($projectId, $userId, $catalog, $config, $report, $client);
     $addUsage($result['usage'] ?? null);
     if (!empty($result['connection_error'])) {
@@ -1702,6 +1707,43 @@ function ai_run_test_and_autofix(int $projectId, int $userId, \SupaBein\Catalog 
                 fn($s) => '- "' . ($s['label'] ?? 'Untitled story') . '": ' . ($s['detail'] ?? 'no detail captured'),
                 $failingStories
             ));
+
+        // job 220: a story failure described only as "the delete button
+        // doesn't work" was actually an inline onclick="" attribute losing
+        // its lexical scope -- a bug class the validator has caught
+        // deterministically, in milliseconds, since before this loop
+        // existed. But nothing here ever consulted it: 2 full autofix
+        // attempts (each a real Browserless story-test round trip) guessed
+        // blindly against the vague symptom text and never touched the
+        // actual line, because the one signal that would have named it
+        // precisely was never in the fix agent's context at all -- it's
+        // only ever run separately, after the whole test+autofix job
+        // finishes, purely for reporting. Running it HERE, fresh against
+        // the current deployed code, on every attempt (not just the first)
+        // means any bug in an already-known category (this, inline onX="",
+        // dangling script src, route/module mismatches, ...) gets a
+        // deterministic diagnosis instead of another round of guesswork --
+        // this generalizes past onclick to every check ai_validator_check_
+        // project() already knows, present and future, with nothing new to
+        // special-case here.
+        try {
+            $currentFrontendFiles = ai_read_full_frontend_files($config, $catalog, $projectId, $result['target'] ?? null);
+            $mechanicalFindings = array_values(array_filter(
+                ai_validator_check_project(ai_schema_from_db($projectId, $catalog), $currentFrontendFiles, $autofixStack),
+                fn($f) => $f['severity'] === 'error'
+            ));
+        } catch (\Throwable) {
+            $mechanicalFindings = []; // best-effort -- a validator hiccup shouldn't block the story-detail-only fix
+        }
+        if ($mechanicalFindings) {
+            $fixPrompt .= "\n\nStatic analysis of the CURRENT deployed code found the following confirmed bugs -- "
+                . 'these are deterministic, not inferred from the story symptom text above. If any of these '
+                . 'plausibly explain a failing story, fix them exactly as described; this is more reliable than '
+                . "reasoning from the symptom alone:\n\n" . implode("\n", array_map(
+                    fn($f) => "- {$f['message']}" . ($f['detail'] ? " — {$f['detail']}" : ''),
+                    $mechanicalFindings
+                ));
+        }
 
         // job 211 (task #195): a failure detail literally stating "remained
         // at 0 instead of decrementing to -1" was enough information to spot

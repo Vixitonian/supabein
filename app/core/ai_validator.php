@@ -436,6 +436,7 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     // appear in $frontendFiles here — excluded, not a bug.
     foreach (array_unique($scriptSrcs) as $src) {
         if (in_array($src, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
+        if (preg_match('#^(?:https?:)?//#i', $src)) continue; // external CDN script (e.g. Tailwind) — never local
         if (!isset($byPath[$src])) {
             $findings[] = ai_validator_finding('error', 'script',
                 "index.html loads \"{$src}\" via <script src>, but that file was never written",
