@@ -875,7 +875,23 @@ function ai_check_js_syntax(string $path, string $content, array $config): array
     }
 
     foreach ($blocks as $i => $block) {
-        $tmp = sys_get_temp_dir() . '/sb_agentcheck_' . getmypid() . '_' . time() . '_' . $i . '.mjs';
+        // .js, NOT .mjs -- every file this function ever checks (vanilla-
+        // stack feature .js files, inline <script> blocks in index.html) is
+        // loaded in the real deployed app via a plain <script src> tag or
+        // inline <script>, never <script type="module">, so it MUST parse as
+        // a classic script, not an ES module. Live-caught (job 231): a file
+        // containing `export default tasks;` passed this check cleanly
+        // (valid as a module, which .mjs forced) while throwing "Unexpected
+        // token 'export'" the instant the real browser tried to parse it as
+        // a classic script -- the entire file silently failed to execute,
+        // producing the generic, hard-to-diagnose "tasks is not defined"
+        // instead of the actual SyntaxError, and no number of smoke_test
+        // round trips ever pointed at the real cause since this check kept
+        // giving it a clean bill of health. Confirmed directly against the
+        // real production Node 16 binary: identical content exits 1 as .js,
+        // 0 as .mjs -- .jsx (react, genuinely ES modules via esbuild) is
+        // already routed to ai_react_syntax_check() above and unaffected.
+        $tmp = sys_get_temp_dir() . '/sb_agentcheck_' . getmypid() . '_' . time() . '_' . $i . '.js';
         file_put_contents($tmp, $block);
         exec(escapeshellarg($nodeBin) . ' --check ' . escapeshellarg($tmp) . ' 2>&1', $out, $code);
         @unlink($tmp);
