@@ -587,6 +587,20 @@ function ai_run_build_frontend_agentic(
             }
         }
 
+        // Wasteful full-rewrite gate: see ai_agent_check_wasteful_full_rewrite()
+        // in ai_shared.php for why. Only fires on a REwrite of a path this
+        // same session already wrote (never a first edit against $byPath).
+        if ($tool === 'write_file' && isset($changedFiles[$args['path'] ?? null])) {
+            $rewritePct = ai_agent_check_wasteful_full_rewrite(
+                $changedFiles[$args['path']], (string)($args['content'] ?? '')
+            );
+            if ($rewritePct !== null) {
+                $turnMsg = json_encode(['tool' => $tool, 'error' =>
+                    ai_agent_note_wasteful_rewrite_blocked($args['path'], $rewritePct)]);
+                continue;
+            }
+        }
+
         if (in_array($tool, ['write_file', 'write_files', 'patch_file'], true)) {
             $writesSinceLastCheck++;
         }

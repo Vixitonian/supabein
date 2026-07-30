@@ -533,6 +533,30 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
         }
     }
 
+    // ── Bare `auth.*` usage with no PASSWORD column ────────────────────────
+    // The route-handler check above only catches auth.* referenced as a
+    // router.defineRoute() target. Live-caught (job 227): a no-auth project's
+    // bootstrap script called auth.getCurrentUser()/auth.ready/auth.logout()
+    // directly (not as a route handler) despite correctly leaving out the
+    // auth.js <script src> tag per RULE 3 — the `auth` global genuinely does
+    // not exist anywhere on that page, and referencing it throws "auth is not
+    // defined" the instant the bootstrap script runs, blanking the whole
+    // page. That pattern is invisible to the route-handler check, so it needs
+    // its own scan across every file's actual content, not just parsed route
+    // definitions. Scoped to the known real auth methods (not a bare `\bauth\b`
+    // match) so an unrelated identifier like `authForm` or a comment
+    // mentioning "the auth.js file" can't false-positive.
+    if (!$hasAuthTable) {
+        $authMethodPattern = '/\bauth\.(' . implode('|', AI_VALIDATOR_AUTH_EXPORTS) . ')\b/';
+        foreach ($byPath as $path => $content) {
+            if (in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
+            if (!is_string($content) || !preg_match($authMethodPattern, $content, $am)) continue;
+            $findings[] = ai_validator_finding('error', 'script',
+                "{$path} references \"auth.{$am[1]}\", but this schema has no PASSWORD column so features/auth/auth.js was never loaded",
+                'There is no `auth` global anywhere on this page — this throws "auth is not defined" the moment the script runs and blanks the whole page. Remove every auth-gated nav element (nav-login, nav-logout, nav-authed-only) and every reference to auth.* from this file; this project has no login system.');
+        }
+    }
+
     // ── Nav ↔ route consistency (dead links, unreachable routes) ──────────
     $matchesRoute = function (string $href) use ($definedPaths): bool {
         foreach ($definedPaths as $p) {

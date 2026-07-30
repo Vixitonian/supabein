@@ -634,6 +634,44 @@ function ai_agent_note_repeated_failure_rewrite_blocked(string $file): string
          . 'error — do not rewrite the whole file.';
 }
 
+// Wasteful full-rewrite gate: live-caught in a real vanilla build (job 227)
+// — features/tasks/tasks.js was regenerated via write_file SEVEN times in
+// under nine minutes in one frontend-generation run, each full regeneration
+// costing 100-180s of real model generation time (confirmed against that
+// job's own debug log: a ~5-7KB file, one write_file call per fix), while
+// the bug being fixed each time was small and localized (a wrong selector,
+// an undefined const, a mismatched call) — not a restructure. patch_file
+// exists precisely for this, and the prompt already says "PREFER THIS...
+// whenever you're changing a small part of a file" — but that's advisory,
+// never enforced, exactly the gap every OTHER gate in this file exists to
+// close instead of trusting wording alone. A write_file call whose new
+// content is still mostly identical (by character overlap) to what's
+// already on disk for that exact path is the deterministic signature of
+// "this should have been a patch" — the threshold is generous (well over
+// half the file unchanged) specifically so a genuine restructure, which
+// changes most of a file's content, never trips it. Only ever compared
+// against $changedFiles (a path this SAME session already wrote), never
+// $byPath (a pre-existing project's original file) — a first edit to a
+// file that predates this session is a legitimate one-time change, not the
+// repeat-thrash this exists to catch.
+const AI_AGENT_WASTEFUL_REWRITE_SIMILARITY_PCT = 60.0;
+const AI_AGENT_WASTEFUL_REWRITE_MIN_LEN = 500;
+
+function ai_agent_check_wasteful_full_rewrite(string $oldContent, string $newContent): ?float
+{
+    if (strlen($oldContent) < AI_AGENT_WASTEFUL_REWRITE_MIN_LEN) return null;
+    similar_text($oldContent, $newContent, $pct);
+    return $pct >= AI_AGENT_WASTEFUL_REWRITE_SIMILARITY_PCT ? $pct : null;
+}
+
+function ai_agent_note_wasteful_rewrite_blocked(string $path, float $pct): string
+{
+    return "{$path} already exists and this write_file's content is " . round($pct) . '% identical to what\'s '
+         . "already on disk there — most of the file is unchanged, which means this should be a patch_file call, "
+         . 'not a full rewrite. Call patch_file instead, with "find" spanning just the part that actually needs to '
+         . 'change and "replace" with the fix — it is faster and lower-risk than regenerating the whole file.';
+}
+
 // The full aiTrace (every tool call, every raw smoke_test result) only
 // reaches ai_jobs.result once the job finishes -- while it's still running,
 // polling ai_jobs.progress (what $report() writes, live) only ever showed a

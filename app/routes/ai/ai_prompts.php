@@ -198,13 +198,44 @@ Therefore:
   again anywhere — not inline, not in a second file.
 - Do NOT dump the whole app into index.html. The files are the app; index.html only wires them.
 
-The inline bootstrap contains ONLY (when auth exists, nav-login and nav-logout are TWO SEPARATE,
-ALWAYS-PRESENT elements toggled by the 'hidden' class — NEVER one element whose id/text/href you
-rewrite between "login" and "logout" state. An id you just reassigned is no longer findable by its
-old id on the next call, so re-querying it by that old id later returns null and crashes; toggling
-visibility on two static elements has no such trap and needs no listener to be added more than once.
-Any OTHER nav link whose route requires a logged-in user — see RULE 3's "gate the nav link itself"
-paragraph — gets class="nav-authed-only" and is toggled the same way, in the same function):
+EVERY line below that touches `auth` in any way — the nav-login/nav-logout elements, updateNav()'s
+body, the nav-logout click listener, the auth_status_change listener, and wrapping startup in
+auth.ready.then(...) instead of calling router.onHashChange() directly — applies ONLY IF THE SCHEMA
+HAS A PASSWORD COLUMN. This is the exact same condition RULE 3 already gates the auth.js script tag
+on; it is not a separate, looser rule for this specific block just because it's example code. A
+schema with no PASSWORD column means there is no `auth` global anywhere on the page (its script tag
+was correctly never included) — writing `auth.getCurrentUser()`, `auth.ready`, or `auth.logout()`
+into the bootstrap of a no-auth project throws "auth is not defined" the instant that script runs
+and blanks the whole page. Live-caught: a model correctly left out the auth.js <script src> tag per
+RULE 3 for a no-auth project, then copied this example's updateNav()/auth.ready pattern into the
+bootstrap anyway, because only the two defineRoute lines below carried an inline reminder — nothing
+marked the OTHER auth-touching lines the same way. Treat the two variants below as mutually
+exclusive, not layers to combine.
+
+IF THE SCHEMA HAS NO PASSWORD COLUMN, the bootstrap has no nav-login/nav-logout/auth code at all:
+  <nav id="nav-menu" ...>
+    <a href="#/" ...>Notes</a>
+  </nav>
+  <script>
+    router.defineRoute('/', featureA.renderView);
+    router.defineRoute('/items/:id', featureA.renderDetail); // ':id' → handler receives {id}
+    /* ... all other routes ... */
+
+    document.getElementById('nav-toggle').addEventListener('click', () => {
+      document.getElementById('nav-menu').classList.toggle('hidden');
+    });
+
+    router.onHashChange();
+    window.addEventListener('hashchange', router.onHashChange);
+  </script>
+
+IF THE SCHEMA HAS A PASSWORD COLUMN, nav-login and nav-logout are TWO SEPARATE, ALWAYS-PRESENT
+elements toggled by the 'hidden' class — NEVER one element whose id/text/href you rewrite between
+"login" and "logout" state. An id you just reassigned is no longer findable by its old id on the
+next call, so re-querying it by that old id later returns null and crashes; toggling visibility on
+two static elements has no such trap and needs no listener to be added more than once. Any OTHER nav
+link whose route requires a logged-in user — see RULE 3's "gate the nav link itself" paragraph —
+gets class="nav-authed-only" and is toggled the same way, in the same function:
   <nav id="nav-menu" ...>
     <a href="#/" class="nav-authed-only hidden" ...>Notes</a>
     <a href="#/login" id="nav-login" ...>Login</a>
@@ -224,8 +255,8 @@ paragraph — gets class="nav-authed-only" and is toggled the same way, in the s
     });
 
     router.defineRoute('/', featureA.renderView);
-    router.defineRoute('/login', auth.renderLogin);   // only if schema has a PASSWORD column
-    router.defineRoute('/signup', auth.renderSignup); // only if schema has a PASSWORD column
+    router.defineRoute('/login', auth.renderLogin);
+    router.defineRoute('/signup', auth.renderSignup);
     router.defineRoute('/items/:id', featureA.renderDetail); // ':id' → handler receives {id}
     /* ... all other routes ... */
 
