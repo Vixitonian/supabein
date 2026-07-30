@@ -408,6 +408,18 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     // regexes didn't anticipate.
     foreach ($byPath as $path => $content) {
         if (!str_ends_with($path, '.js')) continue;
+        // Live-caught (job 228): this loop used to run over EVERY .js path,
+        // including platform-canonical ones (core/router.js, core/api.js,
+        // core/errors.js) that are always force-injected with fixed content
+        // at deploy time regardless of what's written here -- see
+        // AI_PLATFORM_CANONICAL_PATHS's own doc comment. A "this" finding
+        // against one of those isn't a bug the model can ever fix; it sent
+        // an autofix attempt into a dozen-turn loop rereading and
+        // search_code'ing those exact files hunting for something to change
+        // that was never going to be there. Same fix shape as the dangling-
+        // <script src> check just above: skip what the model doesn't
+        // actually control.
+        if (in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
         if (preg_match('/\bthis\b/', $content)) {
             $findings[] = ai_validator_finding('error', 'script',
                 "{$path} contains the word \"this\"",
@@ -416,6 +428,7 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     }
     foreach ($byPath as $path => $content) {
         if (str_ends_with($path, '.jsx')) continue; // react stack never reaches this block at all (see guard above)
+        if (in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue; // see the "this"-ban loop above for why
         if (preg_match('/(?<=[\s"\'])on[a-z]+\s*=\s*["\']/i', $content, $m)) {
             $findings[] = ai_validator_finding('error', 'script',
                 "{$path} contains an inline HTML event-handler attribute ({$m[0]})",
