@@ -680,6 +680,45 @@ function ai_run_build_frontend_agentic(
             }
         }
 
+        // Incremental hard-invariant check (task #215): catch id-mismatch,
+        // bare auth.* reference, and api.*-against-nonexistent-table the
+        // instant a write introduces them, instead of only at the end
+        // (explicit validate_frontend call or the final validate stage) --
+        // gated on index.html already existing so a reference to something
+        // simply not written yet (entirely normal early in a build) isn't
+        // mistaken for a real mismatch. Informational only (appended to this
+        // turn's own result, not a hard block that discards the write) --
+        // the write is almost always otherwise-correct, so forcing a full
+        // regeneration over one wrong id/table name would just recreate the
+        // wasteful-rewrite problem task #214 eliminated.
+        if (in_array($tool, ['write_file', 'write_files', 'patch_file'], true)
+            && (isset($byPath['index.html']) || isset($changedFiles['index.html']))) {
+            $touchedPaths = [];
+            if (($tool === 'write_file' || $tool === 'patch_file') && isset($toolResult['result']['path'])) {
+                $touchedPaths[] = $toolResult['result']['path'];
+            } elseif ($tool === 'write_files') {
+                foreach ($toolResult['result']['files'] ?? [] as $fr) {
+                    if (isset($fr['result']['path'])) $touchedPaths[] = $fr['result']['path'];
+                }
+            }
+            if ($touchedPaths) {
+                $merged = $byPath;
+                foreach ($changedFiles as $p => $c) $merged[$p] = $c;
+                $incrementalNotes = [];
+                foreach ($touchedPaths as $tp) {
+                    if (!isset($merged[$tp])) continue;
+                    foreach (ai_validator_check_incremental_for_write($tp, $merged[$tp], $schemaPlan, $frontendStack, $merged) as $incF) {
+                        $incrementalNotes[] = $incF['message'] . (!empty($incF['detail']) ? ' -- ' . $incF['detail'] : '');
+                    }
+                }
+                if ($incrementalNotes) {
+                    $toolResult['mechanical_findings'] = 'Confirmed problem(s) introduced by this write -- fix before doing anything else: '
+                        . implode(' | ', $incrementalNotes);
+                    ai_pipeline_debug_log('gate', 'incremental validator finding: ' . implode(' | ', $incrementalNotes));
+                }
+            }
+        }
+
         if ($tool === 'smoke_test') {
             $writesSinceLastCheck = 0;
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;

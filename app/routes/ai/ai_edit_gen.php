@@ -864,6 +864,40 @@ function ai_run_edit_generation_agentic(
         }
 
         $toolResult = ai_run_edit_agent_tool($tool, $args, $byPath, $changedFiles, $readPaths, $config, $projectId, $existingSchema);
+
+        // Incremental hard-invariant check (task #215) -- see the matching
+        // block in ai_run_build_frontend_agentic() for full reasoning.
+        // 'vanilla' literally, matching this function's own dispatcher call
+        // just above (which doesn't thread a real frontendStack through
+        // either -- out of scope to fix here).
+        if (in_array($tool, ['write_file', 'write_files', 'patch_file'], true)
+            && (isset($byPath['index.html']) || isset($changedFiles['index.html']))) {
+            $touchedPaths = [];
+            if (($tool === 'write_file' || $tool === 'patch_file') && isset($toolResult['result']['path'])) {
+                $touchedPaths[] = $toolResult['result']['path'];
+            } elseif ($tool === 'write_files') {
+                foreach ($toolResult['result']['files'] ?? [] as $fr) {
+                    if (isset($fr['result']['path'])) $touchedPaths[] = $fr['result']['path'];
+                }
+            }
+            if ($touchedPaths) {
+                $merged = $byPath;
+                foreach ($changedFiles as $p => $c) $merged[$p] = $c;
+                $incrementalNotes = [];
+                foreach ($touchedPaths as $tp) {
+                    if (!isset($merged[$tp])) continue;
+                    foreach (ai_validator_check_incremental_for_write($tp, $merged[$tp], $existingSchema, 'vanilla', $merged) as $incF) {
+                        $incrementalNotes[] = $incF['message'] . (!empty($incF['detail']) ? ' -- ' . $incF['detail'] : '');
+                    }
+                }
+                if ($incrementalNotes) {
+                    $toolResult['mechanical_findings'] = 'Confirmed problem(s) introduced by this write -- fix before doing anything else: '
+                        . implode(' | ', $incrementalNotes);
+                    ai_pipeline_debug_log('gate', 'incremental validator finding: ' . implode(' | ', $incrementalNotes), ['project_id' => $projectId]);
+                }
+            }
+        }
+
         if ($tool === 'smoke_test') {
             $writesSinceLastCheck = 0;
             $lastSmokeTestOk = $toolResult['result']['ok'] ?? null;

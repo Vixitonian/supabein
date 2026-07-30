@@ -323,6 +323,127 @@ function ai_validator_extract_literal_equalities(string $js, string $column): ar
     return array_values(array_unique($m[1]));
 }
 
+// ─── Hard-invariant checks (safe to run incrementally, per write) ───────────
+// Unlike route/nav/script-src wiring (legitimately incomplete mid-build --
+// e.g. index.html lists a script tag for a feature file not written yet, or
+// a nav link precedes the route it will point to), these are NEVER
+// transiently true: a `this` reference, an inline onX="", a bare auth.*
+// reference with no PASSWORD column, and an api.* call against a nonexistent
+// table are wrong the instant they're written, because the schema is fixed
+// before frontend generation ever starts and a file's own syntax doesn't
+// become more or less correct as sibling files arrive. Extracted here so
+// ai_validator_check_project() (the full, end-of-generation/explicit-call
+// pass) and the incremental per-write check below share one implementation
+// instead of two regexes that could drift out of sync.
+// this-ban + inline onX="" ban -- vanilla-stack-only (react has no shared-
+// scope bare-reference trap and never write index.html/template-string
+// markup this pattern applies to). Kept as one small function so
+// ai_validator_check_project()'s existing two loops and the incremental
+// per-write check below share one implementation.
+function ai_validator_check_this_and_onx_ban(string $path, string $content, string $frontendStack): array
+{
+    if ($frontendStack === 'react') return [];
+    $findings = [];
+    $isCanonical = in_array($path, AI_PLATFORM_CANONICAL_PATHS, true);
+    if (str_ends_with($path, '.js') && !$isCanonical && preg_match('/\bthis\b/', $content)) {
+        $findings[] = ai_validator_finding('error', 'script',
+            "{$path} contains the word \"this\"",
+            'RULE 2B bans `this` outright in vanilla-stack code — every handler here is invoked as a bare function reference (route dispatch, addEventListener callbacks), never as module.method(), so `this` is never reliably bound to anything and using it crashes the instant that code path actually runs. Reference the module by its own top-level const name instead.');
+    }
+    if (!str_ends_with($path, '.jsx') && !$isCanonical && preg_match('/(?<=[\s"\'])on[a-z]+\s*=\s*["\']/i', $content, $m)) {
+        $findings[] = ai_validator_finding('error', 'script',
+            "{$path} contains an inline HTML event-handler attribute ({$m[0]})",
+            'Inline onX="..." attributes run in the global object\'s scope, which cannot see a module\'s top-level const/let bindings — clicking/submitting/etc. will silently throw "X is not defined" and do nothing, in whatever file built this markup (static index.html or a template string a feature module assigned to innerHTML). Use addEventListener() instead, attached once the element exists in the DOM.');
+    }
+    return $findings;
+}
+
+// Bare `auth.*` reference with no PASSWORD column in the schema -- see
+// ai_validator_check_project()'s own matching block for the live-caught
+// incident this covers. Vanilla-only, same reasoning as the check above.
+function ai_validator_check_bare_auth_reference(string $path, string $content, bool $hasAuthTable): array
+{
+    if ($hasAuthTable || in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) return [];
+    $authMethodPattern = '/\bauth\.(' . implode('|', AI_VALIDATOR_AUTH_EXPORTS) . ')\b/';
+    if (!preg_match($authMethodPattern, $content, $am)) return [];
+    return [ai_validator_finding('error', 'script',
+        "{$path} references \"auth.{$am[1]}\", but this schema has no PASSWORD column so features/auth/auth.js was never loaded",
+        'There is no `auth` global anywhere on this page — this throws "auth is not defined" the moment the script runs and blanks the whole page. Remove every auth-gated nav element (nav-login, nav-logout, nav-authed-only) and every reference to auth.* from this file; this project has no login system.')];
+}
+
+// api.* call against a table the schema doesn't have -- stack-agnostic
+// (react's canonical core/api.js exposes the same call shape), so this runs
+// regardless of file extension, same as ai_validator_check_project()'s own
+// unrestricted loop for it.
+function ai_validator_check_api_table_mismatch(string $content, array $schema): array
+{
+    $tables = [];
+    foreach ($schema['tables'] ?? [] as $t) $tables[$t['name']] = true;
+    $findings = [];
+    foreach (ai_validator_extract_api_calls($content) as $call) {
+        if (!isset($tables[$call['table']])) {
+            $findings[] = ai_validator_finding('error', 'schema',
+                "Frontend calls api.{$call['op']}('{$call['table']}'), but no \"{$call['table']}\" table exists",
+                'This call will 404 at runtime — likely a typo or a renamed/removed table.');
+        }
+    }
+    return $findings;
+}
+
+// The getElementById check needs ids from every file, not just this one -- a
+// feature file querying an id index.html defines (or vice versa) is the
+// normal, correct pattern this must not flag. $allFiles is {path: content}
+// for the FULL current set (everything already written, this write merged
+// in) -- see ai_validator_check_project()'s own matching block for why
+// "known ids" is collected from literal id="X" occurrences across every
+// file rather than just index.html.
+function ai_validator_check_getelementbyid_for_file(string $path, string $content, array $allFiles): array
+{
+    if (!str_ends_with($path, '.js') || in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) return [];
+    $knownIds = [];
+    foreach ($allFiles as $c) {
+        if (preg_match_all('/\bid=["\']([\w-]+)["\']/', (string)$c, $m)) {
+            foreach ($m[1] as $id) $knownIds[$id] = true;
+        }
+    }
+    $findings = [];
+    if (preg_match_all('/getElementById\(\s*["\']([\w-]+)["\']\s*\)/', $content, $m2)) {
+        foreach (array_unique($m2[1]) as $id) {
+            if (isset($knownIds[$id])) continue;
+            $findings[] = ai_validator_finding('error', 'script',
+                "{$path} calls document.getElementById('{$id}'), but no element with id=\"{$id}\" exists anywhere",
+                'getElementById() returns null for a nonexistent id — the next line (almost always .innerHTML = ... or .addEventListener(...)) throws "Cannot set properties of null" the instant this code runs.');
+        }
+    }
+    return $findings;
+}
+
+// Runs just the hard-invariant subset against ONE just-written file, for
+// callers that want a decision (reject the write / let it through) on the
+// same turn a mismatch is introduced instead of waiting for the explicit
+// validate_frontend call or the end of generation -- see
+// ai_agent_check_hard_invariants_for_write()'s call sites in the frontend/
+// edit agent loops. Returns only 'error'-severity findings (nothing here is
+// ever a 'warning'/'info').
+function ai_validator_check_incremental_for_write(string $path, string $content, array $schema, string $frontendStack, array $allFiles): array
+{
+    $hasAuthTable = false;
+    foreach ($schema['tables'] ?? [] as $t) {
+        foreach ($t['columns'] ?? [] as $c) {
+            if (strtoupper((string)($c['type'] ?? '')) === 'PASSWORD') { $hasAuthTable = true; break 2; }
+        }
+    }
+    // getElementById is a vanilla-only concept (react has no index.html for
+    // the agent to write ids into) -- $frontendStack gate here, same
+    // reasoning as the other vanilla-only checks composed below.
+    return array_merge(
+        ai_validator_check_this_and_onx_ban($path, $content, $frontendStack),
+        $frontendStack === 'react' ? [] : ai_validator_check_bare_auth_reference($path, $content, $hasAuthTable),
+        ai_validator_check_api_table_mismatch($content, $schema),
+        $frontendStack === 'react' ? [] : ai_validator_check_getelementbyid_for_file($path, $content, $allFiles)
+    );
+}
+
 /**
  * Run all deterministic checks. $schema is ['tables' => [...], 'seed_data' => [...]]
  * (a build's sanitized plan has seed_data; ai_schema_from_db() for an edit does
@@ -406,34 +527,18 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     // wording exactly ("banned outright, no exceptions") — no per-incident
     // matching required, so a new variant can't slip through a gap the old
     // regexes didn't anticipate.
+    // Live-caught (job 228): this used to run over EVERY .js path, including
+    // platform-canonical ones (core/router.js, core/api.js, core/errors.js)
+    // that are always force-injected with fixed content at deploy time
+    // regardless of what's written here -- see AI_PLATFORM_CANONICAL_PATHS's
+    // own doc comment. A "this" finding against one of those isn't a bug the
+    // model can ever fix; it sent an autofix attempt into a dozen-turn loop
+    // rereading and search_code'ing those exact files hunting for something
+    // to change that was never going to be there. Both checks (and the
+    // canonical-path exclusion) now live in ai_validator_check_this_and_onx_ban()
+    // so the full validator and the incremental per-write check can't drift.
     foreach ($byPath as $path => $content) {
-        if (!str_ends_with($path, '.js')) continue;
-        // Live-caught (job 228): this loop used to run over EVERY .js path,
-        // including platform-canonical ones (core/router.js, core/api.js,
-        // core/errors.js) that are always force-injected with fixed content
-        // at deploy time regardless of what's written here -- see
-        // AI_PLATFORM_CANONICAL_PATHS's own doc comment. A "this" finding
-        // against one of those isn't a bug the model can ever fix; it sent
-        // an autofix attempt into a dozen-turn loop rereading and
-        // search_code'ing those exact files hunting for something to change
-        // that was never going to be there. Same fix shape as the dangling-
-        // <script src> check just above: skip what the model doesn't
-        // actually control.
-        if (in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
-        if (preg_match('/\bthis\b/', $content)) {
-            $findings[] = ai_validator_finding('error', 'script',
-                "{$path} contains the word \"this\"",
-                'RULE 2B bans `this` outright in vanilla-stack code — every handler here is invoked as a bare function reference (route dispatch, addEventListener callbacks), never as module.method(), so `this` is never reliably bound to anything and using it crashes the instant that code path actually runs. Reference the module by its own top-level const name instead.');
-        }
-    }
-    foreach ($byPath as $path => $content) {
-        if (str_ends_with($path, '.jsx')) continue; // react stack never reaches this block at all (see guard above)
-        if (in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue; // see the "this"-ban loop above for why
-        if (preg_match('/(?<=[\s"\'])on[a-z]+\s*=\s*["\']/i', $content, $m)) {
-            $findings[] = ai_validator_finding('error', 'script',
-                "{$path} contains an inline HTML event-handler attribute ({$m[0]})",
-                'Inline onX="..." attributes run in the global object\'s scope, which cannot see a module\'s top-level const/let bindings — clicking/submitting/etc. will silently throw "X is not defined" and do nothing, in whatever file built this markup (static index.html or a template string a feature module assigned to innerHTML). Use addEventListener() instead, attached once the element exists in the DOM.');
-        }
+        $findings = array_merge($findings, ai_validator_check_this_and_onx_ban($path, $content, $frontendStack));
     }
 
     // ── getElementById() targeting an id that exists nowhere ────────────────
@@ -456,22 +561,10 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     // per-row ids are naturally excluded on both sides — never collected as
     // "known" and never checked as a getElementById() target, since a
     // dynamic id is looked up by class/attribute selector in idiomatic code,
-    // not a literal getElementById() call.
-    $knownIds = [];
-    foreach ($byPath as $content) {
-        if (preg_match_all('/\bid=["\']([\w-]+)["\']/', $content, $m)) {
-            foreach ($m[1] as $id) $knownIds[$id] = true;
-        }
-    }
+    // not a literal getElementById() call. Shared with the incremental
+    // per-write check via ai_validator_check_getelementbyid_for_file().
     foreach ($byPath as $path => $content) {
-        if (!str_ends_with($path, '.js') || in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
-        if (!preg_match_all('/getElementById\(\s*["\']([\w-]+)["\']\s*\)/', $content, $m2)) continue;
-        foreach (array_unique($m2[1]) as $id) {
-            if (isset($knownIds[$id])) continue;
-            $findings[] = ai_validator_finding('error', 'script',
-                "{$path} calls document.getElementById('{$id}'), but no element with id=\"{$id}\" exists anywhere",
-                'getElementById() returns null for a nonexistent id — the next line (almost always .innerHTML = ... or .addEventListener(...)) throws "Cannot set properties of null" the instant this code runs.');
-        }
+        $findings = array_merge($findings, ai_validator_check_getelementbyid_for_file($path, $content, $byPath));
     }
 
     // ── Dangling <script src> — index.html links a file that was never written ──
@@ -597,15 +690,12 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     // definitions. Scoped to the known real auth methods (not a bare `\bauth\b`
     // match) so an unrelated identifier like `authForm` or a comment
     // mentioning "the auth.js file" can't false-positive.
-    if (!$hasAuthTable) {
-        $authMethodPattern = '/\bauth\.(' . implode('|', AI_VALIDATOR_AUTH_EXPORTS) . ')\b/';
-        foreach ($byPath as $path => $content) {
-            if (in_array($path, AI_PLATFORM_CANONICAL_PATHS, true)) continue;
-            if (!is_string($content) || !preg_match($authMethodPattern, $content, $am)) continue;
-            $findings[] = ai_validator_finding('error', 'script',
-                "{$path} references \"auth.{$am[1]}\", but this schema has no PASSWORD column so features/auth/auth.js was never loaded",
-                'There is no `auth` global anywhere on this page — this throws "auth is not defined" the moment the script runs and blanks the whole page. Remove every auth-gated nav element (nav-login, nav-logout, nav-authed-only) and every reference to auth.* from this file; this project has no login system.');
-        }
+    // Shared with the incremental per-write check via
+    // ai_validator_check_bare_auth_reference() -- that function's own
+    // $hasAuthTable-gate makes the loop a no-op when the schema has auth, so
+    // no `if (!$hasAuthTable)` wrapper is needed here anymore.
+    foreach ($byPath as $path => $content) {
+        $findings = array_merge($findings, ai_validator_check_bare_auth_reference($path, $content, $hasAuthTable));
     }
 
     // ── Nav ↔ route consistency (dead links, unreachable routes) ──────────
@@ -651,16 +741,16 @@ function ai_validator_check_project(array $schema, array $frontendFiles, string 
     // api.list/get/create/update/remove('table', ...) call shape the agent
     // writes directly in JSX, so this regex-based check is just as valid
     // there as it is for vanilla.
+    // Table-mismatch findings come from ai_validator_check_api_table_mismatch()
+    // (shared with the incremental per-write check); $apiCallsByTable itself
+    // still needs building here regardless, for the CRUD-completeness check
+    // just below.
     $apiCallsByTable = [];
     foreach ($byPath as $content) {
         foreach (ai_validator_extract_api_calls($content) as $call) {
             $apiCallsByTable[$call['table']][] = $call['op'];
-            if (!isset($tables[$call['table']])) {
-                $findings[] = ai_validator_finding('error', 'schema',
-                    "Frontend calls api.{$call['op']}('{$call['table']}'), but no \"{$call['table']}\" table exists",
-                    'This call will 404 at runtime — likely a typo or a renamed/removed table.');
-            }
         }
+        $findings = array_merge($findings, ai_validator_check_api_table_mismatch($content, $schema));
     }
 
     $opMap = ['insert' => 'create', 'update' => 'update', 'delete' => 'remove'];
