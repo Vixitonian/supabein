@@ -265,6 +265,21 @@ function ai_smoke_test_extract_failing_location(array $result): ?array
     $fallback = null;
     foreach ($errors as $err) {
         if (!is_string($err)) continue;
+        // The preview always calls a fake, nonexistent project id (see this
+        // function's own file's smoke_test doc comment) -- api.* calls 404
+        // with "Table not found" on literally every build, app-correctness
+        // aside. That 404's own stack trace runs entirely through core/api.js
+        // (the platform's fetch wrapper), so when it's the only error with a
+        // file:line in it, this used to confidently point the agent at
+        // core/api.js -- a platform file it can never edit or fix. Live-
+        // caught: the agent read_file'd core/api.js and stalled a turn on
+        // it. Skipping this expected-noise class entirely (not just
+        // deprioritizing it, since the app-code frame that WOULD be useful
+        // is often truncated out of the trace by the time it reaches here)
+        // means a real bug with no other location info correctly falls
+        // through to the generic "read what's most likely responsible"
+        // hint instead of a false-confidence wrong answer.
+        if (preg_match('/\b404\b/', $err) && stripos($err, 'table not found') !== false) continue;
         $matches = [];
         preg_match_all('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $matches, PREG_SET_ORDER);
         if (!$matches) preg_match_all('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $matches, PREG_SET_ORDER);
