@@ -736,19 +736,32 @@ function sendResult(obj) {
     const page = await browser.newPage();
     page.setDefaultTimeout(15000);
     const consoleErrors = [];
-    page.on('pageerror', (e) => consoleErrors.push(String((e && e.message) || e)));
+    // Include the stack, not just the message -- "tasks is not defined" by
+    // itself never says WHERE. Live-observed (jobs 231-234): a recurring
+    // uncaught ReferenceError with no way to tell which file/line threw it
+    // short of manually re-deploying the exact same content to inspect it,
+    // which the ephemeral preview directory (cleaned up within seconds --
+    // confirmed: of the dozens created this session, only one remains on
+    // disk) makes impractical after the fact. Capped to keep this bounded.
+    page.on('pageerror', (e) => consoleErrors.push(String((e && e.stack) || (e && e.message) || e).slice(0, 500)));
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
 
     // smoke_test's preview deploy always substitutes __SB_PID__ with the fixed
     // placeholder project id 0 (no real project/table exists yet at this stage
     // of the pipeline -- see ai_smoke_test_files()), so any request to
-    // /api/v1/data/0/... is GUARANTEED to 404 no matter what the generated code
-    // does. Chromium logs that as a generic, unsuppressable-by-app-code
-    // "Failed to load resource" console entry regardless of whether the app's
-    // own JS catches the resulting rejection -- so without this, the model was
-    // being asked to fix a network failure that literally cannot be fixed in
-    // this environment. Real deployed sites never get project id 0 (ids are
-    // auto-increment starting at 1), so this can never hide a real bug.
+    // /api/v1/data/0/... OR /api/v1/errors/0 (the platform's own core/errors.js
+    // trying to report a real uncaught JS error back to a project that
+    // doesn't exist yet -- live-caught via the failed_resources field added
+    // just before this: the second "Failed to load resource" line
+    // accompanying "tasks is not defined" was THIS request, not a second
+    // manifestation of the original bug) is GUARANTEED to 404 no matter what
+    // the generated code does. Chromium logs that as a generic,
+    // unsuppressable-by-app-code "Failed to load resource" console entry
+    // regardless of whether the app's own JS catches the resulting
+    // rejection -- so without this, the model was being asked to fix a
+    // network failure that literally cannot be fixed in this environment.
+    // Real deployed sites never get project id 0 (ids are auto-increment
+    // starting at 1), so this can never hide a real bug.
     let sawPlaceholderProjectDataError = false;
     // Every failed resource load (which file/path, not just a generic
     // console line) -- console_errors alone never names the URL, so a
@@ -758,7 +771,7 @@ function sendResult(obj) {
     const failedResources = [];
     page.on('response', (r) => {
       try {
-        if (r.status() === 404 && /\/api\/v1\/data\/0\//.test(r.url())) sawPlaceholderProjectDataError = true;
+        if (r.status() === 404 && /\/api\/v1\/(data\/0\/|errors\/0\b)/.test(r.url())) sawPlaceholderProjectDataError = true;
         if (r.status() >= 400 && failedResources.length < 10) {
           failedResources.push({ url: r.url(), status: r.status() });
         }
