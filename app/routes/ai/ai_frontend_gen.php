@@ -305,6 +305,21 @@ function ai_smoke_test_extract_failing_location(array $result): ?array
         // through to the generic "read what's most likely responsible"
         // hint instead of a false-confidence wrong answer.
         if (preg_match('/\b404\b/', $err) && stripos($err, 'table not found') !== false) continue;
+        // A frame whose URL is the bare /staging/ or /current/ directory --
+        // no filename before the :line:col -- is the page document itself,
+        // i.e. an inline <script> block in index.html (a browser reports the
+        // page's own URL as the "file" for inline script errors, same as it
+        // would for an external .js file). Live-observed: a recurring
+        // "ReferenceError: tasks is not defined" whose only frame was
+        // ".../staging/:42:29" -- the .js-only patterns below never matched
+        // it, so next_step_file silently stayed null and the model kept
+        // guessing (repeatedly rewriting tasks.js across many turns/jobs
+        // instead of ever looking at index.html, which is where the
+        // actual line the browser named actually lives). Checked before the
+        // .js patterns since it's the more specific match.
+        if (preg_match('#/(?:staging|current)/:(\d+)#', $err, $m)) {
+            return ['index.html', (int)$m[1]];
+        }
         $matches = [];
         preg_match_all('#/(?:staging|current)/([\w./-]+\.js):(\d+)#', $err, $matches, PREG_SET_ORDER);
         if (!$matches) preg_match_all('#(?:^|[\s(])([\w./-]*[\w-]+\.js):(\d+)#', $err, $matches, PREG_SET_ORDER);
