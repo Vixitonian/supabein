@@ -1,0 +1,15 @@
+{
+  "tool": "validate_frontend",
+  "result": {
+    "error_count": 1,
+    "errors": [
+      {
+        "severity": "error",
+        "category": "script",
+        "message": "features/tasks/tasks.js contains the word \"this\"",
+        "detail": "RULE 2B bans `this` outright in vanilla-stack code — every handler here is invoked as a bare function reference (route dispatch, addEventListener callbacks), never as module.method(), so `this` is never reliably bound to anything and using it crashes the instant that code path actually runs. Reference the module by its own top-level const name instead."
+      }
+    ],
+    "note": "Reflects only the schema as it exists right now — any add_tables/add_columns you plan to include in finish() are not accounted for yet."
+  }
+}

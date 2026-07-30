@@ -1,0 +1,10 @@
+[
+  {
+    "role": "user",
+    "text": "App description: A simple task list app where users can add tasks and mark them complete.\n\nExact validated schema — use ONLY these column names in JS:\nTable \"tasks\": id (INT auto), title VARCHAR(255) NOT NULL, completed BOOLEAN NOT NULL DEFAULT false, created_at (TIMESTAMP auto)\n  policy: authenticated LIST\n  policy: authenticated GET\n  policy: authenticated CREATE\n  policy: authenticated UPDATE\n  policy: authenticated REMOVE\n\nRespond with your first tool action."
+  },
+  {
+    "role": "model",
+    "text": "{\"tool\":\"plan\",\"args\":{\"files\":[{\"path\":\"App.jsx\",\"purpose\":\"root shell: renders nav and the matched route\"},{\"path\":\"features/tasks/TaskList.jsx\",\"purpose\":\"as a user I can see my tasks\"},{\"path\":\"features/tasks/TaskForm.jsx\",\"purpose\":\"as a user I can add a task\"}]}}"
+  }
+]

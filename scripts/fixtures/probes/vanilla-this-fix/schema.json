@@ -1,0 +1,18 @@
+{
+  "tables": [
+    {
+      "name": "tasks",
+      "columns": [
+        { "name": "title", "type": "VARCHAR(255)", "nullable": false, "default": null },
+        { "name": "completed", "type": "BOOLEAN", "nullable": false, "default": "false" }
+      ],
+      "policies": [
+        { "api_role": "authenticated", "operation": "list", "allowed": true, "constraint_sql": null },
+        { "api_role": "authenticated", "operation": "get", "allowed": true, "constraint_sql": null },
+        { "api_role": "authenticated", "operation": "create", "allowed": true, "constraint_sql": null },
+        { "api_role": "authenticated", "operation": "update", "allowed": true, "constraint_sql": null },
+        { "api_role": "authenticated", "operation": "remove", "allowed": true, "constraint_sql": null }
+      ]
+    }
+  ]
+}

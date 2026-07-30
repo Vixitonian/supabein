@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "text": "App description: A simple task list app where users can add tasks and mark them complete.\n\nExact validated schema — use ONLY these column names in JS:\nTable \"tasks\": id (INT auto), title VARCHAR(255) NOT NULL, completed BOOLEAN NOT NULL DEFAULT false, created_at (TIMESTAMP auto)\n  policy: authenticated LIST\n  policy: authenticated GET\n  policy: authenticated CREATE\n  policy: authenticated UPDATE\n  policy: authenticated REMOVE\n\nRespond with your first tool action."
+  },
+  {
+    "role": "model",
+    "text": "{\"tool\":\"write_file\",\"args\":{\"path\":\"features/tasks/tasks.js\",\"_bytes_omitted\":214}}"
+  },
+  {
+    "role": "user",
+    "text": "{\"tool\":\"write_file\",\"result\":{\"syntax_ok\":true,\"bytes\":214}}"
+  },
+  {
+    "role": "model",
+    "text": "{\"tool\":\"validate_frontend\",\"args\":{}}"
+  }
+]
