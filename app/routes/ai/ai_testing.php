@@ -1314,8 +1314,50 @@ function ai_run_browser_test_agent(
 
         if ($tool === 'report_story') {
             $label = (string)($args['label'] ?? 'Untitled story');
+            // The prompt tells the model "label MUST be copied verbatim" but
+            // nothing mechanically enforced that -- live-caught (job 227): the
+            // model correctly reported "as an owner I can delete tasks" (the
+            // real requested story), then during a later blast-radius-scoped
+            // retest of that same story reported a paraphrase, "I can delete a
+            // task". Because the paraphrase didn't string-match the original,
+            // ai_run_test_and_autofix()'s label-keyed merge (which matches
+            // strictly on $old['label'] === $updated['label']) appended it as
+            // a brand-new 4th story instead of updating the 3rd -- inflating
+            // "2 passed, 2 failed" out of a project that only ever had 3
+            // requested stories, and misreporting the job's real outcome.
+            // Resolve any label back to one of the ACTUAL stories this
+            // invocation was given (exact match first, then closest fuzzy
+            // match by similar_text() -- "I can delete a task" vs "as an
+            // owner I can delete tasks" isn't a substring either direction,
+            // but scores 69% similar and is the clear best match against the
+            // other two candidates, which score under 45%) before recording.
+            // Always store the canonical story text, so every downstream
+            // consumer (this function's own dedup below, the autofix merge,
+            // the final tally) only ever sees the real, requested set,
+            // regardless of how the model phrased it this turn. Reject
+            // (rather than guess) below the threshold -- worst case is one
+            // wasted turn asking the model to copy the label verbatim, which
+            // is far cheaper than silently misattributing a result.
+            $canonical = null;
+            foreach ($stories as $s) {
+                if ($s === $label) { $canonical = $s; break; }
+            }
+            if ($canonical === null) {
+                $bestPct = 0.0;
+                foreach ($stories as $s) {
+                    similar_text($s, $label, $pct);
+                    if ($pct > $bestPct) { $bestPct = $pct; $canonical = $s; }
+                }
+                if ($bestPct < 45.0) $canonical = null;
+            }
+            if ($canonical === null) {
+                $turnMsg = json_encode(['tool' => 'report_story', 'error' =>
+                    "\"{$label}\" doesn't match any of the requested stories. Copy the label verbatim " .
+                    'from the numbered list you were given, then call report_story again.']);
+                continue;
+            }
             $entry = [
-                'label'  => $label,
+                'label'  => $canonical,
                 'passed' => (bool)($args['passed'] ?? false),
                 'detail' => (string)($args['detail'] ?? ''),
             ];
@@ -1328,7 +1370,7 @@ function ai_run_browser_test_agent(
             // would double-count one story as two entries in the final tally.
             $dupIndex = null;
             foreach ($recorded as $i => $r) {
-                if ($r['label'] === $label) { $dupIndex = $i; break; }
+                if ($r['label'] === $canonical) { $dupIndex = $i; break; }
             }
             if ($dupIndex !== null) {
                 $recorded[$dupIndex] = $entry;
