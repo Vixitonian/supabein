@@ -750,8 +750,19 @@ function sendResult(obj) {
     // this environment. Real deployed sites never get project id 0 (ids are
     // auto-increment starting at 1), so this can never hide a real bug.
     let sawPlaceholderProjectDataError = false;
+    // Every failed resource load (which file/path, not just a generic
+    // console line) -- console_errors alone never names the URL, so a
+    // failing <script src> and a failing data API call look identical in
+    // the model's own context. Capped defensively; this is diagnostic
+    // detail, not something that should ever grow unbounded.
+    const failedResources = [];
     page.on('response', (r) => {
-      try { if (r.status() === 404 && /\/api\/v1\/data\/0\//.test(r.url())) sawPlaceholderProjectDataError = true; } catch (_) {}
+      try {
+        if (r.status() === 404 && /\/api\/v1\/data\/0\//.test(r.url())) sawPlaceholderProjectDataError = true;
+        if (r.status() >= 400 && failedResources.length < 10) {
+          failedResources.push({ url: r.url(), status: r.status() });
+        }
+      } catch (_) {}
     });
 
 __LOGIN_BLOCK__
@@ -794,6 +805,7 @@ __LOGIN_BLOCK__
       bodyText: bodyText.slice(0, 1500),
       elements,
       console_errors: filteredConsoleErrors.slice(0, 10),
+      failed_resources: failedResources,
     });
   } catch (e) {
     sendResult({ ok: false, error: String((e && e.message) || e) });
