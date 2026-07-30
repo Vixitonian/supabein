@@ -300,6 +300,26 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
                     'read_file it first so your write is based on its real content, not a guess, ' .
                     'then write_file again with your change merged in.'];
             }
+            // Structural elimination of the wasteful-full-rewrite bug class
+            // (job 227: 7x write_file on tasks.js, ~9 min wasted -- see
+            // ai_agent_check_wasteful_full_rewrite(), which only catches this
+            // AFTER the model already paid the generation cost for a mostly-
+            // unchanged file) instead of detecting it after the fact: once a
+            // path exists -- whether pre-existing on disk or already written
+            // earlier this same session -- every further change to it MUST go
+            // through patch_file. There's no case where the model needs to
+            // resubmit content it could instead patch (multiple patch_file
+            // calls cover a multi-hunk change, and patch_file's own find===
+            // whole-current-content is still available for a genuine full
+            // gut-rewrite). write_file is for creating a file that doesn't
+            // exist yet, full stop -- with this in place, the similarity gate
+            // below never has anything left to catch on this path.
+            if (isset($byPath[$path]) || isset($changedFiles[$path])) {
+                return ['tool' => 'write_file', 'error' =>
+                    "\"{$path}\" already exists — use patch_file for every change to it (multiple patch_file " .
+                    'calls if you need to touch several places), even a large change. write_file is only for ' .
+                    'creating a brand-new file that does not exist yet.'];
+            }
             $content = (string)($args['content'] ?? '');
             $changedFiles[$path] = $content;
             $check = ai_check_js_syntax($path, $content, $config);
