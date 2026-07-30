@@ -739,6 +739,21 @@ function sendResult(obj) {
     page.on('pageerror', (e) => consoleErrors.push(String((e && e.message) || e)));
     page.on('console', (msg) => { if (msg.type() === 'error') consoleErrors.push(msg.text().slice(0, 300)); });
 
+    // smoke_test's preview deploy always substitutes __SB_PID__ with the fixed
+    // placeholder project id 0 (no real project/table exists yet at this stage
+    // of the pipeline -- see ai_smoke_test_files()), so any request to
+    // /api/v1/data/0/... is GUARANTEED to 404 no matter what the generated code
+    // does. Chromium logs that as a generic, unsuppressable-by-app-code
+    // "Failed to load resource" console entry regardless of whether the app's
+    // own JS catches the resulting rejection -- so without this, the model was
+    // being asked to fix a network failure that literally cannot be fixed in
+    // this environment. Real deployed sites never get project id 0 (ids are
+    // auto-increment starting at 1), so this can never hide a real bug.
+    let sawPlaceholderProjectDataError = false;
+    page.on('response', (r) => {
+      try { if (r.status() === 404 && /\/api\/v1\/data\/0\//.test(r.url())) sawPlaceholderProjectDataError = true; } catch (_) {}
+    });
+
 __LOGIN_BLOCK__
 
     const cleanPath = TARGET_PATH.replace(/^#?\/?/, '/');
@@ -764,13 +779,21 @@ __LOGIN_BLOCK__
     let bodyText = '';
     try { bodyText = await page.evaluate(() => document.body.innerText); } catch (_) {}
 
+    // Strip ONLY the generic browser-generated resource-load-failure lines
+    // (never a custom console.error call or thrown exception -- those keep a
+    // different message and still block) once a placeholder-project 404 is
+    // confirmed via the Response event above.
+    const filteredConsoleErrors = sawPlaceholderProjectDataError
+      ? consoleErrors.filter((e) => !/^Failed to load resource: the server responded with a status of 404/.test(e))
+      : consoleErrors;
+
     sendResult({
       ok: true,
       url: page.url(),
       http_status: resp ? resp.status() : null,
       bodyText: bodyText.slice(0, 1500),
       elements,
-      console_errors: consoleErrors.slice(0, 10),
+      console_errors: filteredConsoleErrors.slice(0, 10),
     });
   } catch (e) {
     sendResult({ ok: false, error: String((e && e.message) || e) });
