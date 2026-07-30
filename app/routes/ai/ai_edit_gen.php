@@ -814,6 +814,26 @@ function ai_run_edit_generation_agentic(
             }
         }
 
+        // Degenerate/truncated index.html gate: see
+        // ai_agent_check_degenerate_index_html() in ai_shared.php for why.
+        if ($tool === 'write_file' && ($args['path'] ?? null) === 'index.html') {
+            $degenerateError = ai_agent_check_degenerate_index_html((string)($args['content'] ?? ''));
+            if ($degenerateError !== null) {
+                $turnMsg = json_encode(['tool' => $tool, 'error' => $degenerateError]);
+                continue;
+            }
+        }
+        if ($tool === 'write_files' && is_array($args['files'] ?? null)) {
+            foreach ($args['files'] as $f) {
+                if (($f['path'] ?? null) !== 'index.html') continue;
+                $degenerateError = ai_agent_check_degenerate_index_html((string)($f['content'] ?? ''));
+                if ($degenerateError !== null) {
+                    $turnMsg = json_encode(['tool' => $tool, 'error' => $degenerateError]);
+                    continue 2;
+                }
+            }
+        }
+
         if (in_array($tool, ['write_file', 'write_files', 'patch_file'], true)) {
             $writesSinceLastCheck++;
         }

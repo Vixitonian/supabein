@@ -672,6 +672,31 @@ function ai_agent_note_wasteful_rewrite_blocked(string $path, float $pct): strin
          . 'change and "replace" with the fix — it is faster and lower-risk than regenerating the whole file.';
 }
 
+// Degenerate/truncated write gate: live-caught (job 228) — a JSON-parsing
+// degeneracy ("Response was invalid, retrying…") produced a write_file call
+// for index.html whose content was a single stray script tag
+// (`<script src="./core/errors.js"></script>`, 45 bytes) — syntactically
+// valid HTML, so nothing else here (syntax_ok, the validator, any of the
+// gates above) caught it, and because it landed right before the deploy/
+// test cycle it became the FINAL persisted index.html, blanking the entire
+// page and failing every single story. index.html has a known, non-
+// negotiable minimum shape (RULE 1's own STRUCTURE) — a write missing basic
+// page structure is never a legitimate design choice, only ever truncated
+// or degenerate model output. Scoped to index.html specifically (the one
+// file where "this is obviously not a real page" is checkable without any
+// ambiguity); a targeted rule beats a generic size heuristic that would
+// false-positive on a real, deliberately small feature file.
+function ai_agent_check_degenerate_index_html(string $content): ?string
+{
+    if (strlen($content) >= 200 && preg_match('/<html[\s>]/i', $content) && preg_match('/<body[\s>]/i', $content)) {
+        return null;
+    }
+    return "This index.html content is missing basic page structure (<html>, <body>) or is too short to be a "
+         . 'real page — that\'s the signature of a truncated or degenerate response, not a real page. Write the '
+         . 'FULL page: DOCTYPE, html/head/body, the mount point, and every <script src> tag — do not submit a '
+         . 'partial page.';
+}
+
 // The full aiTrace (every tool call, every raw smoke_test result) only
 // reaches ai_jobs.result once the job finishes -- while it's still running,
 // polling ai_jobs.progress (what $report() writes, live) only ever showed a
