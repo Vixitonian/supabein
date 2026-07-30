@@ -8,7 +8,7 @@ declare(strict_types=1);
 // override and ai_smoke_test_extract_failing_location()'s file-pointer
 // logic can't drift apart into two different ideas of "which paths are
 // actually editable."
-const AI_PLATFORM_CANONICAL_PATHS = ['core/router.js', 'core/api.js', 'core/errors.js', 'features/auth/auth.js'];
+const AI_PLATFORM_CANONICAL_PATHS = ['core/router.js', 'core/api.js', 'core/errors.js', 'core/config.js', 'features/auth/auth.js'];
 
 
 // sb_log() (bootstrap.php) writes through PHP's own error_log ini setting,

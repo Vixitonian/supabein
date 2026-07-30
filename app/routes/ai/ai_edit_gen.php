@@ -167,6 +167,7 @@ function ai_run_edit_agent_tool(string $tool, array $args, array $byPath, array 
             case 'core/router.js': return AI_CANONICAL_ROUTER_JS;
             case 'core/api.js':    return AI_CANONICAL_API_JS;
             case 'core/errors.js': return AI_CANONICAL_ERRORS_JS;
+            case 'core/config.js': return AI_CANONICAL_CONFIG_JS;
             case 'features/auth/auth.js':
                 $authInfo = ai_detect_auth($schema);
                 if (!empty($authInfo['table'])) {

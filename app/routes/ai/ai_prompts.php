@@ -1069,6 +1069,29 @@ const router = (() => {
 })();
 JS;
 
+// core/config.js — like router.js/api.js/errors.js, force-injected
+// regardless of what the AI wrote, overwriting it if present. This one
+// used to be the AI's to author (the prompt just told it to write these
+// exact two lines), but that left it just as writable as any app file --
+// and during a confused multi-turn chase after an unrelated bug (job 237,
+// pre-fix #218), the model rewrote it into a bloated, wrong form: hardcoded
+// `window.SB_URL = 'https://.../sites/s916731682/staging/api/v1'` (a
+// smoke_test preview's own throwaway URL it must have copied from a tool
+// result) instead of the required runtime-derived origin, plus redundant
+// SB_PID reassignments in a window 'load' handler. Every real API call
+// from the deployed app then hit that literal, already-deleted preview
+// directory and 404'd -- looked identical to a schema/table problem
+// ("Failed to load tasks: 404 Table not found") even though the real
+// table was fine the whole time. SB_URL must be computed at runtime (see
+// __SB_PID__'s substitution in ai_deploy_files()) so the exact same file
+// works on staging, current, and after a subdomain/custom-domain switch --
+// there's no legitimate app-specific reason for this file to vary, so
+// there's no reason to leave it AI-writable at all.
+const AI_CANONICAL_CONFIG_JS = <<<'JS'
+const SB_URL = window.location.origin + '/api/v1';
+const SB_PID = '__SB_PID__';
+JS;
+
 const AI_CANONICAL_API_JS = <<<'JS'
 const api = (() => {
   const goLogin = () => {

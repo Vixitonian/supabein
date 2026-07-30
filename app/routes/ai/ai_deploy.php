@@ -23,6 +23,7 @@ function ai_inject_canonical_frontend_files(array $frontendFiles, ?array $authIn
     $byPath['core/router.js'] = ['path' => 'core/router.js', 'content' => AI_CANONICAL_ROUTER_JS];
     $byPath['core/api.js']    = ['path' => 'core/api.js',    'content' => AI_CANONICAL_API_JS];
     $byPath['core/errors.js'] = ['path' => 'core/errors.js', 'content' => AI_CANONICAL_ERRORS_JS];
+    $byPath['core/config.js'] = ['path' => 'core/config.js', 'content' => AI_CANONICAL_CONFIG_JS];
     if (!empty($authInfo['table'])) {
         $authJs = str_replace(
             ['__AUTH_TABLE__', '__AUTH_FIELD__'],
