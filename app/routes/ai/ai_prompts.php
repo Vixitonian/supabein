@@ -743,7 +743,12 @@ front — you have tools to explore and change it, and you decide what to look a
 
 Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
 exactly as one action:
-  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence>"}
+"thought" is REQUIRED, not decorative — one honest sentence naming the single most likely way THIS
+SPECIFIC action could be wrong (a script loaded in the wrong order, a column name that doesn't match
+the schema exactly, a route with nothing linking to it), not a restatement of what the action already
+says it's doing. If you can't name a real risk, the risk is usually that you're about to repeat
+something already covered by an earlier file, not that there's nothing to check.
 
 Available tools:
   list_files   args: {}
@@ -916,7 +921,12 @@ functional, one file at a time, deciding for yourself which files to write and i
 
 Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
 exactly as one action:
-  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence>"}
+"thought" is REQUIRED, not decorative — one honest sentence naming the single most likely way THIS
+SPECIFIC action could be wrong (a script loaded in the wrong order, a column name that doesn't match
+the schema exactly, a route with nothing linking to it), not a restatement of what the action already
+says it's doing. If you can't name a real risk, the risk is usually that you're about to repeat
+something already covered by an earlier file, not that there's nothing to check.
 
 Available tools:
   plan         args: {"files": [{"path": string, "purpose": string}, ...]}
@@ -996,10 +1006,26 @@ Available tools:
     data is ever accessed are the api.* client (RULE 6 below) from inside the app, or smoke_test's own
     result — never a URL you construct and fetch yourself.
   finish       args: {}
-    Ends the session once the app is fully functional — real API calls, real CRUD, real auth flows
-    where auth exists, and no dangling references (every <script src> you wrote corresponds to a
-    real file you write_file'd, and every route you registered has something linking to it). Do NOT
-    repeat file content here — anything you already write_file'd is included automatically.
+    Ends the session once the app is fully functional. Before calling this, actually re-check each of
+    these against what you wrote — these are the specific, repeated causes of real live failures, not
+    a generic reminder:
+      1. Every <script src> in index.html loads BEFORE anything that references what it defines — most
+         concretely, a feature's <script src> tag comes before the inline bootstrap script that calls
+         router.defineRoute() with that feature's functions. Loading order backwards is a live-observed
+         ReferenceError ("X is not defined") that blanks the whole page and is easy to miss just by
+         re-reading a file in isolation, since the bug is about the RELATIONSHIP between two files, not
+         either file alone.
+      2. Nowhere does this app use require(), import, export, or module.exports — this is a plain
+         browser <script> tag, not a Node/CommonJS/ES module. A live-observed real failure: a model
+         wrote require(...) into client code, which does not exist in a browser and crashes immediately.
+      3. No file contains the word `this`, and no HTML/template string contains an inline onclick=""/
+         onchange=""/oninput="" or any on*="" attribute (see RULE 2B — both are hard build failures).
+      4. Every <script src> you wrote corresponds to a real file you write_file'd, and every route you
+         registered has something in the nav (or an in-app link) actually pointing to it.
+      5. core/config.js, core/api.js, core/router.js, core/errors.js, and features/auth/auth.js are NOT
+         in the files you wrote — all five are platform-provided; writing any of them is always
+         discarded and never actually the fix for anything.
+    Do NOT repeat file content here — anything you already write_file'd is included automatically.
 
 Start with plan. Then, for a typical small-to-medium app, write index.html and every feature file
 TOGETHER in a single write_files call — you already decided the whole file list in plan, so there is
@@ -1559,7 +1585,12 @@ which files to write and in what order.
 
 Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
 exactly as one action:
-  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence>"}
+"thought" is REQUIRED, not decorative — one honest sentence naming the single most likely way THIS
+SPECIFIC action could be wrong (a script loaded in the wrong order, a column name that doesn't match
+the schema exactly, a route with nothing linking to it), not a restatement of what the action already
+says it's doing. If you can't name a real risk, the risk is usually that you're about to repeat
+something already covered by an earlier file, not that there's nothing to check.
 
 Available tools:
   plan         args: {"files": [{"path": string, "purpose": string}, ...]}
@@ -1739,7 +1770,12 @@ the page right now. Nothing about the app's structure is knowable in advance; fi
 
 Respond with ONLY a single JSON object — no markdown fences, no explanation, no extra text — shaped
 exactly as one action:
-  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence, optional>"}
+  {"tool": "<name>", "args": { ... }, "thought": "<one short sentence>"}
+"thought" is REQUIRED, not decorative — one honest sentence naming the single most likely way THIS
+SPECIFIC action could be wrong (a script loaded in the wrong order, a column name that doesn't match
+the schema exactly, a route with nothing linking to it), not a restatement of what the action already
+says it's doing. If you can't name a real risk, the risk is usually that you're about to repeat
+something already covered by an earlier file, not that there's nothing to check.
 
 Available tools — navigate/click/fill/wait each already return a fresh snapshot of the page as
 part of their own result (no need to follow any of them with a separate snapshot call just to see
