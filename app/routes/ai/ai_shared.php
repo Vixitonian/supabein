@@ -553,6 +553,35 @@ function ai_agent_note_parse_failure(int &$consecutiveFailures, string $errorMsg
          . 'switch to a completely different action, or call finish with whatever is already staged.)';
 }
 
+// Neither agent loop ever told the model its own turn budget existed at
+// all -- the header prose says "you have a limited number of turns" but
+// never the actual number (60) or where the model currently stands in it.
+// Live-observed (jobs 238/239, both post-fix #220): "Turn limit reached --
+// finishing with what was staged" after producing only 2 files, on a task
+// the SAME orchestrator clears in 4 turns when the files are written
+// correctly and batched via write_files -- strong evidence the model was
+// spending its budget on small, granular actions (one file at a time, or
+// extra defensive reads) without any signal that it was running low until
+// the loop cut if off from outside. A pacing note the model can actually
+// see and react to is a much cheaper intervention than hoping the prompt's
+// abstract "don't waste turns" advice gets internalized on its own.
+// Deliberately NOT written back into $turnMsg permanently -- each caller
+// appends this fresh, per-call, so it never accumulates in $loopHistory
+// (which stores the turn's real content) and a retried turn (parse
+// failure, rate limit) gets an accurate NEW turn number rather than a
+// stale one baked in from before the retry.
+function ai_agent_turn_budget_note(int $turn, int $maxTurns): string
+{
+    $remaining = $maxTurns - $turn;
+    $note = "\n\n[Turn {$turn}/{$maxTurns} -- {$remaining} remaining.]";
+    if ($remaining <= 15) {
+        $note .= ' Budget is getting tight. Stop writing one file at a time -- batch every remaining file into as '
+               . 'few write_files calls as possible (one call, all files together, is usually enough) and head '
+               . 'straight for smoke_test then finish instead of continuing to iterate file-by-file.';
+    }
+    return $note;
+}
+
 // finish() has its own rejection branch in both agent loops, separate from
 // the generic stuck-repeat check, so a rejected finish() was never covered
 // by any escalation at all — live-observed: one build called finish() 14

@@ -1001,12 +1001,19 @@ Available tools:
     real file you write_file'd, and every route you registered has something linking to it). Do NOT
     repeat file content here — anything you already write_file'd is included automatically.
 
-Start with plan, then write index.html first, then each feature file in turn, wiring up its route and
-nav entry as you go. Use search_code/read_file to stay consistent with what you've already written
-instead of re-deriving it from memory. You have a limited number of turns, so don't re-check
-something you're already sure of. If a write_file's syntax check fails, that error is the truth —
-fix the actual problem it names, don't just retry the same content. Before you call finish, check
-every route you registered actually has something linking to it, and every script tag you wrote
+Start with plan. Then, for a typical small-to-medium app, write index.html and every feature file
+TOGETHER in a single write_files call — you already decided the whole file list in plan, so there is
+nothing left to learn between files that would justify writing them one at a time and re-entering the
+loop for each. A build that finishes in plan -> one write_files call with everything -> smoke_test ->
+finish (4 turns total) is the norm to aim for, not an unusually lucky outcome. Only fall back to
+separate write_file/write_files calls per file when the app is large enough that one response would be
+awkwardly long, or when you're fixing something smoke_test found and only need to touch one file.
+Use search_code/read_file to stay consistent with what you've already written instead of re-deriving it
+from memory. Turn budget is real and shown to you each turn — see it, and slow, granular
+one-file-at-a-time writes are the main way it gets burned before the app is even close to done. If a
+write_file's syntax check fails, that error is the truth — fix the actual problem it names, don't just
+retry the same content. Before you call finish, check every route you registered actually has something
+linking to it, and every script tag you wrote
 actually corresponds to a file you wrote.
 
 The FRONTEND RULES below apply to every write_file call:

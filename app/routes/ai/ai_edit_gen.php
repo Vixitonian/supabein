@@ -655,7 +655,8 @@ function ai_run_edit_generation_agentic(
             // Same one-time-only attach as the frontend build agent — see its
             // matching comment in ai_run_build_frontend_agentic().
             $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
-            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory, $turnMsg, $turnAttachments, true,
+            $action = $client->generateJsonWithHistory($editAgentPrompt, $loopHistory,
+                $turnMsg . ai_agent_turn_budget_note($turn, AI_EDIT_AGENT_MAX_TURNS), $turnAttachments, true,
                 ai_agent_retry_reporter($report, 'changes', 'Generating changes…'));
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
