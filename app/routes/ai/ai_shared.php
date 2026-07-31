@@ -582,6 +582,45 @@ function ai_agent_turn_budget_note(int $turn, int $maxTurns): string
     return $note;
 }
 
+// A turn count alone is still just a number, not a picture of where the
+// build actually stands -- the model has no equivalent of a developer
+// glancing at their file tree / git status to get oriented, only a flat
+// stream of individual tool results with nothing tying them back to the
+// commitment it made in "plan". The "plan" tool's own file list used to be
+// discarded the instant it was received (only a $hasPlanned boolean was
+// kept) -- there was no way to ever compute "of what you said you'd build,
+// here's what's actually done" after that first turn. Captured now (see
+// $plannedFiles in ai_run_build_frontend_agentic()) specifically so this
+// can be reconstructed every turn: what's written, what's still missing
+// against the model's own stated plan, anything written that wasn't
+// planned (not necessarily wrong, but worth the model knowing it drifted),
+// and whether the last smoke_test verdict is still current or stale
+// relative to files touched since. This is the same information a
+// developer doing a quick top-down review of someone else's in-progress
+// branch would look for first -- not the last diff, the overall shape.
+function ai_agent_status_summary(array $plannedFiles, array $changedFiles, ?bool $lastSmokeTestOk, int $writesSinceLastCheck): string
+{
+    if (empty($plannedFiles)) return '';
+    $written = array_keys($changedFiles);
+    $missing = array_values(array_diff($plannedFiles, $written));
+    $extra   = array_values(array_diff($written, $plannedFiles));
+
+    $parts = [count($written) . '/' . count($plannedFiles) . ' planned file(s) written'];
+    if ($missing) $parts[] = 'still missing: ' . implode(', ', array_slice($missing, 0, 6));
+    if ($extra)   $parts[] = 'written but not in your original plan: ' . implode(', ', array_slice($extra, 0, 6));
+
+    if ($lastSmokeTestOk === null) {
+        $parts[] = 'smoke_test has not been called yet this session';
+    } elseif ($writesSinceLastCheck > 0) {
+        $parts[] = ($lastSmokeTestOk ? 'smoke_test last passed, but' : 'smoke_test last FAILED, and')
+                 . " {$writesSinceLastCheck} write(s) have happened since -- that verdict is stale, re-run it before finish";
+    } else {
+        $parts[] = $lastSmokeTestOk ? 'smoke_test currently passing' : 'smoke_test currently FAILING -- fix before finish';
+    }
+
+    return "\n[Status, the way a developer glancing at your progress right now would see it: " . implode('; ', $parts) . '.]';
+}
+
 // finish() has its own rejection branch in both agent loops, separate from
 // the generic stuck-repeat check, so a rejected finish() was never covered
 // by any escalation at all — live-observed: one build called finish() 14

@@ -403,6 +403,7 @@ function ai_run_build_frontend_agentic(
     $lastSmokeTestOk = null; // null = never called this session; true/false = its last result
     $lastSmokeTestWasConnectionError = false; // true if the last failure was Browserless itself, not the app
     $hasPlanned = false; // must submit a "plan" action before any other tool -- see gate below
+    $plannedFiles = []; // paths committed to in the "plan" action -- see ai_agent_status_summary() below
     $consecutiveFinishRejections = 0; // escalates a repeatedly-rejected finish() -- see gate below
     $lastFailedFile = null; // the file a failing smoke_test's console_errors pointed at, if any
     $lastFailedFileSnapshot = null; // that file's content at the moment of the failure -- see finish() gate below
@@ -420,8 +421,11 @@ function ai_run_build_frontend_agentic(
             // since the model already has whatever it extracted from them in
             // its own running context after turn 1.
             $turnAttachments = $turn === 1 ? ($refs['attachments'] ?? []) : [];
+            $turnMsgWithStatus = $turnMsg
+                . ai_agent_status_summary($plannedFiles, $changedFiles, $lastSmokeTestOk, $writesSinceLastCheck)
+                . ai_agent_turn_budget_note($turn, AI_BUILD_FRONTEND_AGENT_MAX_TURNS);
             $action = $client->generateJsonWithHistory($agentPrompt, $loopHistory,
-                $turnMsg . ai_agent_turn_budget_note($turn, AI_BUILD_FRONTEND_AGENT_MAX_TURNS), $turnAttachments, true,
+                $turnMsgWithStatus, $turnAttachments, true,
                 ai_agent_retry_reporter($report, 'frontend', 'Generating frontend code…'));
         } catch (\Throwable $e) {
             if (ai_is_unrecoverable_provider_error($e->getMessage())) {
@@ -479,6 +483,9 @@ function ai_run_build_frontend_agentic(
         // executor below.
         if ($tool === 'plan') {
             $hasPlanned = true;
+            $plannedFiles = array_values(array_unique(array_filter(array_map(
+                fn($f) => is_array($f) ? (string)($f['path'] ?? '') : '', $args['files'] ?? []
+            ))));
             $turnMsg = json_encode(['tool' => 'plan', 'result' => ['ok' => true,
                 'note' => 'Plan received. Proceed to write these files now.']]);
             continue;
