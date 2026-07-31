@@ -165,11 +165,24 @@ class ZhipuClient
             $text         = $msg['content'] ?? null;
             $finishReason = $choice['finish_reason'] ?? null;
 
+            // cached_tokens: Zhipu's context caching is automatic (no
+            // cache_control param -- sending one is REJECTED, unlike
+            // Anthropic/OpenAI) based on detecting an identical/near-identical
+            // prefix across requests. Every agent loop already sends the same
+            // $agentPrompt (system prompt) unchanged on every turn with only
+            // the trailing user message growing, which is exactly the
+            // cache-friendly shape their docs describe -- but nothing has
+            // ever captured whether that's actually resulting in cache hits.
+            // Purely additive visibility, not a behavior change: this is the
+            // prerequisite for ever answering "is the repeated system prompt
+            // costing what it looks like it should, or is caching already
+            // absorbing most of it" with real numbers instead of a guess.
             $raw = $envelope['usage'] ?? [];
             $this->lastUsage = [
                 'prompt_tokens'     => (int)($raw['prompt_tokens'] ?? 0),
                 'completion_tokens' => (int)($raw['completion_tokens'] ?? 0),
                 'total_tokens'      => (int)($raw['total_tokens'] ?? 0),
+                'cached_tokens'     => (int)($raw['prompt_tokens_details']['cached_tokens'] ?? 0),
             ];
 
             // The reasoning trace ran the whole max_tokens budget out before
