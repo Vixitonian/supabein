@@ -426,7 +426,8 @@ Always pair with a hamburger (☰) button visible only on mobile (md:hidden).
 STRUCTURE (define each name once, in its own file)
 ═══════════════════════════════════════════════════════
     index.html                         ← SPA entry + bootstrap ONLY (no module re-declarations)
-    core/config.js                     ← SB_URL / SB_KEY / SB_PID globals (declared once, here)
+    core/config.js                     ← PLATFORM-PROVIDED — do not include this path in your output
+                                       (declares SB_URL/SB_PID; loaded before api.js automatically)
     core/errors.js                     ← PLATFORM-PROVIDED — do not include this path in your output
                                        (captures errors automatically; the platform force-inserts its
                                        <script> tag as the first script in index.html at deploy time,
@@ -440,14 +441,18 @@ Load with RELATIVE paths in dependency order (config → api → router → auth
 Absolute paths like /core/config.js break the site. No frameworks, no npm, no build tools.
 index.html still needs <script src="./core/api.js"> and <script src="./core/router.js"> tags in that
 load order — the platform writes the files to disk, you just need to reference them normally.
+Unlike those two, core/config.js and core/errors.js need no <script> tag from you at all — the
+platform force-inserts both automatically on every deploy (errors.js first, config.js second, both
+before anything else), the same guarantee described for errors.js above.
 
-Do NOT read_file or read_files core/router.js, core/api.js, core/errors.js, or features/auth/auth.js
-either — not just "do not write" them. They are identical on every project and force-injected at
-deploy time regardless of what's on disk, so their content can never be the bug and never varies from
-what's already documented here: router.defineRoute/navigate/onHashChange above, api.list/get/create/
-update/remove in RULE 6 below, errors.js's automatic capture (nothing to call), auth.js's exported
-functions wherever this project's own auth rules are documented. Reading any of them spends a full
-turn to learn nothing you don't already have — live-observed burning 4-5 wasted turns doing exactly
+Do NOT read_file or read_files core/router.js, core/api.js, core/errors.js, core/config.js, or
+features/auth/auth.js either — not just "do not write" them. They are identical on every project and
+force-injected at deploy time regardless of what's on disk, so their content can never be the bug and
+never varies from what's already documented here: router.defineRoute/navigate/onHashChange above,
+api.list/get/create/update/remove in RULE 6 below, errors.js's automatic capture (nothing to call),
+config.js's two globals (PLACEHOLDERS section below), auth.js's exported functions wherever this
+project's own auth rules are documented. Reading any of them spends a full turn to learn nothing you
+don't already have — live-observed burning 4-5 wasted turns doing exactly
 this on a bug report that had nothing to do with routing, auth, or error reporting.
 
 ═══════════════════════════════════════════════════════
@@ -613,11 +618,11 @@ wireframe, even if it's technically correct and bug-free. Every major page needs
 ═══════════════════════════════════════════════════════
 PLACEHOLDERS + OWNERSHIP
 ═══════════════════════════════════════════════════════
-- In core/config.js use these EXACT two lines (SB_PID is substituted at deploy time;
-  SB_URL is derived at runtime so the app works on both HTTP and HTTPS):
-    const SB_URL = window.location.origin + '/api/v1';
-    const SB_PID = '__SB_PID__';
-  Declared once. Never redeclare anywhere. No SB_KEY — public requests need no auth token.
+- core/config.js is PLATFORM-PROVIDED (see STRUCTURE above) — do not write it or add its <script>
+  tag yourself. It declares exactly two globals, already in scope for every feature file: SB_URL
+  (derived from window.location.origin at runtime, so the app works on both HTTP and HTTPS) and
+  SB_PID (the real project id, substituted at deploy time). Never redeclare either name anywhere.
+  No SB_KEY — public requests need no auth token.
 - Auth (only load features/auth/auth.js via <script src> when the schema has a table with a
   PASSWORD column; if no PASSWORD column exists, omit the script tag and both routes entirely).
   See RULE 3 — the file itself is platform-provided, never written by you. The real users-table

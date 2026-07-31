@@ -223,7 +223,10 @@ function ai_smoke_test_files(array $frontendFiles, array $config, ?array $authIn
             $parentDir = dirname($fullPath);
             if (!is_dir($parentDir)) { mkdir($parentDir, 0755, true); clearstatcache(); }
             $rawContent = (string)($fileDef['content'] ?? '');
-            if ($relPath === 'index.html') $rawContent = ai_ensure_error_script_tag($rawContent);
+            if ($relPath === 'index.html') {
+                $rawContent = ai_ensure_config_script_tag($rawContent);
+                $rawContent = ai_ensure_error_script_tag($rawContent);
+            }
             $content = str_replace('__SB_PID__', '0', $rawContent);
             file_put_contents($fullPath, $content);
         }

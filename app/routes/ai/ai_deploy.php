@@ -59,6 +59,31 @@ function ai_ensure_error_script_tag(string $html): string
     return $tag . $html;
 }
 
+// Same guarantee as ai_ensure_error_script_tag(), for the same reason: now that
+// core/config.js's CONTENT is force-injected (fix #219), the prompt correctly
+// tells the model not to write that file -- but stopping there would leave the
+// model also responsible for remembering to add a <script src> tag for a file
+// it was just told is none of its business, exactly the ambiguity that already
+// caused a live "SB_URL is not defined" crash (core/api.js references the bare
+// global SB_URL/SB_PID declared here) once this session. Call this BEFORE
+// ai_ensure_error_script_tag() so errors.js ends up first (earliest possible
+// error capture, matching its own doc comment) and config.js second --
+// harmless either way since neither file's IIFE reads the other's globals, but
+// this keeps the deployed order matching what STRUCTURE already documents.
+function ai_ensure_config_script_tag(string $html): string
+{
+    if (str_contains($html, 'core/config.js')) return $html;
+    $tag = '<script src="./core/config.js"></script>' . "\n    ";
+    if (preg_match('/<script\b/i', $html, $m, PREG_OFFSET_CAPTURE)) {
+        $pos = $m[0][1];
+        return substr($html, 0, $pos) . $tag . substr($html, $pos);
+    }
+    if (stripos($html, '</head>') !== false) {
+        return str_ireplace('</head>', "    {$tag}</head>", $html);
+    }
+    return $tag . $html;
+}
+
 // ─── File-level helpers (filesystem) ────────────────────────────────────────
 
 function ai_deploy_files(
@@ -145,6 +170,7 @@ function ai_deploy_files(
 
         $rawContent = (string)($fileDef['content'] ?? '');
         if ($relPath === 'index.html' && $frontendStack !== 'react') {
+            $rawContent = ai_ensure_config_script_tag($rawContent);
             $rawContent = ai_ensure_error_script_tag($rawContent);
         }
         $content = str_replace(
@@ -180,7 +206,8 @@ function ai_deploy_files(
         $indexPath = $deployDir . '/index.html';
         if (is_file($indexPath)) {
             $indexHtml = file_get_contents($indexPath);
-            $patched   = ai_ensure_error_script_tag((string)$indexHtml);
+            $patched   = ai_ensure_config_script_tag((string)$indexHtml);
+            $patched   = ai_ensure_error_script_tag($patched);
             if ($patched !== $indexHtml) {
                 file_put_contents($indexPath, $patched);
             }
